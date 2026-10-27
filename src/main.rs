@@ -7,13 +7,10 @@ use gpui_kit::{
     Styled as _, Window, WindowOptions, div,
 };
 use release_desk_application::event::EventBroadcaster;
-use release_desk_application::use_case::auth::{
-    AuthResult, AuthenticateCommand, AuthenticateProviderUseCase, OAuthConfig,
-};
+use release_desk_application::use_case::auth::AuthenticateProviderUseCase;
 use release_desk_core::app_catalog::{AppActionState, AppStoreItem};
 use release_desk_core::port::SecretStorePort as _;
-use release_desk_core::project::{AccountLogin, DiskLayout};
-use release_desk_core::provider::{AuthMethod, GitProviderKind};
+use release_desk_core::project::DiskLayout;
 use release_desk_store::auth::{ModalWebviewAuthPort, SystemBrowserAuthPort};
 use release_desk_store::credentials::OsSecretStore;
 use repo_manager::components::{render_header, render_sidebar};
@@ -62,11 +59,13 @@ struct ReleaseDesk {
     nav_history: Vec<NavLocation>,
     nav_index: usize,
     secret_store: Arc<OsSecretStore>,
+    #[allow(dead_code)]
     auth_uc: AuthenticateProviderUseCase,
     selected_saved_account: Option<String>,
     saved_credential_ref: Option<String>,
     auth_mode_choice: AuthModeChoice,
     auth_status_message: Option<String>,
+    detected_system_credential: Option<(String, String)>,
 }
 
 impl ReleaseDesk {
@@ -100,6 +99,8 @@ impl ReleaseDesk {
             webview_auth.clone(),
             EventBroadcaster::default(),
         );
+        let detected_system_credential =
+            OsSecretStore::discover_system_git_credentials("github.com");
         let app = Self {
             settings,
             projects,
@@ -131,6 +132,7 @@ impl ReleaseDesk {
             saved_credential_ref: None,
             auth_mode_choice: AuthModeChoice::SavedAccount,
             auth_status_message: None,
+            detected_system_credential,
         };
         app.apply_appearance(window, cx);
         app
@@ -254,6 +256,9 @@ impl ReleaseDesk {
             .unwrap_or_default()
             .to_string();
 
+        self.detected_system_credential =
+            OsSecretStore::discover_system_git_credentials(self.setup_provider.default_host());
+
         if let Some(ref orig) = original {
             self.saved_credential_ref = orig.credential_ref.clone();
             self.selected_saved_account = Some(orig.account.clone());
@@ -268,6 +273,17 @@ impl ReleaseDesk {
                 self.auth_status_message = Some(format!(
                     "✓ Using Keychain credentials for @{}. No token needed!",
                     first.handle
+                ));
+            } else if let Some((ref username, ref token)) = self.detected_system_credential {
+                let cred_key =
+                    format!("release_desk_{}_{}", self.setup_provider.as_str(), username);
+                let _ = self.secret_store.set_secret(&cred_key, token);
+                self.saved_credential_ref = Some(cred_key);
+                self.selected_saved_account = Some(username.clone());
+                self.auth_mode_choice = AuthModeChoice::SavedAccount;
+                self.auth_status_message = Some(format!(
+                    "✓ Auto-connected system Git credentials for @{} (5,000 req/hr).",
+                    username
                 ));
             } else {
                 self.selected_saved_account = None;
@@ -305,6 +321,9 @@ impl ReleaseDesk {
         cx: &mut Context<Self>,
     ) {
         self.setup_provider = provider;
+        self.detected_system_credential =
+            OsSecretStore::discover_system_git_credentials(provider.default_host());
+
         let saved = find_saved_accounts_for_provider(&self.projects, provider);
         if let Some(first) = saved.first() {
             self.selected_saved_account = Some(first.handle.clone());
@@ -317,6 +336,19 @@ impl ReleaseDesk {
             self.account_input.update(cx, |input, cx| {
                 input.set_value(first.handle.clone(), window, cx)
             });
+        } else if let Some((ref username, ref token)) = self.detected_system_credential {
+            let cred_key = format!("release_desk_{}_{}", provider.as_str(), username);
+            let _ = self.secret_store.set_secret(&cred_key, token);
+            self.saved_credential_ref = Some(cred_key);
+            self.selected_saved_account = Some(username.clone());
+            self.auth_mode_choice = AuthModeChoice::SavedAccount;
+            self.auth_status_message = Some(format!(
+                "✓ Auto-connected system Git credentials for @{} (5,000 req/hr).",
+                username
+            ));
+            self.account_input.update(cx, |input, cx| {
+                input.set_value(username.clone(), window, cx)
+            });
         } else {
             self.selected_saved_account = None;
             self.saved_credential_ref = None;
@@ -324,6 +356,26 @@ impl ReleaseDesk {
             self.auth_status_message = None;
             self.account_input
                 .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        }
+        cx.notify();
+    }
+
+    fn connect_system_credential(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((ref username, ref token)) = self.detected_system_credential {
+            let cred_key = format!("release_desk_{}_{}", self.setup_provider.as_str(), username);
+            let _ = self.secret_store.set_secret(&cred_key, token);
+            self.saved_credential_ref = Some(cred_key);
+            self.selected_saved_account = Some(username.clone());
+            self.auth_mode_choice = AuthModeChoice::SavedAccount;
+            self.auth_status_message = Some(format!(
+                "✓ Connected with {} API as @{} (5,000 req/hr). Token stored in Keychain.",
+                self.setup_provider.label(),
+                username
+            ));
+            self.account_input.update(cx, |input, cx| {
+                input.set_value(username.clone(), window, cx)
+            });
+            self.message = format!("Connected with system Git credentials for @{username}.");
         }
         cx.notify();
     }
@@ -364,153 +416,36 @@ impl ReleaseDesk {
         cx.notify();
     }
 
-    fn trigger_browser_auth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let handle = self.account_input.read(cx).value().trim().to_string();
-        let account = if handle.is_empty() {
-            "default-user".to_string()
-        } else {
-            handle
-        };
-        let provider_kind = GitProviderKind::from(self.setup_provider);
-        let account_login = match AccountLogin::new(&account) {
-            Ok(l) => l,
-            Err(_) => match AccountLogin::new("default-user") {
-                Ok(l) => l,
-                Err(e) => {
-                    self.message = format!("Invalid account handle: {e}");
-                    cx.notify();
-                    return;
-                }
-            },
-        };
-        let oauth = OAuthConfig {
-            client_id: "release-desk-app".into(),
-            auth_url: match self.setup_provider {
-                ProviderChoice::GitLab => "https://gitlab.com/oauth/authorize".into(),
-                ProviderChoice::Bitbucket => "https://bitbucket.org/site/oauth2/authorize".into(),
-                _ => "https://github.com/login/oauth/authorize".into(),
-            },
-            token_url: match self.setup_provider {
-                ProviderChoice::GitLab => "https://gitlab.com/oauth/token".into(),
-                ProviderChoice::Bitbucket => {
-                    "https://bitbucket.org/site/oauth2/access_token".into()
-                }
-                _ => "https://github.com/login/oauth/access_token".into(),
-            },
-            redirect_uri: "http://127.0.0.1:4567/callback".into(),
-            scopes: vec!["repo".into(), "read:user".into()],
-        };
-        let cmd = AuthenticateCommand {
-            provider: provider_kind,
-            account_login: account_login.clone(),
-            method: AuthMethod::OAuthBrowser,
-            oauth_config: Some(oauth),
-        };
-        match self.auth_uc.execute(cmd) {
-            Ok(AuthResult::Success {
-                credential_ref,
-                account: logged_in,
-                ..
-            }) => {
-                let acc_name = logged_in.as_str().to_string();
-                self.account_input.update(cx, |input, cx| {
-                    input.set_value(acc_name.clone(), window, cx)
-                });
-                self.saved_credential_ref = Some(credential_ref);
-                self.selected_saved_account = Some(acc_name.clone());
-                self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
-                self.auth_status_message = Some(format!(
-                    "✓ Authenticated with {} (@{}) via Browser. Token saved to macOS Keychain.",
-                    self.setup_provider.label(),
-                    acc_name
-                ));
-                self.message = "Authenticated successfully via browser.".into();
-            }
-            Ok(AuthResult::Failed { error, .. }) => {
-                self.message = format!("Browser authentication failed: {error}");
-            }
-            Ok(AuthResult::Cancelled) => {
-                self.message = "Browser authentication was cancelled.".into();
-            }
-            Err(e) => {
-                self.message = format!("Authentication error: {e}");
-            }
-        }
+    fn trigger_browser_auth(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let url = self.setup_provider.token_creation_url();
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open").arg(url).spawn();
+        #[cfg(not(target_os = "macos"))]
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+
+        self.auth_mode_choice = AuthModeChoice::Token;
+        self.auth_status_message = Some(
+            "Opened browser to create token on GitHub. Paste token below to save to Keychain."
+                .into(),
+        );
+        self.message =
+            "Browser opened to token creation page. Copy and paste your token below.".into();
         cx.notify();
     }
 
-    fn trigger_webview_auth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let handle = self.account_input.read(cx).value().trim().to_string();
-        let account = if handle.is_empty() {
-            "default-user".to_string()
-        } else {
-            handle
-        };
-        let provider_kind = GitProviderKind::from(self.setup_provider);
-        let account_login = match AccountLogin::new(&account) {
-            Ok(l) => l,
-            Err(_) => match AccountLogin::new("default-user") {
-                Ok(l) => l,
-                Err(e) => {
-                    self.message = format!("Invalid account handle: {e}");
-                    cx.notify();
-                    return;
-                }
-            },
-        };
-        let oauth = OAuthConfig {
-            client_id: "release-desk-app".into(),
-            auth_url: match self.setup_provider {
-                ProviderChoice::GitLab => "https://gitlab.com/oauth/authorize".into(),
-                ProviderChoice::Bitbucket => "https://bitbucket.org/site/oauth2/authorize".into(),
-                _ => "https://github.com/login/oauth/authorize".into(),
-            },
-            token_url: match self.setup_provider {
-                ProviderChoice::GitLab => "https://gitlab.com/oauth/token".into(),
-                ProviderChoice::Bitbucket => {
-                    "https://bitbucket.org/site/oauth2/access_token".into()
-                }
-                _ => "https://github.com/login/oauth/access_token".into(),
-            },
-            redirect_uri: "http://127.0.0.1:4567/callback".into(),
-            scopes: vec!["repo".into(), "read:user".into()],
-        };
-        let cmd = AuthenticateCommand {
-            provider: provider_kind,
-            account_login: account_login.clone(),
-            method: AuthMethod::OAuthWebview,
-            oauth_config: Some(oauth),
-        };
-        match self.auth_uc.execute(cmd) {
-            Ok(AuthResult::Success {
-                credential_ref,
-                account: logged_in,
-                ..
-            }) => {
-                let acc_name = logged_in.as_str().to_string();
-                self.account_input.update(cx, |input, cx| {
-                    input.set_value(acc_name.clone(), window, cx)
-                });
-                self.saved_credential_ref = Some(credential_ref);
-                self.selected_saved_account = Some(acc_name.clone());
-                self.auth_mode_choice = AuthModeChoice::OAuthWebview;
-                self.auth_status_message = Some(format!(
-                    "✓ Authenticated with {} (@{}) via In-App Webview. Token saved to macOS Keychain.",
-                    self.setup_provider.label(),
-                    acc_name
-                ));
-                self.message = "Authenticated successfully via in-app webview.".into();
-            }
-            Ok(AuthResult::Failed { error, .. }) => {
-                self.message = format!("Webview authentication failed: {error}");
-            }
-            Ok(AuthResult::Cancelled) => {
-                self.message = "Webview authentication was cancelled.".into();
-            }
-            Err(e) => {
-                self.message = format!("Authentication error: {e}");
-            }
-        }
+    fn trigger_webview_auth(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let url = self.setup_provider.token_creation_url();
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open").arg(url).spawn();
+        #[cfg(not(target_os = "macos"))]
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+
+        self.auth_mode_choice = AuthModeChoice::Token;
+        self.auth_status_message = Some(
+            "Opened token creation page. Enter or paste the generated token below to save to Keychain."
+                .into(),
+        );
+        self.message = "Launched token page. Paste your token below.".into();
         cx.notify();
     }
 
@@ -561,7 +496,6 @@ impl ReleaseDesk {
     fn setup_next(&mut self, cx: &mut Context<Self>) {
         let name = self.name_input.read(cx).value().trim().to_string();
         let directory = expand_directory(self.directory_input.read(cx).value().as_ref());
-        let account = self.account_input.read(cx).value().trim().to_string();
         let host = self.custom_host_input.read(cx).value().trim().to_string();
 
         if self.setup_step == 0 && (name.is_empty() || !directory.is_dir()) {
@@ -569,11 +503,9 @@ impl ReleaseDesk {
             cx.notify();
             return;
         }
-        if self.setup_step == 1
-            && (account.is_empty()
-                || (self.setup_provider == ProviderChoice::Custom && host.is_empty()))
+        if self.setup_step == 1 && self.setup_provider == ProviderChoice::Custom && host.is_empty()
         {
-            self.message = "Enter an account and, for Custom Git, a server URL.".into();
+            self.message = "Enter a server URL for Custom Git.".into();
             cx.notify();
             return;
         }
@@ -592,11 +524,21 @@ impl ReleaseDesk {
                 .unwrap_or(0)
                 + 1
         });
+        let account = self.account_input.read(cx).value().trim().to_string();
         let token = self.token_input.read(cx).value().trim().to_string();
         let credential_ref = if let Some(ref saved_ref) = self.saved_credential_ref {
             Some(saved_ref.clone())
         } else if !token.is_empty() {
-            let cred_key = format!("release_desk_{}_{}", self.setup_provider.as_str(), account);
+            let key_suffix = if !account.is_empty() {
+                account.as_str()
+            } else {
+                "default"
+            };
+            let cred_key = format!(
+                "release_desk_{}_{}",
+                self.setup_provider.as_str(),
+                key_suffix
+            );
             let _ = self.secret_store.set_secret(&cred_key, &token);
             Some(cred_key)
         } else if let Some(existing) = self
@@ -920,9 +862,9 @@ impl Render for ReleaseDesk {
                         disk_layout: self.setup_layout,
                         name: &self.name_input,
                         directory: &self.directory_input,
-                        account: &self.account_input,
                         custom_host: &self.custom_host_input,
                         token: &self.token_input,
+                        system_credential: self.detected_system_credential.clone(),
                         saved_accounts,
                         selected_saved_account: self.selected_saved_account.clone(),
                         auth_mode: self.auth_mode_choice,
@@ -942,6 +884,9 @@ impl Render for ReleaseDesk {
                         on_back: |this: &mut Self, cx| this.setup_back(cx),
                         on_browse: |this: &mut Self, window, cx| {
                             this.browse_directory(window, cx);
+                        },
+                        on_connect_system_credential: |this: &mut Self, window, cx| {
+                            this.connect_system_credential(window, cx);
                         },
                         on_select_account: |this: &mut Self, handle, window, cx| {
                             this.select_saved_account(handle, window, cx);

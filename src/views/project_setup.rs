@@ -22,9 +22,9 @@ pub struct ProjectSetupProps<'a> {
     pub disk_layout: DiskLayout,
     pub name: &'a Entity<InputState>,
     pub directory: &'a Entity<InputState>,
-    pub account: &'a Entity<InputState>,
     pub custom_host: &'a Entity<InputState>,
     pub token: &'a Entity<InputState>,
+    pub system_credential: Option<(String, String)>,
     pub saved_accounts: Vec<SavedAccountInfo>,
     pub selected_saved_account: Option<String>,
     pub auth_mode: AuthModeChoice,
@@ -39,6 +39,7 @@ pub struct ProjectSetupActions<T> {
     pub on_next: fn(&mut T, &mut Context<T>),
     pub on_back: fn(&mut T, &mut Context<T>),
     pub on_browse: fn(&mut T, &mut Window, &mut Context<T>),
+    pub on_connect_system_credential: fn(&mut T, &mut Window, &mut Context<T>),
     pub on_select_account: fn(&mut T, String, &mut Window, &mut Context<T>),
     pub on_toggle_new_account: fn(&mut T, &mut Window, &mut Context<T>),
     pub on_auth_browser: fn(&mut T, &mut Window, &mut Context<T>),
@@ -57,6 +58,7 @@ pub fn render_project_setup<T: 'static>(
         on_next,
         on_back,
         on_browse,
+        on_connect_system_credential,
         on_select_account,
         on_toggle_new_account,
         on_auth_browser,
@@ -65,7 +67,7 @@ pub fn render_project_setup<T: 'static>(
     } = actions;
     let title = match props.step {
         0 => "Name and folder",
-        1 => "Choose a Git provider & account",
+        1 => "Git Provider & API Access",
         _ => "Workspace preferences",
     };
     let mut content = div().flex().flex_col().gap_5();
@@ -82,6 +84,13 @@ pub fn render_project_setup<T: 'static>(
                 .child(div().text_size(px(11.)).text_color(cx.theme().muted_foreground).child("Choose an existing directory. Each project can use a different disk or folder."));
         }
         1 => {
+            content = content.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Select the Git provider for this project. Authenticating raises your API rate limit (from 60/hr to 5,000/hr) so Release Desk won't be blocked when fetching user repositories. You will add specific users and repositories to clone in the project workspace after creating it."),
+            );
+
             // Provider switcher
             let mut providers = div().flex().flex_wrap().gap_2();
             for provider in ProviderChoice::ALL {
@@ -100,6 +109,17 @@ pub fn render_project_setup<T: 'static>(
                     })));
             }
             content = content.child(providers);
+
+            // If custom provider, custom host URL field
+            if props.provider == ProviderChoice::Custom {
+                content = content.child(
+                    Form::new().child(
+                        Field::new()
+                            .label("Custom Git server HTTPS URL")
+                            .child(Input::new(props.custom_host)),
+                    ),
+                );
+            }
 
             // Active auth status feedback banner
             if let Some(ref status_msg) = props.auth_status_message {
@@ -138,6 +158,67 @@ pub fn render_project_setup<T: 'static>(
                 );
             }
 
+            // Auto-detected system credential banner (e.g. devenvoy from macOS Keychain / gh CLI)
+            if let Some((ref username, _)) = props.system_credential {
+                if props.selected_saved_account.as_deref() != Some(username.as_str()) {
+                    let user_label = username.clone();
+                    content = content.child(
+                        div()
+                            .p_3()
+                            .rounded(px(8.))
+                            .bg(cx.theme().primary.opacity(0.09))
+                            .border_1()
+                            .border_color(cx.theme().primary.opacity(0.3))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_size(px(13.))
+                                                    .font_bold()
+                                                    .text_color(cx.theme().primary)
+                                                    .child(format!("⚡ System Git Credential Detected (@{user_label})")),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .bg(cx.theme().primary.opacity(0.2))
+                                                    .text_color(cx.theme().primary)
+                                                    .p_1()
+                                                    .rounded(px(4.))
+                                                    .child("Instant Connect"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Active GitHub token found in your macOS Git Keychain / gh CLI. Click to authenticate without opening browser."),
+                                    ),
+                            )
+                            .child(
+                                Button::new("btn-connect-system-cred")
+                                    .label(format!("Connect @{user_label}"))
+                                    .primary()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        on_connect_system_credential(this, window, cx)
+                                    })),
+                            ),
+                    );
+                }
+            }
+
             // Section 1: Connected Accounts from Keychain
             if !props.saved_accounts.is_empty() {
                 let mut accounts_section = div().flex().flex_col().gap_2();
@@ -146,7 +227,7 @@ pub fn render_project_setup<T: 'static>(
                         .text_size(px(11.))
                         .font_bold()
                         .text_color(cx.theme().muted_foreground)
-                        .child("CONNECTED KEYCHAIN ACCOUNTS (1-CLICK SELECT)"),
+                        .child("SAVED PROVIDER TOKENS (1-CLICK SELECT)"),
                 );
 
                 let mut accounts_grid = div().flex().flex_wrap().gap_3();
@@ -214,15 +295,15 @@ pub fn render_project_setup<T: 'static>(
                             div()
                                 .text_size(px(11.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Reuses stored macOS Keychain token · No prompt needed"),
+                                .child("Reuses stored macOS Keychain token · 5,000 req/hr"),
                         );
                     accounts_grid = accounts_grid.child(card);
                 }
 
                 let toggle_label = if props.auth_mode == AuthModeChoice::SavedAccount {
-                    "+ Connect a different account"
+                    "+ Connect a different token"
                 } else {
-                    "Use connected account instead"
+                    "Use saved token instead"
                 };
 
                 accounts_section = accounts_section.child(accounts_grid).child(
@@ -238,38 +319,18 @@ pub fn render_project_setup<T: 'static>(
                 content = content.child(accounts_section);
             }
 
-            // Section 2: Account Handle & Auth Methods (for new account or if no saved accounts)
+            // Section 2: Auth Methods for raising rate limits
             if props.saved_accounts.is_empty() || props.auth_mode != AuthModeChoice::SavedAccount {
-                let mut auth_flow = div().flex().flex_col().gap_3();
-
-                auth_flow = auth_flow.child(
-                    Form::new().child(
-                        Field::new()
-                            .label("Account or organization handle")
-                            .child(Input::new(props.account)),
-                    ),
-                );
-
-                if props.provider == ProviderChoice::Custom {
-                    auth_flow = auth_flow.child(
-                        Form::new().child(
-                            Field::new()
-                                .label("Custom Git server HTTPS URL")
-                                .child(Input::new(props.custom_host)),
-                        ),
-                    );
-                }
-
                 let mut methods = div().flex().flex_col().gap_3();
                 methods = methods.child(
                     div()
                         .text_size(px(11.))
                         .font_bold()
                         .text_color(cx.theme().muted_foreground)
-                        .child("AUTHENTICATION OPTIONS"),
+                        .child("AUTHENTICATE FOR HIGH RATE LIMITS (5,000 REQ/HR)"),
                 );
 
-                // Option 1: Browser OAuth redirect
+                // Option 1: Browser token generator
                 let browser_card = div()
                     .p_3()
                     .rounded(px(8.))
@@ -297,7 +358,7 @@ pub fn render_project_setup<T: 'static>(
                                         div()
                                             .text_size(px(13.))
                                             .font_bold()
-                                            .child("Sign in with Browser (OAuth)"),
+                                            .child("Generate Token in Browser"),
                                     )
                                     .child(
                                         div()
@@ -313,12 +374,12 @@ pub fn render_project_setup<T: 'static>(
                                 div()
                                     .text_size(px(11.))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Opens your default browser to authorize. Token is saved in macOS Keychain."),
+                                    .child("Opens official token creation page with 'Release Desk' and 'repo' pre-checked. Copy token to raise API limits."),
                             ),
                     )
                     .child(
                         Button::new("auth-browser-btn")
-                            .label("Sign in with Browser")
+                            .label("Open Token Page")
                             .primary()
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 on_auth_browser(this, window, cx)
@@ -418,12 +479,16 @@ pub fn render_project_setup<T: 'static>(
                                         div()
                                             .text_size(px(11.))
                                             .text_color(cx.theme().muted_foreground)
-                                            .child("For fine-grained tokens, CI tokens, or self-hosted Git servers."),
+                                            .child("Paste a token from GitHub/GitLab to store securely in macOS Keychain."),
                                     ),
                             )
                             .child(
                                 Button::new("toggle-token-btn")
-                                    .label(if is_token_active { "Hide token field" } else { "Enter token" })
+                                    .label(if is_token_active {
+                                        "Hide token field"
+                                    } else {
+                                        "Enter token"
+                                    })
                                     .ghost()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         on_toggle_token_mode(this, cx)
@@ -444,13 +509,19 @@ pub fn render_project_setup<T: 'static>(
                             div()
                                 .text_size(px(11.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Stored securely in macOS Keychain. Release Desk will remember this account so you won't need to re-enter it."),
+                                .child("Stored securely in macOS Keychain. Release Desk will remember this so you won't need to re-enter it."),
                         );
                 }
                 methods = methods.child(token_card);
-                auth_flow = auth_flow.child(methods);
-                content = content.child(auth_flow);
+                content = content.child(methods);
             }
+
+            content = content.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Note: You can click Continue without a token to use public access (60 requests/hr). You can add users and repositories to clone in the project workspace."),
+            );
         }
         _ => {
             content = content

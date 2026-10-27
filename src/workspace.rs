@@ -90,6 +90,32 @@ impl ProviderChoice {
             Self::Custom => "custom",
         }
     }
+
+    pub const fn default_host(self) -> &'static str {
+        match self {
+            Self::GitHub => "github.com",
+            Self::GitLab => "gitlab.com",
+            Self::Bitbucket => "bitbucket.org",
+            Self::AzureDevOps => "dev.azure.com",
+            Self::Gitea => "gitea.com",
+            Self::Forgejo => "codeberg.org",
+            Self::Codeberg => "codeberg.org",
+            Self::AwsCodeCommit => "amazonaws.com",
+            Self::Custom => "localhost",
+        }
+    }
+
+    pub const fn token_creation_url(self) -> &'static str {
+        match self {
+            Self::GitLab => {
+                "https://gitlab.com/-/profile/personal_access_tokens?name=Release%20Desk&scopes=api,read_user,read_repository"
+            }
+            Self::Bitbucket => "https://bitbucket.org/account/settings/app-passwords/",
+            _ => {
+                "https://github.com/settings/tokens/new?description=Release%20Desk&scopes=repo,read:user"
+            }
+        }
+    }
 }
 
 impl From<ProviderChoice> for release_desk_core::provider::GitProviderKind {
@@ -173,9 +199,6 @@ impl WorkspaceProject {
         if !self.directory.is_absolute() || !self.directory.is_dir() {
             return Err("Choose an existing directory on disk for this project.".into());
         }
-        if self.account.trim().is_empty() {
-            return Err("Enter the account you will use for this project.".into());
-        }
         if self.provider == ProviderChoice::Custom {
             let host = self.custom_host.as_deref().unwrap_or_default();
             if !valid_custom_host(host) {
@@ -239,6 +262,24 @@ mod tests {
         project.provider = ProviderChoice::Custom;
         assert!(project.validate().is_err());
         project.custom_host = Some("https://git.example.com".into());
+        assert!(project.validate().is_ok());
+    }
+
+    #[test]
+    fn account_is_optional_on_project() {
+        let directory = std::env::temp_dir();
+        let project = WorkspaceProject {
+            id: 1,
+            name: "Fleet".into(),
+            directory,
+            provider: ProviderChoice::GitHub,
+            account: String::new(),
+            custom_host: None,
+            credential_ref: None,
+            disk_layout: DiskLayout::Grouped,
+            sources: Vec::new(),
+            repository_list_mode: RepositoryListMode::Grouped,
+        };
         assert!(project.validate().is_ok());
     }
 }
