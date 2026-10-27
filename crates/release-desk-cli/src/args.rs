@@ -108,6 +108,11 @@ pub enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Inspect, preview, and adopt legacy Release Desk or ArtCraft setups without altering source files.
+    Migrate {
+        #[command(subcommand)]
+        subcommand: MigrateSubcommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -159,4 +164,47 @@ pub enum AuthSubcommand {
     },
     /// Inspect active authentication status across providers.
     Status,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MigrateSubcommand {
+    /// Analyze a legacy directory, script, or snapshot in read-only mode.
+    Analyze {
+        /// Path to the legacy directory, data.json, or sync script.
+        #[arg(long)]
+        path: PathBuf,
+    },
+    /// Generate and preview a non-destructive migration plan.
+    Preview {
+        /// Path to the legacy directory, data.json, or sync script.
+        #[arg(long)]
+        path: PathBuf,
+        /// Optional project name override.
+        #[arg(long)]
+        name: Option<String>,
+        /// Optional clone location for repositories and local backup snapshot.
+        #[arg(long)]
+        location: Option<PathBuf>,
+        /// Whether to copy discovered installer assets.
+        #[arg(long)]
+        copy_installers: bool,
+    },
+    /// Adopt the legacy setup into Release Desk managed storage and SQLite.
+    Execute {
+        /// Path to the legacy directory, data.json, or sync script.
+        #[arg(long)]
+        path: PathBuf,
+        /// Optional project name override.
+        #[arg(long)]
+        name: Option<String>,
+        /// Optional clone location for repositories and local backup snapshot.
+        #[arg(long)]
+        location: Option<PathBuf>,
+        /// Whether to copy discovered installer assets.
+        #[arg(long)]
+        copy_installers: bool,
+        /// Explicit confirmation flag required to execute migration.
+        #[arg(long)]
+        confirm: bool,
+    },
 }

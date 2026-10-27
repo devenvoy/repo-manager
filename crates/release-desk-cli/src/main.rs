@@ -98,6 +98,10 @@ fn execute(args: Cli) -> Result<(), release_desk_core::error::DomainError> {
             let ctx = CliContext::new(library_override)?;
             commands::handle_backup(&ctx, output, json)?;
         }
+        Command::Migrate { subcommand } => {
+            let ctx = CliContext::new(library_override)?;
+            commands::handle_migrate(&ctx, subcommand, json)?;
+        }
     }
 
     Ok(())

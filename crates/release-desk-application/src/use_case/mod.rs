@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod discovery;
 pub mod installer;
+pub mod migration;
 pub mod project;
 pub mod pull_request;
 pub mod reconcile;
@@ -19,6 +20,9 @@ pub use discovery::{
 pub use installer::{
     CheckInstallerStatusUseCase, CheckInstallerUpdatesUseCase, DownloadAndPlanInstallerUseCase,
     DownloadInstallerUseCase, DownloadPort, InstallAssetCommand, InstallAssetOutcome,
+};
+pub use migration::{
+    AnalyzeLegacySetupUseCase, ExecuteLegacyMigrationUseCase, PreviewMigrationPlanUseCase,
 };
 pub use project::{CreateProjectCommand, CreateProjectUseCase, ListProjectsUseCase};
 pub use pull_request::{
