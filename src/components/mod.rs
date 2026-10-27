@@ -1,9 +1,21 @@
 //! UI shell components.
 
+pub mod app_icon;
 pub mod header;
 pub mod provider_icon;
 pub mod sidebar;
+pub mod ui_icons;
 
 pub use header::render_header;
 pub use sidebar::render_sidebar;
-pub mod app_icon;
+
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+
+pub fn toggle_button(
+    id: impl Into<gpui_kit::ElementId>,
+    label: impl Into<gpui_kit::SharedString>,
+    active: bool,
+) -> Button {
+    let btn = Button::new(id).label(label);
+    if active { btn.primary() } else { btn.ghost() }
+}

@@ -1,5 +1,6 @@
 //! Project source selection, repository list views, and clone review modal.
 
+use crate::components::toggle_button;
 use crate::workspace_sources::{RepositoryListMode, WorkspaceSource};
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
@@ -41,18 +42,22 @@ pub fn render_project_sources<
             if repo.selected {
                 total_selected += 1;
             }
-            repos = repos.child(
-                Button::new(format!("source-{source_index}-repo-{repo_index}"))
-                    .label(format!(
-                        "{} {}",
-                        if repo.selected { "☑" } else { "☐" },
-                        repo.name
-                    ))
-                    .ghost()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        on_toggle(source_index, repo_index, this, cx)
-                    })),
-            );
+            let is_sel = repo.selected;
+            let mut btn =
+                Button::new(format!("source-{source_index}-repo-{repo_index}")).label(if is_sel {
+                    format!("✓ {}", repo.name)
+                } else {
+                    repo.name.clone()
+                });
+            if is_sel {
+                btn = btn.primary();
+            } else {
+                btn = btn.ghost();
+            }
+            repos =
+                repos.child(btn.on_click(cx.listener(move |this, _, _, cx| {
+                    on_toggle(source_index, repo_index, this, cx)
+                })));
         }
         list = list.child(
             div()
@@ -306,12 +311,43 @@ pub fn render_project_repositories<
                 .child("Select repositories in Sources to see them here."),
         );
     }
-    div().flex().flex_col().gap_4()
-        .child(div().flex().items_center().justify_between()
-            .child(div().text_size(px(20.)).font_bold().child("Selected repositories"))
-            .child(div().flex().gap_2()
-                .child(Button::new("repos-grouped").label(if mode == RepositoryListMode::Grouped { "● Grouped" } else { "Grouped" }).on_click(cx.listener(move |this, _, _, cx| on_mode(RepositoryListMode::Grouped, this, cx))))
-                .child(Button::new("repos-flat").label(if mode == RepositoryListMode::Flat { "● Flat" } else { "Flat" }).on_click(cx.listener(move |this, _, _, cx| on_mode(RepositoryListMode::Flat, this, cx))))))
-        .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child("This display setting is independent of the folder layout on disk. Repository names are examples until discovery is connected."))
+    div()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().text_size(px(20.)).font_bold().child("Selected repositories"))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            toggle_button(
+                                "repos-grouped",
+                                "Grouped",
+                                mode == RepositoryListMode::Grouped,
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                on_mode(RepositoryListMode::Grouped, this, cx)
+                            })),
+                        )
+                        .child(
+                            toggle_button("repos-flat", "Flat", mode == RepositoryListMode::Flat)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    on_mode(RepositoryListMode::Flat, this, cx)
+                                })),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child("This display setting is independent of the folder layout on disk. Repository names are examples until discovery is connected."),
+        )
         .child(list)
 }

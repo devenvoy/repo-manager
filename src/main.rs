@@ -9,7 +9,6 @@ use gpui_kit::{
 use release_desk_core::app_catalog::{AppActionState, AppStoreItem};
 use release_desk_core::project::DiskLayout;
 use repo_manager::components::{render_header, render_sidebar};
-use repo_manager::demo::sample_apps;
 use repo_manager::settings::{self, Appearance, Settings, StartView};
 use repo_manager::state::WorkspaceTab;
 use repo_manager::views;
@@ -81,7 +80,7 @@ impl ReleaseDesk {
             custom_host_input,
             token_input,
             source_input,
-            store_items: sample_apps(),
+            store_items: Vec::new(),
             selected_app_id: None,
             reviewing_clones: false,
             selected_platform: "macOS",
@@ -444,15 +443,16 @@ impl ReleaseDesk {
 
 impl Render for ReleaseDesk {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let location = if self.tab == WorkspaceTab::AppStore {
-            "App Store".to_string()
-        } else {
-            self.selected_project_id
+        let location = match self.tab {
+            WorkspaceTab::AppStore => "App Store".to_string(),
+            WorkspaceTab::Settings => "Settings".to_string(),
+            _ => self
+                .selected_project_id
                 .and_then(|id| self.projects.iter().find(|project| project.id == id))
                 .map_or_else(
                     || "All projects".to_string(),
                     |project| project.name.clone(),
-                )
+                ),
         };
         let content = match self.tab {
             WorkspaceTab::AppStore => views::render_store(
@@ -466,6 +466,31 @@ impl Render for ReleaseDesk {
                 |id, this: &mut Self, cx| this.preview_app_action(id, cx),
                 |this: &mut Self, cx| {
                     this.selected_app_id = None;
+                    cx.notify();
+                },
+            )
+            .into_any_element(),
+            WorkspaceTab::Settings => views::render_settings(
+                &self.settings,
+                cx,
+                |this: &mut Self, appearance, window, cx| {
+                    this.set_appearance(appearance, window, cx);
+                },
+                |this: &mut Self, start_view, cx| {
+                    this.settings.start_view = start_view;
+                    let _ = settings::save(&this.settings);
+                    this.message = format!("Startup view changed to {start_view:?}");
+                    cx.notify();
+                },
+                |this: &mut Self, layout, cx| {
+                    this.settings.hub_view_mode = layout;
+                    let _ = settings::save(&this.settings);
+                    this.message = format!("Default layout changed to {layout:?}");
+                    cx.notify();
+                },
+                |this: &mut Self, cx| {
+                    let _ = settings::save(&this.settings);
+                    this.message = "Settings saved successfully.".into();
                     cx.notify();
                 },
             )
@@ -642,7 +667,7 @@ impl Render for ReleaseDesk {
             .text_color(cx.theme().foreground)
             .child(render_sidebar(
                 self.tab,
-                true,
+                self.projects.len(),
                 cx,
                 |this: &mut Self, tab, cx| {
                     this.tab = tab;

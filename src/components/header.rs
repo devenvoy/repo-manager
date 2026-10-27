@@ -1,9 +1,9 @@
 //! Compact workspace header shared by Projects and App Store with appearance toggle.
 
+use super::toggle_button;
 use crate::settings::Appearance;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, Window, div, px};
 
 pub fn render_header<
@@ -64,40 +64,34 @@ pub fn render_header<
                         .rounded_lg()
                         .bg(cx.theme().muted)
                         .child(
-                            Button::new("theme-light")
-                                .label(if current_theme == Appearance::Light {
-                                    "● Light"
-                                } else {
-                                    "Light"
-                                })
-                                .ghost()
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                            toggle_button(
+                                "theme-light",
+                                "Light",
+                                current_theme == Appearance::Light,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
                                     on_theme(this, Appearance::Light, window, cx);
-                                })),
+                                },
+                            )),
                         )
                         .child(
-                            Button::new("theme-dark")
-                                .label(if current_theme == Appearance::Dark {
-                                    "● Dark"
-                                } else {
-                                    "Dark"
-                                })
-                                .ghost()
+                            toggle_button("theme-dark", "Dark", current_theme == Appearance::Dark)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     on_theme(this, Appearance::Dark, window, cx);
                                 })),
                         )
                         .child(
-                            Button::new("theme-system")
-                                .label(if current_theme == Appearance::System {
-                                    "● Auto"
-                                } else {
-                                    "Auto"
-                                })
-                                .ghost()
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                            toggle_button(
+                                "theme-system",
+                                "Auto",
+                                current_theme == Appearance::System,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
                                     on_theme(this, Appearance::System, window, cx);
-                                })),
+                                },
+                            )),
                         ),
                 ),
         )

@@ -202,3 +202,22 @@ fn test_settings_extension_normalization() {
     assert!(default_settings.include_prereleases);
     assert!(!default_settings.show_archived);
 }
+
+#[test]
+fn test_no_unicode_dots_or_checkbox_glyphs() {
+    for tab in &[
+        WorkspaceTab::AppStore,
+        WorkspaceTab::ProjectHub,
+        WorkspaceTab::Overview,
+        WorkspaceTab::Repositories,
+        WorkspaceTab::Installers,
+        WorkspaceTab::PullRequests,
+        WorkspaceTab::Reconcile,
+        WorkspaceTab::Settings,
+        WorkspaceTab::Welcome,
+    ] {
+        assert!(!tab.title().contains('●'));
+        assert!(!tab.title().contains('☑'));
+        assert!(!tab.title().contains('☐'));
+    }
+}

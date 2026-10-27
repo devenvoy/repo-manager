@@ -35,16 +35,15 @@ pub fn render_project_workspace<
         .border_b_1()
         .border_color(cx.theme().border);
     for tab in ProjectSection::ALL {
-        tabs = tabs.child(
-            Button::new(format!("section-{tab:?}"))
-                .label(if tab == section {
-                    format!("● {}", tab.label())
-                } else {
-                    tab.label().into()
-                })
-                .ghost()
-                .on_click(cx.listener(move |this, _, _, cx| on_section(tab, this, cx))),
-        );
+        let is_active = tab == section;
+        let mut btn = Button::new(format!("section-{tab:?}")).label(tab.label().to_string());
+        if is_active {
+            btn = btn.primary();
+        } else {
+            btn = btn.ghost();
+        }
+        tabs =
+            tabs.child(btn.on_click(cx.listener(move |this, _, _, cx| on_section(tab, this, cx))));
     }
 
     let body = match section {
@@ -188,15 +187,14 @@ pub fn render_project_releases<
     let mut platform_bar = div().flex().gap_1().p_1().rounded_lg().bg(cx.theme().muted);
     for platform in platforms {
         let is_selected = current_platform == platform;
+        let mut btn = Button::new(format!("platform-{platform}")).label(platform.to_string());
+        if is_selected {
+            btn = btn.primary();
+        } else {
+            btn = btn.ghost();
+        }
         platform_bar = platform_bar.child(
-            Button::new(format!("platform-{platform}"))
-                .label(if is_selected {
-                    format!("● {platform}")
-                } else {
-                    platform.to_string()
-                })
-                .ghost()
-                .on_click(cx.listener(move |this, _, _, cx| on_platform(platform, this, cx))),
+            btn.on_click(cx.listener(move |this, _, _, cx| on_platform(platform, this, cx))),
         );
     }
 

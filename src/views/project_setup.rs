@@ -1,6 +1,7 @@
 //! Three-step project setup shared by new and edited projects.
 
 use crate::components::provider_icon::provider_icon;
+use crate::components::toggle_button;
 use crate::workspace::ProviderChoice;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
@@ -61,18 +62,18 @@ pub fn render_project_setup<
             let mut providers = div().flex().flex_wrap().gap_3();
             for provider in ProviderChoice::ALL {
                 let selected = props.provider == provider;
-                providers = providers.child(
-                    Button::new(format!("provider-{provider:?}"))
-                        .label(format!(
-                            "{}{}",
-                            if selected { "● " } else { "" },
-                            provider.label()
-                        ))
-                        .icon(provider_icon(provider))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| on_provider(provider, this, cx)),
-                        ),
-                );
+                let mut btn = Button::new(format!("provider-{provider:?}"))
+                    .label(provider.label().to_string())
+                    .icon(provider_icon(provider));
+                if selected {
+                    btn = btn.primary();
+                } else {
+                    btn = btn.ghost();
+                }
+                providers =
+                    providers.child(btn.on_click(
+                        cx.listener(move |this, _, _, cx| on_provider(provider, this, cx)),
+                    ));
             }
             content = content.child(providers).child(
                 Form::new().child(
@@ -107,14 +108,24 @@ pub fn render_project_setup<
                         .flex()
                         .gap_3()
                         .child(
-                            Button::new("layout-grouped")
-                                .label(if props.disk_layout == DiskLayout::Grouped { "● Grouped · owner / repository" } else { "Grouped · owner / repository" })
-                                .on_click(cx.listener(move |this, _, _, cx| on_layout(DiskLayout::Grouped, this, cx))),
+                            toggle_button(
+                                "layout-grouped",
+                                "Grouped · owner / repository",
+                                props.disk_layout == DiskLayout::Grouped,
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                on_layout(DiskLayout::Grouped, this, cx)
+                            })),
                         )
                         .child(
-                            Button::new("layout-flat")
-                                .label(if props.disk_layout == DiskLayout::Flat { "● Flat · repository" } else { "Flat · repository" })
-                                .on_click(cx.listener(move |this, _, _, cx| on_layout(DiskLayout::Flat, this, cx))),
+                            toggle_button(
+                                "layout-flat",
+                                "Flat · repository",
+                                props.disk_layout == DiskLayout::Flat,
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                on_layout(DiskLayout::Flat, this, cx)
+                            })),
                         ),
                 );
         }
