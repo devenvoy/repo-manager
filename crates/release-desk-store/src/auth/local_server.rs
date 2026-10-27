@@ -142,7 +142,6 @@ fn handle_connection(
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #0b0f19; color: #f1f5f9; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
     .card { background: #1e293b; border: 1px solid #334155; border-radius: 14px; padding: 48px; text-align: center; max-width: 440px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); }
-    .icon { font-size: 52px; margin-bottom: 20px; }
     h1 { font-size: 22px; font-weight: 600; margin: 0 0 12px; color: #38bdf8; }
     p { font-size: 15px; color: #94a3b8; line-height: 1.5; margin: 0 0 24px; }
     .badge { display: inline-block; padding: 8px 16px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 9999px; font-size: 13px; font-weight: 600; }
@@ -150,8 +149,7 @@ fn handle_connection(
 </head>
 <body>
   <div class="card">
-    <div class="icon">✨</div>
-    <h1>Authentication Successful!</h1>
+    <h1>Authentication Successful</h1>
     <p>Release Desk has captured your authorization token. You can close this browser tab and return to the application.</p>
     <span class="badge">Return to Release Desk</span>
   </div>
@@ -166,14 +164,12 @@ fn handle_connection(
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #0b0f19; color: #f1f5f9; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
     .card { background: #1e293b; border: 1px solid #ef4444; border-radius: 14px; padding: 48px; text-align: center; max-width: 440px; }
-    .icon { font-size: 52px; margin-bottom: 20px; }
     h1 { font-size: 22px; font-weight: 600; margin: 0 0 12px; color: #ef4444; }
     p { font-size: 15px; color: #94a3b8; line-height: 1.5; margin: 0 0 24px; }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="icon">⚠️</div>
     <h1>Authentication Failed</h1>
     <p>No valid authorization code was returned. Please return to Release Desk and try again.</p>
   </div>

@@ -118,11 +118,10 @@ impl ProviderChoice {
     }
 
     pub fn oauth_authorize_url(self, client_id: &str, redirect_uri: &str) -> String {
-        let cid = if client_id.trim().is_empty() {
-            "release-desk-app"
-        } else {
-            client_id.trim()
-        };
+        let cid = client_id.trim();
+        if cid.is_empty() {
+            return self.token_creation_url().to_string();
+        }
         match self {
             Self::GitHub => format!(
                 "https://github.com/login/oauth/authorize?client_id={cid}&redirect_uri={redirect_uri}&scope=repo%20read:user&response_type=code"

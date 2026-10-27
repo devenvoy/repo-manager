@@ -88,9 +88,9 @@ fn metric_card<T: 'static>(label: &'static str, value: usize, cx: &Context<T>) -
 
 fn backup_card<T: 'static>(synced: bool, cx: &Context<T>) -> impl IntoElement {
     let (status_text, subtext) = if synced {
-        ("✓ IN SYNC", "Local data.json matches DB")
+        ("IN SYNC", "Local data.json matches DB")
     } else {
-        ("⚠ MISMATCH", "Check Backup & Reconcile")
+        ("MISMATCH", "Check Backup & Reconcile")
     };
 
     div()

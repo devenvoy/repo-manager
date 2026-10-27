@@ -43,12 +43,8 @@ pub fn render_project_sources<
                 total_selected += 1;
             }
             let is_sel = repo.selected;
-            let mut btn =
-                Button::new(format!("source-{source_index}-repo-{repo_index}")).label(if is_sel {
-                    format!("✓ {}", repo.name)
-                } else {
-                    repo.name.clone()
-                });
+            let mut btn = Button::new(format!("source-{source_index}-repo-{repo_index}"))
+                .label(repo.name.clone());
             if is_sel {
                 btn = btn.primary();
             } else {

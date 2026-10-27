@@ -22,7 +22,7 @@ pub fn render_auth(frame: &mut Frame, area: Rect, state: &AppState) {
             let is_authed = state.auth_status.get(*prov).copied().unwrap_or(false);
             let (mark, style) = if is_authed {
                 (
-                    "✓ Connected",
+                    "Connected",
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),

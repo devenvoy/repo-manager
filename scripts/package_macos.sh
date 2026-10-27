@@ -17,6 +17,11 @@ echo "=== Building Release Desk for macOS ==="
 echo "-> Building release binaries..."
 cargo build --release -p repo-manager -p release-desk-cli --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
 
+echo "-> Building native macOS WebKit modal helper..."
+mkdir -p "$WORKSPACE_ROOT/bin"
+swiftc "$WORKSPACE_ROOT/bin/release-desk-webview.swift" -o "$WORKSPACE_ROOT/bin/release-desk-webview" -O
+cp "$WORKSPACE_ROOT/bin/release-desk-webview" "$WORKSPACE_ROOT/target/release/release-desk-webview"
+
 # 2. Prepare distribution directory
 echo "-> Creating application bundle layout..."
 rm -rf "$BUNDLE_PATH"
@@ -26,12 +31,14 @@ mkdir -p "$BUNDLE_PATH/Contents/Resources"
 # 3. Copy binaries
 echo "-> Installing executables..."
 cp "$WORKSPACE_ROOT/target/release/repo-manager" "$BUNDLE_PATH/Contents/MacOS/repo-manager"
+cp "$WORKSPACE_ROOT/target/release/release-desk-webview" "$BUNDLE_PATH/Contents/MacOS/release-desk-webview"
 CLI_BIN="$WORKSPACE_ROOT/target/release/release-desk"
 if [ ! -f "$CLI_BIN" ]; then
     CLI_BIN="$WORKSPACE_ROOT/target/release/release-desk-cli"
 fi
 cp "$CLI_BIN" "$BUNDLE_PATH/Contents/MacOS/release-desk"
 chmod +x "$BUNDLE_PATH/Contents/MacOS/repo-manager"
+chmod +x "$BUNDLE_PATH/Contents/MacOS/release-desk-webview"
 chmod +x "$BUNDLE_PATH/Contents/MacOS/release-desk"
 
 # 4. Copy Info.plist and AppIcon

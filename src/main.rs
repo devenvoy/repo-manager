@@ -72,6 +72,26 @@ struct ReleaseDesk {
     local_oauth_server: Option<LocalOAuthServer>,
 }
 
+fn find_webview_binary() -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("release-desk-webview");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let local = std::path::PathBuf::from("bin/release-desk-webview");
+    if local.is_file() {
+        return Some(local);
+    }
+    let target = std::path::PathBuf::from("target/release/release-desk-webview");
+    if target.is_file() {
+        return Some(target);
+    }
+    None
+}
+
 impl ReleaseDesk {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (settings, message) = match settings::load() {
@@ -339,7 +359,7 @@ impl ReleaseDesk {
             self.selected_saved_account = Some(username.clone());
             self.auth_mode_choice = AuthModeChoice::SavedAccount;
             self.auth_status_message = Some(format!(
-                "✓ Connected with {} API as @{} (5,000 req/hr). Token stored in Keychain.",
+                "Connected with {} API as @{} (5,000 req/hr). Token stored in Keychain.",
                 self.setup_provider.label(),
                 username
             ));
@@ -362,7 +382,7 @@ impl ReleaseDesk {
         self.saved_credential_ref = Some(cred_key);
         self.auth_mode_choice = AuthModeChoice::SavedAccount;
         self.auth_status_message = Some(format!(
-            "✓ Using Keychain credentials for @{}. No token needed!",
+            "Using Keychain credentials for @{}. No token needed!",
             handle
         ));
         self.account_input
@@ -396,15 +416,33 @@ impl ReleaseDesk {
         }
         self.local_oauth_server = None;
 
+        let custom_client_id = self
+            .oauth_client_id_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+
+        if custom_client_id.is_empty() {
+            let url = self.setup_provider.token_creation_url();
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("open").arg(url).spawn();
+            #[cfg(not(target_os = "macos"))]
+            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+
+            self.auth_mode_choice = AuthModeChoice::Token;
+            self.auth_status_message = Some(
+                "Opened official provider page in browser with pre-selected scopes. Copy and paste token below.".into(),
+            );
+            self.message =
+                "Opened token creator in browser (0% 404 risk). Paste token below.".into();
+            cx.notify();
+            return;
+        }
+
         match LocalOAuthServer::start(4567) {
             Ok(server) => {
                 let redirect_uri = format!("http://127.0.0.1:{}/callback", server.port());
-                let custom_client_id = self
-                    .oauth_client_id_input
-                    .read(cx)
-                    .value()
-                    .trim()
-                    .to_string();
                 let url = self
                     .setup_provider
                     .oauth_authorize_url(&custom_client_id, &redirect_uri);
@@ -412,9 +450,9 @@ impl ReleaseDesk {
                 self.local_oauth_server = Some(server);
                 self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
                 self.auth_status_message = Some(
-                    "⏳ Listening on http://127.0.0.1:4567/callback... Waiting for browser authorization.".into(),
+                    "Listening on http://127.0.0.1:4567/callback... Waiting for browser authorization.".into(),
                 );
-                self.message = "Launched browser for OAuth. Listening on local port 4567.".into();
+                self.message = "Launched browser OAuth. Listening on local port 4567.".into();
 
                 #[cfg(target_os = "macos")]
                 let _ = std::process::Command::new("open").arg(&url).spawn();
@@ -427,7 +465,9 @@ impl ReleaseDesk {
                             .timer(std::time::Duration::from_millis(100))
                             .await;
                         let outcome = this.update_in(cx, |this, _window, _cx| {
-                            this.local_oauth_server.as_ref().and_then(|s| s.poll_outcome())
+                            this.local_oauth_server
+                                .as_ref()
+                                .and_then(|s| s.poll_outcome())
                         });
 
                         if let Ok(Some(outcome)) = outcome {
@@ -443,22 +483,18 @@ impl ReleaseDesk {
                                         this.selected_saved_account =
                                             Some("browser-authorized".into());
                                         this.auth_status_message = Some(
-                                            "✓ Successfully authenticated via browser (5,000 req/hr)."
+                                            "Successfully authenticated via browser (5,000 req/hr)."
                                                 .into(),
                                         );
                                         this.message =
                                             "Browser authentication received successfully.".into();
                                         this.account_input.update(cx, |input, cx| {
-                                            input.set_value(
-                                                "browser-authorized",
-                                                window,
-                                                cx,
-                                            );
+                                            input.set_value("browser-authorized", window, cx);
                                         });
                                     }
                                     OAuthRedirectOutcome::Error { message } => {
                                         this.auth_status_message = Some(format!(
-                                            "⚠️ Browser authentication failed: {message}"
+                                            "Browser authentication failed: {message}"
                                         ));
                                     }
                                 }
@@ -487,7 +523,7 @@ impl ReleaseDesk {
             }
             Err(e) => {
                 self.auth_status_message = Some(format!(
-                    "⚠️ Could not start local redirect server on port 4567 ({e}). Please use Token or In-App Webview."
+                    "Could not start local redirect server on port 4567 ({e}). Please use Token or In-App Webview."
                 ));
                 cx.notify();
             }
@@ -504,18 +540,45 @@ impl ReleaseDesk {
     }
 
     fn trigger_webview_auth(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let url = self
-            .setup_provider
-            .oauth_authorize_url("", "http://127.0.0.1:4567/callback");
-        #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open").arg(url).spawn();
-        #[cfg(not(target_os = "macos"))]
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        let custom_client_id = self
+            .oauth_client_id_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
 
-        self.auth_mode_choice = AuthModeChoice::OAuthWebview;
-        self.auth_status_message =
-            Some("Launched in-app modal webview window. Complete sign in to authorize.".into());
-        self.message = "Launched in-app webview window.".into();
+        let target_url = if !custom_client_id.is_empty() {
+            self.setup_provider
+                .oauth_authorize_url(&custom_client_id, "http://127.0.0.1:4567/callback")
+        } else {
+            self.setup_provider.token_creation_url().to_string()
+        };
+
+        if let Some(webview_bin) = find_webview_binary() {
+            let callback = if !custom_client_id.is_empty() {
+                "http://127.0.0.1:4567/callback"
+            } else {
+                ""
+            };
+            let _ = std::process::Command::new(webview_bin)
+                .arg(&target_url)
+                .arg(callback)
+                .spawn();
+            self.auth_mode_choice = AuthModeChoice::OAuthWebview;
+            self.auth_status_message = Some(
+                "In-App Webview opened in dedicated modal window. Complete authorization there."
+                    .into(),
+            );
+            self.message = "Launched in-app WebKit modal window.".into();
+        } else {
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("open").arg(&target_url).spawn();
+            #[cfg(not(target_os = "macos"))]
+            let _ = std::process::Command::new("xdg-open")
+                .arg(&target_url)
+                .spawn();
+            self.auth_status_message = Some("Opened sign-in page in browser.".into());
+        }
         cx.notify();
     }
 
@@ -531,7 +594,7 @@ impl ReleaseDesk {
         self.saved_credential_ref = Some(cred_key);
         self.selected_saved_account = Some("token-user".into());
         self.auth_status_message =
-            Some("✓ Personal Access Token saved securely in macOS Keychain (5,000 req/hr).".into());
+            Some("Personal Access Token saved securely in macOS Keychain (5,000 req/hr).".into());
         self.message = "Personal Access Token stored in Keychain.".into();
         self.account_input.update(cx, |input, cx| {
             input.set_value("token-user", window, cx);
@@ -1175,7 +1238,9 @@ impl Render for ReleaseDesk {
                     .flex()
                     .flex_col()
                     .flex_1()
+                    .min_w_0()
                     .h_full()
+                    .overflow_hidden()
                     .child(render_header(
                         self.nav_index > 0,
                         self.nav_index + 1 < self.nav_history.len(),
@@ -1195,7 +1260,17 @@ impl Render for ReleaseDesk {
                             }
                         },
                     ))
-                    .child(content),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .size_full()
+                            .overflow_hidden()
+                            .child(content),
+                    ),
             )
     }
 }

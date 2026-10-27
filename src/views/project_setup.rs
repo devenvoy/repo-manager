@@ -157,42 +157,34 @@ pub fn render_project_setup<T: 'static>(
                     .selected_saved_account
                     .clone()
                     .unwrap_or_else(|| "Saved Keychain Account".into());
-                content =
-                    content.child(
-                        div()
-                            .p_3()
-                            .rounded(px(8.))
-                            .bg(cx.theme().primary.opacity(0.08))
-                            .border_1()
-                            .border_color(cx.theme().primary.opacity(0.3))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .child(
+                content = content.child(
+                    div()
+                        .p_3()
+                        .rounded(px(8.))
+                        .bg(cx.theme().primary.opacity(0.08))
+                        .border_1()
+                        .border_color(cx.theme().primary.opacity(0.3))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div().flex().items_center().gap_2().child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_size(px(14.))
-                                            .text_color(cx.theme().primary)
-                                            .child("✓"),
-                                    )
-                                    .child(div().text_size(px(13.)).font_bold().child(format!(
-                                        "Connected as @{current_user} (5,000 req/hr)"
-                                    ))),
-                            )
-                            .child(
-                                Button::new("btn-disconnect-cred")
-                                    .label("Disconnect / Change")
-                                    .ghost()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        on_disconnect_credential(this, window, cx)
-                                    })),
+                                    .text_size(px(13.))
+                                    .font_bold()
+                                    .child(format!("Connected: @{current_user} (5,000 req/hr)")),
                             ),
-                    );
+                        )
+                        .child(
+                            Button::new("btn-disconnect-cred")
+                                .label("Disconnect / Change")
+                                .ghost()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_disconnect_credential(this, window, cx)
+                                })),
+                        ),
+                );
             } else {
                 // If a system credential (e.g. devenvoy from macOS Keychain / gh CLI) was detected:
                 if let Some((ref username, _)) = props.system_credential {
@@ -218,7 +210,7 @@ pub fn render_project_setup<T: 'static>(
                                             .text_size(px(13.))
                                             .font_bold()
                                             .child(format!(
-                                                "⚡ Detected system account: @{user_label}"
+                                                "Detected system account: @{user_label}"
                                             )),
                                     )
                                     .child(
@@ -270,31 +262,28 @@ pub fn render_project_setup<T: 'static>(
                 let is_webview = props.auth_mode == AuthModeChoice::OAuthWebview;
                 let is_token = props.auth_mode == AuthModeChoice::Token;
 
-                let tab_bar = div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        toggle_button(
-                            "auth-tab-browser",
-                            "🌐 Browser OAuth (127.0.0.1:4567)",
-                            is_browser,
+                let tab_bar =
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            toggle_button("auth-tab-browser", "Browser Login", is_browser)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    on_select_auth_tab(this, AuthModeChoice::OAuthBrowser, cx)
+                                })),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            on_select_auth_tab(this, AuthModeChoice::OAuthBrowser, cx)
-                        })),
-                    )
-                    .child(
-                        toggle_button("auth-tab-webview", "🖥️ In-App Webview", is_webview)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                on_select_auth_tab(this, AuthModeChoice::OAuthWebview, cx)
-                            })),
-                    )
-                    .child(
-                        toggle_button("auth-tab-token", "🔑 Personal Access Token", is_token)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                on_select_auth_tab(this, AuthModeChoice::Token, cx)
-                            })),
-                    );
+                        .child(
+                            toggle_button("auth-tab-webview", "In-App Webview", is_webview)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    on_select_auth_tab(this, AuthModeChoice::OAuthWebview, cx)
+                                })),
+                        )
+                        .child(
+                            toggle_button("auth-tab-token", "Personal Access Token", is_token)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    on_select_auth_tab(this, AuthModeChoice::Token, cx)
+                                })),
+                        );
 
                 content = content.child(tab_bar);
 
@@ -326,7 +315,7 @@ pub fn render_project_setup<T: 'static>(
                                                     .text_size(px(13.))
                                                     .font_bold()
                                                     .text_color(cx.theme().primary)
-                                                    .child("⏳ Waiting for browser callback..."),
+                                                    .child("Waiting for browser callback..."),
                                             )
                                             .child(
                                                 div()
@@ -446,7 +435,7 @@ pub fn render_project_setup<T: 'static>(
                                 )
                                 .child(
                                     Button::new("btn-open-token-gen")
-                                        .label("↗ Create token on provider site")
+                                        .label("Create token on provider website")
                                         .ghost()
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             on_open_token_url(this, window, cx)
@@ -500,48 +489,59 @@ pub fn render_project_setup<T: 'static>(
     div()
         .flex()
         .flex_col()
-        .gap_6()
-        .p_6()
+        .size_full()
+        .min_w_0()
+        .min_h_0()
         .overflow_y_scrollbar()
-        .child(
-            div()
-                .text_size(px(11.))
-                .font_bold()
-                .text_color(cx.theme().primary)
-                .child(format!(
-                    "{} · STEP {} OF 3",
-                    if props.editing {
-                        "EDIT PROJECT"
-                    } else {
-                        "NEW PROJECT"
-                    },
-                    props.step + 1
-                )),
-        )
-        .child(div().text_size(px(27.)).font_bold().child(title))
-        .child(content)
+        .p_6()
         .child(
             div()
                 .flex()
-                .gap_3()
+                .flex_col()
+                .w_full()
+                .max_w(px(860.))
+                .min_w_0()
+                .gap_6()
                 .child(
-                    Button::new("setup-back")
-                        .label(if props.step == 0 { "Cancel" } else { "Back" })
-                        .on_click(cx.listener(move |this, _, _, cx| on_back(this, cx))),
-                )
-                .child(
-                    Button::new("setup-next")
-                        .label(if props.step == 2 {
+                    div()
+                        .text_size(px(11.))
+                        .font_bold()
+                        .text_color(cx.theme().primary)
+                        .child(format!(
+                            "{} · STEP {} OF 3",
                             if props.editing {
-                                "Save project"
+                                "EDIT PROJECT"
                             } else {
-                                "Create project"
-                            }
-                        } else {
-                            "Continue"
-                        })
-                        .primary()
-                        .on_click(cx.listener(move |this, _, _, cx| on_next(this, cx))),
+                                "NEW PROJECT"
+                            },
+                            props.step + 1
+                        )),
+                )
+                .child(div().text_size(px(27.)).font_bold().child(title))
+                .child(content)
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .child(
+                            Button::new("setup-back")
+                                .label(if props.step == 0 { "Cancel" } else { "Back" })
+                                .on_click(cx.listener(move |this, _, _, cx| on_back(this, cx))),
+                        )
+                        .child(
+                            Button::new("setup-next")
+                                .label(if props.step == 2 {
+                                    if props.editing {
+                                        "Save project"
+                                    } else {
+                                        "Create project"
+                                    }
+                                } else {
+                                    "Continue"
+                                })
+                                .primary()
+                                .on_click(cx.listener(move |this, _, _, cx| on_next(this, cx))),
+                        ),
                 ),
         )
 }

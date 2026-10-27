@@ -33,17 +33,17 @@ pub fn render_reconcile<T: 'static>(
 
     let (status_title, status_desc, is_synced) = match report_opt {
         Some(report) if report.is_synchronized() => (
-            "✓ SYNCHRONIZED",
+            "SYNCHRONIZED",
             "SQLite database and local data.json backup snapshot match perfectly.",
             true,
         ),
         Some(_) => (
-            "⚠ MISMATCH DETECTED",
+            "MISMATCH DETECTED",
             "Discrepancies found between database and local data.json backup snapshot.",
             false,
         ),
         None => (
-            "ℹ CHECKING STATUS",
+            "CHECKING STATUS",
             "Inspect or select a project with a clone location.",
             false,
         ),

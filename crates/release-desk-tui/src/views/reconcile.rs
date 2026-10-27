@@ -20,15 +20,15 @@ pub fn render_reconcile(frame: &mut Frame, area: Rect, state: &AppState) {
     // Header Status Card
     let (status_text, status_color) = match report_opt {
         Some(report) if report.is_synchronized() => (
-            "✓ SYNCHRONIZED: Database and local .release-desk/data.json backup match perfectly.",
+            "SYNCHRONIZED: Database and local .release-desk/data.json backup match perfectly.",
             Color::Green,
         ),
         Some(_) => (
-            "⚠ MISMATCH DETECTED: Discrepancy found between SQLite database and local backup snapshot.",
+            "MISMATCH DETECTED: Discrepancy found between SQLite database and local backup snapshot.",
             Color::Yellow,
         ),
         None => (
-            "ℹ Backup status: checking or no local backup snapshot recorded.",
+            "Backup status: checking or no local backup snapshot recorded.",
             Color::DarkGray,
         ),
     };
