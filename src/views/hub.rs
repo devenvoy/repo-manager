@@ -1,6 +1,7 @@
 //! Project hub: the starting point for all independent workspaces.
 
 use crate::components::provider_icon::provider_icon;
+use crate::components::ui_icons::folder_icon;
 use crate::workspace::WorkspaceProject;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
@@ -22,7 +23,7 @@ pub fn render_hub<
     on_new: FNew,
     on_open: FOpen,
 ) -> impl IntoElement {
-    let mut cards = div().flex().flex_wrap().gap_4();
+    let mut cards = div().flex().flex_wrap().gap_4().w_full().min_w_0();
     for project in projects {
         cards = cards.child(render_project_card(project, cx, on_open));
     }
@@ -43,42 +44,112 @@ pub fn render_hub<
         .flex_col()
         .gap_6()
         .p_6()
+        .w_full()
+        .min_w_0()
         .overflow_y_scrollbar()
+        // Page Head
         .child(
             div()
                 .flex()
                 .items_center()
                 .justify_between()
+                .gap_4()
+                .w_full()
+                .min_w_0()
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(div().text_size(px(11.)).font_bold().text_color(cx.theme().primary).child("PROJECT FLEET HUB"))
-                        .child(div().text_size(px(27.)).font_bold().child("Projects, all in one place."))
-                        .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child("Each project has its own folder, Git provider, account, sources, and repositories.")),
+                        .max_w(px(680.))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .font_bold()
+                                .text_color(cx.theme().primary)
+                                .child("PROJECT FLEET HUB"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(26.))
+                                .font_bold()
+                                .text_color(cx.theme().foreground)
+                                .child("Projects, all in one place."),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Each project binds to a local folder with its own Git provider, account, sources, and repositories."),
+                        ),
                 )
-                .child(Button::new("new-project").label("+ New project").primary().on_click(cx.listener(move |this, _, window, cx| on_new(this, window, cx)))),
+                .child(
+                    Button::new("new-project")
+                        .label("+ New project")
+                        .primary()
+                        .on_click(cx.listener(move |this, _, window, cx| on_new(this, window, cx))),
+                ),
         )
+        // Hub Content
         .child(if projects.is_empty() {
             div()
-                .p_8()
-                .rounded_xl()
+                .p_6()
+                .rounded_2xl()
                 .bg(cx.theme().secondary)
                 .border_1()
                 .border_color(cx.theme().border)
                 .flex()
-                .flex_col()
-                .items_start()
-                .gap_4()
-                .child(div().text_size(px(11.)).font_bold().text_color(cx.theme().primary).child("GET STARTED"))
-                .child(div().text_size(px(22.)).font_bold().child("Build a workspace around a folder on your disk."))
-                .child(div().text_size(px(13.)).text_color(cx.theme().muted_foreground).child("Release Desk manages multiple Git projects on your machine. Each project binds to a directory, authenticates with any Git host (GitHub, GitLab, Bitbucket, Gitea, etc.), ingests multiple creator accounts, and aggregates all release apps into your local store."))
+                .items_center()
+                .justify_between()
+                .gap_6()
+                .w_full()
+                .min_w_0()
                 .child(
-                    Button::new("hero-create-project")
-                        .label("+ Create Your First Project")
-                        .primary()
-                        .on_click(cx.listener(move |this, _, window, cx| on_new(this, window, cx))),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap_3()
+                        .max_w(px(580.))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .font_bold()
+                                .text_color(cx.theme().primary)
+                                .child("START HERE"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(22.))
+                                .font_bold()
+                                .text_color(cx.theme().foreground)
+                                .child("Build a workspace around a folder."),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Release Desk manages multiple Git projects on your machine. Each project connects to any Git host (GitHub, GitLab, Bitbucket, Gitea, etc.), ingests creator accounts, and aggregates all release apps into your local store."),
+                        )
+                        .child(
+                            Button::new("hero-create-project")
+                                .label("+ Create Your First Project")
+                                .primary()
+                                .on_click(cx.listener(move |this, _, window, cx| on_new(this, window, cx))),
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(72.))
+                        .h(px(72.))
+                        .rounded_2xl()
+                        .bg(cx.theme().primary)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(folder_icon()),
                 )
                 .into_any_element()
         } else {
@@ -86,6 +157,8 @@ pub fn render_hub<
                 .flex()
                 .flex_col()
                 .gap_5()
+                .w_full()
+                .min_w_0()
                 .child(
                     div()
                         .flex()
@@ -94,7 +167,13 @@ pub fn render_hub<
                         .child(stat_pill("Source Profiles", &total_sources.to_string(), cx))
                         .child(stat_pill("Tracked Repos", &total_repos.to_string(), cx)),
                 )
-                .child(div().text_size(px(16.)).font_bold().child(format!("All projects  ·  {}", projects.len())))
+                .child(
+                    div()
+                        .text_size(px(16.))
+                        .font_bold()
+                        .text_color(cx.theme().foreground)
+                        .child(format!("All projects  ·  {}", projects.len())),
+                )
                 .child(cards)
                 .into_any_element()
         })
@@ -115,6 +194,7 @@ fn stat_pill<T: 'static>(label: &str, value: &str, cx: &Context<T>) -> impl Into
             div()
                 .text_size(px(18.))
                 .font_bold()
+                .text_color(cx.theme().foreground)
                 .child(value.to_string()),
         )
         .child(
@@ -144,6 +224,7 @@ fn render_project_card<T: 'static, FOpen: Fn(u128, &mut T, &mut Context<T>) + Co
         .bg(cx.theme().secondary)
         .border_1()
         .border_color(cx.theme().border)
+        .hover(|s| s.border_color(cx.theme().primary))
         .flex()
         .flex_col()
         .gap_4()
@@ -163,6 +244,7 @@ fn render_project_card<T: 'static, FOpen: Fn(u128, &mut T, &mut Context<T>) + Co
                             div()
                                 .text_size(px(17.))
                                 .font_bold()
+                                .text_color(cx.theme().foreground)
                                 .child(project.name.clone()),
                         )
                         .child(
@@ -183,7 +265,12 @@ fn render_project_card<T: 'static, FOpen: Fn(u128, &mut T, &mut Context<T>) + Co
                 .text_color(cx.theme().muted_foreground)
                 .child(project.directory.display().to_string()),
         )
-        .child(div().text_size(px(11.)).child(layout))
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(cx.theme().muted_foreground)
+                .child(layout),
+        )
         .child(
             div()
                 .text_size(px(12.))

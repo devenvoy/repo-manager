@@ -34,9 +34,12 @@ cp "$CLI_BIN" "$BUNDLE_PATH/Contents/MacOS/release-desk"
 chmod +x "$BUNDLE_PATH/Contents/MacOS/repo-manager"
 chmod +x "$BUNDLE_PATH/Contents/MacOS/release-desk"
 
-# 4. Copy Info.plist
-echo "-> Installing Info.plist..."
+# 4. Copy Info.plist and AppIcon
+echo "-> Installing Info.plist and AppIcon..."
 cp "$WORKSPACE_ROOT/resources/Info.plist" "$BUNDLE_PATH/Contents/Info.plist"
+if [ -f "$WORKSPACE_ROOT/resources/AppIcon.icns" ]; then
+    cp "$WORKSPACE_ROOT/resources/AppIcon.icns" "$BUNDLE_PATH/Contents/Resources/AppIcon.icns"
+fi
 
 # 5. Code signing
 if [ -n "${DEVELOPER_ID_APPLICATION:-}" ]; then

@@ -119,33 +119,5 @@ pub fn render_sidebar<T: 'static>(
     }
 
     sidebar = sidebar.child(nav_group);
-
-    // Bottom info box
-    sidebar.child(
-        div()
-            .mt_auto()
-            .p_3()
-            .rounded_xl()
-            .bg(cx.theme().muted)
-            .border_1()
-            .border_color(cx.theme().border)
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(
-                div()
-                    .font_bold()
-                    .text_size(px(11.))
-                    .text_color(cx.theme().foreground)
-                    .child("Local-First Control"),
-            )
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(
-                        "Your credentials, repositories, and releases stay 100% on this machine.",
-                    ),
-            ),
-    )
+    sidebar
 }

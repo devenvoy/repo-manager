@@ -1,6 +1,7 @@
 //! App Store grid and full detail page for the desktop design preview.
 
 use crate::components::app_icon::app_icon;
+use crate::components::ui_icons::{layers_icon, store_icon};
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -40,37 +41,165 @@ pub fn render_store<
         .flex_col()
         .gap_6()
         .p_6()
+        .w_full()
+        .min_w_0()
         .overflow_y_scrollbar()
+        // Page Head
         .child(
             div()
                 .flex()
                 .flex_col()
-                .gap_2()
-                .child(div().text_size(px(11.)).font_bold().text_color(cx.theme().primary).child("LOCAL APP STORE"))
-                .child(div().text_size(px(27.)).font_bold().child("Apps from every project."))
-                .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child("Installable releases from selected repositories will appear together here.")),
+                .gap_1()
+                .max_w(px(680.))
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .font_bold()
+                        .text_color(cx.theme().primary)
+                        .child("LOCAL APP STORE"),
+                )
+                .child(
+                    div()
+                        .text_size(px(26.))
+                        .font_bold()
+                        .text_color(cx.theme().foreground)
+                        .child("Apps from every project."),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Installable releases across all your selected repositories appear together here. Install with one click, update as new tags arrive, and launch directly."),
+                ),
         )
+        // Store Content: Featured Banner + Empty Board or Grid
         .child(if items.is_empty() {
             div()
-                .p_8()
-                .rounded_xl()
-                .bg(cx.theme().secondary)
-                .border_1()
-                .border_color(cx.theme().border)
                 .flex()
                 .flex_col()
-                .items_start()
-                .gap_4()
-                .child(div().text_size(px(11.)).font_bold().text_color(cx.theme().primary).child("LOCAL APP STORE"))
-                .child(div().text_size(px(22.)).font_bold().child("No runnable applications yet."))
-                .child(div().text_size(px(13.)).text_color(cx.theme().muted_foreground).child("Applications with release builds across all your projects appear together in this store. Create a project and track repositories with published releases to install, update, and launch them here."))
+                .gap_6()
+                .w_full()
+                .min_w_0()
+                // Featured Ecosystem Hero Banner (Design Prototype)
+                .child(
+                    div()
+                        .p_6()
+                        .rounded_2xl()
+                        .bg(cx.theme().primary)
+                        .text_color(gpui_kit::hsla(0., 0., 1., 1.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_6()
+                        .w_full()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .max_w(px(580.))
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .font_bold()
+                                        .text_color(gpui_kit::hsla(232. / 360., 0.8, 0.9, 1.))
+                                        .child("LOCAL APPLICATION ECOSYSTEM"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(20.))
+                                        .font_bold()
+                                        .child("Direct from your source to desktop."),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(gpui_kit::hsla(232. / 360., 0.6, 0.9, 0.9))
+                                        .child("Applications built and published across your projects install into ~/Applications with one click. Upstream releases are monitored with automatic update notifications."),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(60.))
+                                .h(px(60.))
+                                .rounded_2xl()
+                                .bg(gpui_kit::hsla(0., 0., 1., 0.15))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(store_icon()),
+                        ),
+                )
+                // Polished Empty State Board
+                .child(
+                    div()
+                        .p_10()
+                        .rounded_2xl()
+                        .bg(cx.theme().secondary)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .text_center()
+                        .gap_3()
+                        .w_full()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .w(px(52.))
+                                .h(px(52.))
+                                .rounded_2xl()
+                                .bg(cx.theme().muted)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(layers_icon()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(17.))
+                                .font_bold()
+                                .text_color(cx.theme().foreground)
+                                .child("No Applications Discovered Yet"),
+                        )
+                        .child(
+                            div()
+                                .max_w(px(460.))
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Create a project and select repositories with published release assets (DMGs, installers, archives) to install and launch them here."),
+                        )
+                        .child(
+                            div()
+                                .mt_2()
+                                .child(
+                                    Button::new("goto-hub-from-store")
+                                        .label("Go to Project Hub")
+                                        .primary()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            on_back(this, cx);
+                                        })),
+                                ),
+                        ),
+                )
                 .into_any_element()
         } else {
             div()
                 .flex()
                 .flex_col()
                 .gap_4()
-                .child(div().text_size(px(17.)).font_bold().child(format!("All applications  ·  {}", items.len())))
+                .w_full()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(16.))
+                        .font_bold()
+                        .text_color(cx.theme().foreground)
+                        .child(format!("All applications  ·  {}", items.len())),
+                )
                 .child(grid)
                 .into_any_element()
         })

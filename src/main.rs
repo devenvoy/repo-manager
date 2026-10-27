@@ -15,6 +15,15 @@ use repo_manager::views;
 use repo_manager::workspace::{ProjectSection, ProviderChoice, WorkspaceProject, expand_directory};
 use repo_manager::workspace_sources::{RepositoryListMode, WorkspaceSource};
 
+#[derive(Clone, Debug, PartialEq)]
+enum NavLocation {
+    ProjectHub,
+    Project(u128, ProjectSection),
+    AppStore,
+    AppDetail(String),
+    Settings,
+}
+
 struct ReleaseDesk {
     settings: Settings,
     projects: Vec<WorkspaceProject>,
@@ -38,6 +47,8 @@ struct ReleaseDesk {
     reviewing_clones: bool,
     selected_platform: &'static str,
     message: String,
+    nav_history: Vec<NavLocation>,
+    nav_index: usize,
 }
 
 impl ReleaseDesk {
@@ -47,9 +58,9 @@ impl ReleaseDesk {
             Err(error) => (Settings::default(), error),
         };
         let projects = settings.projects.clone();
-        let tab = match settings.start_view {
-            StartView::ProjectHub => WorkspaceTab::ProjectHub,
-            StartView::AppStore => WorkspaceTab::AppStore,
+        let (tab, initial_loc) = match settings.start_view {
+            StartView::ProjectHub => (WorkspaceTab::ProjectHub, NavLocation::ProjectHub),
+            StartView::AppStore => (WorkspaceTab::AppStore, NavLocation::AppStore),
         };
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. Product Suite"));
         let directory_input =
@@ -85,9 +96,70 @@ impl ReleaseDesk {
             reviewing_clones: false,
             selected_platform: "macOS",
             message,
+            nav_history: vec![initial_loc],
+            nav_index: 0,
         };
         app.apply_appearance(window, cx);
         app
+    }
+
+    fn navigate_to(&mut self, loc: NavLocation, cx: &mut Context<Self>) {
+        if self.nav_index < self.nav_history.len() && self.nav_history[self.nav_index] == loc {
+            return;
+        }
+        if self.nav_index + 1 < self.nav_history.len() {
+            self.nav_history.truncate(self.nav_index + 1);
+        }
+        self.nav_history.push(loc.clone());
+        self.nav_index = self.nav_history.len() - 1;
+        self.apply_nav_location(loc);
+        cx.notify();
+    }
+
+    fn apply_nav_location(&mut self, loc: NavLocation) {
+        match loc {
+            NavLocation::ProjectHub => {
+                self.tab = WorkspaceTab::ProjectHub;
+                self.selected_project_id = None;
+                self.setup_active = false;
+            }
+            NavLocation::Project(id, section) => {
+                self.tab = WorkspaceTab::ProjectHub;
+                self.selected_project_id = Some(id);
+                self.project_section = section;
+                self.setup_active = false;
+            }
+            NavLocation::AppStore => {
+                self.tab = WorkspaceTab::AppStore;
+                self.selected_app_id = None;
+            }
+            NavLocation::AppDetail(id) => {
+                self.tab = WorkspaceTab::AppStore;
+                self.selected_app_id = Some(id);
+            }
+            NavLocation::Settings => {
+                self.tab = WorkspaceTab::Settings;
+                self.setup_active = false;
+            }
+        }
+    }
+
+    fn go_back(&mut self, cx: &mut Context<Self>) {
+        if self.nav_index > 0 {
+            self.nav_index -= 1;
+            let loc = self.nav_history[self.nav_index].clone();
+            self.apply_nav_location(loc);
+            cx.notify();
+        }
+    }
+
+    fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if self.nav_index + 1 < self.nav_history.len() {
+            self.nav_index += 1;
+            let loc = self.nav_history[self.nav_index].clone();
+            self.apply_nav_location(loc);
+            cx.notify();
+        }
     }
 
     fn apply_appearance(&self, window: &Window, cx: &mut Context<Self>) {
@@ -97,6 +169,26 @@ impl ReleaseDesk {
             Appearance::Dark => ThemeMode::Dark,
         };
         Theme::change(mode, None, cx);
+        let is_dark = mode.is_dark();
+        Theme::update(cx, |theme| {
+            if is_dark {
+                theme.background = gpui_kit::hsla(222.0 / 360.0, 0.40, 0.08, 1.0);
+                theme.secondary = gpui_kit::hsla(222.0 / 360.0, 0.40, 0.05, 1.0);
+                theme.border = gpui_kit::hsla(217.0 / 360.0, 0.25, 0.20, 1.0);
+                theme.primary = gpui_kit::hsla(232.0 / 360.0, 0.85, 0.65, 1.0);
+                theme.foreground = gpui_kit::hsla(210.0 / 360.0, 0.40, 0.98, 1.0);
+                theme.muted_foreground = gpui_kit::hsla(215.0 / 360.0, 0.20, 0.65, 1.0);
+                theme.muted = gpui_kit::hsla(222.0 / 360.0, 0.35, 0.14, 1.0);
+            } else {
+                theme.background = gpui_kit::hsla(220.0 / 360.0, 0.14, 0.97, 1.0);
+                theme.secondary = gpui_kit::hsla(220.0 / 360.0, 0.18, 0.95, 1.0);
+                theme.border = gpui_kit::hsla(216.0 / 360.0, 0.23, 0.91, 1.0);
+                theme.primary = gpui_kit::hsla(232.0 / 360.0, 0.80, 0.56, 1.0);
+                theme.foreground = gpui_kit::hsla(218.0 / 360.0, 0.37, 0.15, 1.0);
+                theme.muted_foreground = gpui_kit::hsla(217.0 / 360.0, 0.14, 0.48, 1.0);
+                theme.muted = gpui_kit::hsla(220.0 / 360.0, 0.25, 0.93, 1.0);
+            }
+        });
     }
 
     fn begin_setup(&mut self, editing: Option<u128>, window: &mut Window, cx: &mut Context<Self>) {
@@ -443,30 +535,45 @@ impl ReleaseDesk {
 
 impl Render for ReleaseDesk {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let location = match self.tab {
-            WorkspaceTab::AppStore => "App Store".to_string(),
-            WorkspaceTab::Settings => "Settings".to_string(),
-            _ => self
-                .selected_project_id
-                .and_then(|id| self.projects.iter().find(|project| project.id == id))
-                .map_or_else(
-                    || "All projects".to_string(),
-                    |project| project.name.clone(),
-                ),
+        let (location_title, project_name) = match self.tab {
+            WorkspaceTab::AppStore => {
+                if let Some(id) = &self.selected_app_id {
+                    (id.as_str(), None)
+                } else {
+                    ("App Store", None)
+                }
+            }
+            WorkspaceTab::Settings => ("Settings", None),
+            WorkspaceTab::ProjectHub => {
+                if self.setup_active {
+                    if self.editing_project_id.is_some() {
+                        ("Edit Project", None)
+                    } else {
+                        ("New Project", None)
+                    }
+                } else if let Some(project) = self
+                    .selected_project_id
+                    .and_then(|id| self.projects.iter().find(|p| p.id == id))
+                {
+                    (self.project_section.label(), Some(project.name.as_str()))
+                } else {
+                    ("Projects", None)
+                }
+            }
+            _ => ("Workspace", None),
         };
+
         let content = match self.tab {
             WorkspaceTab::AppStore => views::render_store(
                 &self.store_items,
                 self.selected_app_id.as_deref(),
                 cx,
                 |id, this: &mut Self, cx| {
-                    this.selected_app_id = Some(id);
-                    cx.notify();
+                    this.navigate_to(NavLocation::AppDetail(id), cx);
                 },
                 |id, this: &mut Self, cx| this.preview_app_action(id, cx),
                 |this: &mut Self, cx| {
-                    this.selected_app_id = None;
-                    cx.notify();
+                    this.navigate_to(NavLocation::ProjectHub, cx);
                 },
             )
             .into_any_element(),
@@ -635,8 +742,7 @@ impl Render for ReleaseDesk {
                             cx.notify();
                         },
                         |this: &mut Self, cx| {
-                            this.selected_project_id = None;
-                            cx.notify();
+                            this.navigate_to(NavLocation::ProjectHub, cx);
                         },
                         |this: &mut Self, window, cx| {
                             this.begin_setup(this.selected_project_id, window, cx)
@@ -650,9 +756,10 @@ impl Render for ReleaseDesk {
                         cx,
                         |this: &mut Self, window, cx| this.begin_setup(None, window, cx),
                         |id, this: &mut Self, cx| {
-                            this.selected_project_id = Some(id);
-                            this.project_section = ProjectSection::Overview;
-                            cx.notify();
+                            this.navigate_to(
+                                NavLocation::Project(id, ProjectSection::Overview),
+                                cx,
+                            );
                         },
                     )
                     .into_any_element()
@@ -670,11 +777,13 @@ impl Render for ReleaseDesk {
                 self.projects.len(),
                 cx,
                 |this: &mut Self, tab, cx| {
-                    this.tab = tab;
-                    this.setup_active = false;
-                    this.selected_project_id = None;
-                    this.selected_app_id = None;
-                    cx.notify();
+                    let loc = match tab {
+                        WorkspaceTab::ProjectHub => NavLocation::ProjectHub,
+                        WorkspaceTab::AppStore => NavLocation::AppStore,
+                        WorkspaceTab::Settings => NavLocation::Settings,
+                        _ => NavLocation::ProjectHub,
+                    };
+                    this.navigate_to(loc, cx);
                 },
             ))
             .child(
@@ -682,17 +791,29 @@ impl Render for ReleaseDesk {
                     .flex()
                     .flex_col()
                     .flex_1()
+                    .min_w_0()
                     .h_full()
+                    .overflow_hidden()
                     .child(render_header(
-                        &location,
+                        self.nav_index > 0,
+                        self.nav_index + 1 < self.nav_history.len(),
+                        location_title,
+                        project_name,
                         &self.message,
-                        self.settings.appearance,
                         cx,
-                        |this: &mut Self, appearance, window, cx| {
-                            this.set_appearance(appearance, window, cx);
+                        |this: &mut Self, cx| this.go_back(cx),
+                        |this: &mut Self, cx| this.go_forward(cx),
+                        |this: &mut Self, cx| this.navigate_to(NavLocation::ProjectHub, cx),
+                        |this: &mut Self, cx| {
+                            if let Some(id) = this.selected_project_id {
+                                this.navigate_to(
+                                    NavLocation::Project(id, ProjectSection::Overview),
+                                    cx,
+                                );
+                            }
                         },
                     ))
-                    .child(content),
+                    .child(div().flex_1().min_w_0().overflow_hidden().child(content)),
             )
     }
 }
