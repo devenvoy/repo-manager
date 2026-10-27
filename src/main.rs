@@ -791,9 +791,7 @@ impl Render for ReleaseDesk {
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .min_w_0()
                     .h_full()
-                    .overflow_hidden()
                     .child(render_header(
                         self.nav_index > 0,
                         self.nav_index + 1 < self.nav_history.len(),
@@ -813,7 +811,7 @@ impl Render for ReleaseDesk {
                             }
                         },
                     ))
-                    .child(div().flex_1().min_w_0().overflow_hidden().child(content)),
+                    .child(content),
             )
     }
 }

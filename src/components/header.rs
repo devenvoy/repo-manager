@@ -107,15 +107,12 @@ pub fn render_header<
         .bg(cx.theme().secondary)
         .border_b_1()
         .border_color(cx.theme().border)
-        .w_full()
-        .min_w_0()
         // Left side: Nav arrows + Breadcrumbs
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap_3()
-                .min_w_0()
                 .child(
                     div()
                         .flex()
@@ -126,13 +123,9 @@ pub fn render_header<
                 )
                 .child(crumbs),
         )
-        // Right side: Status message (constrained, no clipping, no theme toggle)
+        // Right side: Status message
         .child(
             div()
-                .flex()
-                .items_center()
-                .max_w(px(360.))
-                .overflow_hidden()
                 .text_size(px(11.))
                 .text_color(cx.theme().muted_foreground)
                 .child(status.to_string()),

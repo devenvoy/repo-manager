@@ -41,8 +41,6 @@ pub fn render_store<
         .flex_col()
         .gap_6()
         .p_6()
-        .w_full()
-        .min_w_0()
         .overflow_y_scrollbar()
         // Page Head
         .child(
@@ -50,7 +48,6 @@ pub fn render_store<
                 .flex()
                 .flex_col()
                 .gap_1()
-                .max_w(px(680.))
                 .child(
                     div()
                         .text_size(px(10.))
@@ -78,8 +75,6 @@ pub fn render_store<
                 .flex()
                 .flex_col()
                 .gap_6()
-                .w_full()
-                .min_w_0()
                 // Featured Ecosystem Hero Banner (Design Prototype)
                 .child(
                     div()
@@ -91,8 +86,6 @@ pub fn render_store<
                         .items_center()
                         .justify_between()
                         .gap_6()
-                        .w_full()
-                        .min_w_0()
                         .child(
                             div()
                                 .flex()
@@ -145,8 +138,6 @@ pub fn render_store<
                         .justify_center()
                         .text_center()
                         .gap_3()
-                        .w_full()
-                        .min_w_0()
                         .child(
                             div()
                                 .w(px(52.))
@@ -191,8 +182,6 @@ pub fn render_store<
                 .flex()
                 .flex_col()
                 .gap_4()
-                .w_full()
-                .min_w_0()
                 .child(
                     div()
                         .text_size(px(16.))

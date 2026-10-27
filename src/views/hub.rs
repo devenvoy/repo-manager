@@ -23,7 +23,7 @@ pub fn render_hub<
     on_new: FNew,
     on_open: FOpen,
 ) -> impl IntoElement {
-    let mut cards = div().flex().flex_wrap().gap_4().w_full().min_w_0();
+    let mut cards = div().flex().flex_wrap().gap_4();
     for project in projects {
         cards = cards.child(render_project_card(project, cx, on_open));
     }
@@ -44,8 +44,6 @@ pub fn render_hub<
         .flex_col()
         .gap_6()
         .p_6()
-        .w_full()
-        .min_w_0()
         .overflow_y_scrollbar()
         // Page Head
         .child(
@@ -54,15 +52,11 @@ pub fn render_hub<
                 .items_center()
                 .justify_between()
                 .gap_4()
-                .w_full()
-                .min_w_0()
                 .child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .max_w(px(680.))
-                        .min_w_0()
                         .child(
                             div()
                                 .text_size(px(10.))
@@ -103,8 +97,6 @@ pub fn render_hub<
                 .items_center()
                 .justify_between()
                 .gap_6()
-                .w_full()
-                .min_w_0()
                 .child(
                     div()
                         .flex()
@@ -112,7 +104,6 @@ pub fn render_hub<
                         .items_start()
                         .gap_3()
                         .max_w(px(580.))
-                        .min_w_0()
                         .child(
                             div()
                                 .text_size(px(10.))
@@ -157,8 +148,6 @@ pub fn render_hub<
                 .flex()
                 .flex_col()
                 .gap_5()
-                .w_full()
-                .min_w_0()
                 .child(
                     div()
                         .flex()
