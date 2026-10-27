@@ -18,7 +18,7 @@ pub use hub::render_hub;
 pub use installers::render_installers;
 pub use onboarding::render_onboarding;
 pub use overview::{OverviewMetrics, render_overview};
-pub use project_setup::{ProjectSetupProps, render_project_setup};
+pub use project_setup::{ProjectSetupActions, ProjectSetupProps, render_project_setup};
 pub use project_sources::{
     render_clone_review_modal, render_project_repositories, render_project_sources,
 };

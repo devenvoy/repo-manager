@@ -221,3 +221,145 @@ fn test_no_unicode_dots_or_checkbox_glyphs() {
         assert!(!tab.title().contains('☐'));
     }
 }
+
+#[test]
+fn test_find_saved_accounts_for_provider() {
+    use release_desk_core::project::DiskLayout;
+    use repo_manager::workspace::{
+        ProviderChoice, WorkspaceProject, find_saved_accounts_for_provider,
+    };
+    use std::path::PathBuf;
+
+    let projects = vec![
+        WorkspaceProject {
+            id: 1,
+            name: "Alpha".into(),
+            directory: PathBuf::from("/tmp/alpha"),
+            provider: ProviderChoice::GitHub,
+            account: "octocat".into(),
+            custom_host: None,
+            credential_ref: Some("release_desk_github_octocat".into()),
+            disk_layout: DiskLayout::Grouped,
+            sources: vec![],
+            repository_list_mode: Default::default(),
+        },
+        WorkspaceProject {
+            id: 2,
+            name: "Beta".into(),
+            directory: PathBuf::from("/tmp/beta"),
+            provider: ProviderChoice::GitHub,
+            account: "octocat".into(),
+            custom_host: None,
+            credential_ref: Some("release_desk_github_octocat".into()),
+            disk_layout: DiskLayout::Grouped,
+            sources: vec![],
+            repository_list_mode: Default::default(),
+        },
+        WorkspaceProject {
+            id: 3,
+            name: "Gamma".into(),
+            directory: PathBuf::from("/tmp/gamma"),
+            provider: ProviderChoice::GitLab,
+            account: "gitlab-user".into(),
+            custom_host: None,
+            credential_ref: Some("release_desk_gitlab_gitlab-user".into()),
+            disk_layout: DiskLayout::Flat,
+            sources: vec![],
+            repository_list_mode: Default::default(),
+        },
+    ];
+
+    let github_accounts = find_saved_accounts_for_provider(&projects, ProviderChoice::GitHub);
+    assert_eq!(github_accounts.len(), 1);
+    assert_eq!(github_accounts[0].handle, "octocat");
+    assert_eq!(
+        github_accounts[0].credential_ref.as_deref(),
+        Some("release_desk_github_octocat")
+    );
+    assert!(github_accounts[0].has_keychain_secret);
+
+    let gitlab_accounts = find_saved_accounts_for_provider(&projects, ProviderChoice::GitLab);
+    assert_eq!(gitlab_accounts.len(), 1);
+    assert_eq!(gitlab_accounts[0].handle, "gitlab-user");
+
+    let bitbucket_accounts = find_saved_accounts_for_provider(&projects, ProviderChoice::Bitbucket);
+    assert!(bitbucket_accounts.is_empty());
+}
+
+#[test]
+fn test_provider_choice_conversion_and_str() {
+    use release_desk_core::provider::GitProviderKind;
+    use repo_manager::workspace::ProviderChoice;
+
+    assert_eq!(ProviderChoice::GitHub.as_str(), "github");
+    assert_eq!(ProviderChoice::GitLab.as_str(), "gitlab");
+    assert_eq!(ProviderChoice::Bitbucket.as_str(), "bitbucket");
+
+    assert_eq!(
+        GitProviderKind::from(ProviderChoice::GitHub),
+        GitProviderKind::GitHub
+    );
+    assert_eq!(
+        GitProviderKind::from(ProviderChoice::GitLab),
+        GitProviderKind::GitLab
+    );
+    assert_eq!(
+        GitProviderKind::from(ProviderChoice::Bitbucket),
+        GitProviderKind::Bitbucket
+    );
+}
+
+#[test]
+fn test_oauth_auth_use_case_with_browser_and_webview_fallback() {
+    use release_desk_application::event::EventBroadcaster;
+    use release_desk_application::use_case::auth::{
+        AuthResult, AuthenticateCommand, AuthenticateProviderUseCase, OAuthConfig,
+    };
+    use release_desk_core::port::SecretStorePort;
+    use release_desk_core::project::AccountLogin;
+    use release_desk_core::provider::{AuthMethod, GitProviderKind};
+    use release_desk_store::auth::{ModalWebviewAuthPort, SystemBrowserAuthPort};
+    use release_desk_store::credentials::OsSecretStore;
+    use std::sync::Arc;
+
+    let secret_store = Arc::new(OsSecretStore::new());
+    // SystemBrowserAuthPort::new_simulating_missing() ensures fallback to ModalWebviewAuthPort!
+    let browser = Arc::new(SystemBrowserAuthPort::new_simulating_missing());
+    let webview = Arc::new(ModalWebviewAuthPort::new());
+    let events = EventBroadcaster::default();
+    let auth_uc = AuthenticateProviderUseCase::new(secret_store.clone(), browser, webview, events);
+
+    let oauth = OAuthConfig {
+        client_id: "test-client".into(),
+        auth_url: "https://github.com/login/oauth/authorize".into(),
+        token_url: "https://github.com/login/oauth/access_token".into(),
+        redirect_uri: "http://127.0.0.1:4567/callback".into(),
+        scopes: vec!["repo".into()],
+    };
+
+    let cmd = AuthenticateCommand {
+        provider: GitProviderKind::GitHub,
+        account_login: AccountLogin::new("octocat").unwrap(),
+        method: AuthMethod::OAuthBrowser,
+        oauth_config: Some(oauth),
+    };
+
+    let result = auth_uc.execute(cmd).expect("auth execution should succeed");
+    match result {
+        AuthResult::Success {
+            credential_ref,
+            account,
+            ..
+        } => {
+            assert_eq!(account.as_str(), "octocat");
+            assert_eq!(credential_ref, "release_desk_github_octocat");
+            // Verify secret was written to secret store!
+            let stored = secret_store
+                .get_secret(&credential_ref)
+                .unwrap()
+                .expect("secret should exist in secret store");
+            assert!(!stored.is_empty());
+        }
+        other => panic!("expected AuthResult::Success, got: {other:?}"),
+    }
+}

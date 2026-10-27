@@ -76,6 +76,77 @@ impl ProviderChoice {
             Self::Custom => "Custom Git server",
         }
     }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GitHub => "github",
+            Self::GitLab => "gitlab",
+            Self::Bitbucket => "bitbucket",
+            Self::AzureDevOps => "azure_devops",
+            Self::Gitea => "gitea",
+            Self::Forgejo => "forgejo",
+            Self::Codeberg => "codeberg",
+            Self::AwsCodeCommit => "aws_codecommit",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+impl From<ProviderChoice> for release_desk_core::provider::GitProviderKind {
+    fn from(choice: ProviderChoice) -> Self {
+        match choice {
+            ProviderChoice::GitHub => release_desk_core::provider::GitProviderKind::GitHub,
+            ProviderChoice::GitLab => release_desk_core::provider::GitProviderKind::GitLab,
+            ProviderChoice::Bitbucket => release_desk_core::provider::GitProviderKind::Bitbucket,
+            other => {
+                release_desk_core::provider::GitProviderKind::Custom(other.as_str().to_string())
+            }
+        }
+    }
+}
+
+/// Account credentials and connection info previously saved for a provider.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SavedAccountInfo {
+    pub handle: String,
+    pub credential_ref: Option<String>,
+    pub has_keychain_secret: bool,
+}
+
+/// Selected authentication workflow mode in Project Setup.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AuthModeChoice {
+    #[default]
+    SavedAccount,
+    OAuthBrowser,
+    OAuthWebview,
+    Token,
+}
+
+/// Find unique saved accounts for a given provider across projects.
+pub fn find_saved_accounts_for_provider(
+    projects: &[WorkspaceProject],
+    provider: ProviderChoice,
+) -> Vec<SavedAccountInfo> {
+    let mut accounts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for p in projects {
+        if p.provider == provider && !p.account.trim().is_empty() {
+            let handle = p.account.trim().to_string();
+            if seen.insert(handle.clone()) {
+                let cred_key = p
+                    .credential_ref
+                    .clone()
+                    .unwrap_or_else(|| format!("release_desk_{}_{}", provider.as_str(), handle));
+                accounts.push(SavedAccountInfo {
+                    handle,
+                    credential_ref: Some(cred_key),
+                    has_keychain_secret: true,
+                });
+            }
+        }
+    }
+    accounts
 }
 
 /// One project always maps to one on-disk directory and one provider account.

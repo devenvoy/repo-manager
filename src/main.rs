@@ -6,14 +6,26 @@ use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, PathPromptOptions, Render,
     Styled as _, Window, WindowOptions, div,
 };
+use release_desk_application::event::EventBroadcaster;
+use release_desk_application::use_case::auth::{
+    AuthResult, AuthenticateCommand, AuthenticateProviderUseCase, OAuthConfig,
+};
 use release_desk_core::app_catalog::{AppActionState, AppStoreItem};
-use release_desk_core::project::DiskLayout;
+use release_desk_core::port::SecretStorePort as _;
+use release_desk_core::project::{AccountLogin, DiskLayout};
+use release_desk_core::provider::{AuthMethod, GitProviderKind};
+use release_desk_store::auth::{ModalWebviewAuthPort, SystemBrowserAuthPort};
+use release_desk_store::credentials::OsSecretStore;
 use repo_manager::components::{render_header, render_sidebar};
 use repo_manager::settings::{self, Appearance, Settings, StartView};
 use repo_manager::state::WorkspaceTab;
 use repo_manager::views;
-use repo_manager::workspace::{ProjectSection, ProviderChoice, WorkspaceProject, expand_directory};
+use repo_manager::workspace::{
+    AuthModeChoice, ProjectSection, ProviderChoice, WorkspaceProject, expand_directory,
+    find_saved_accounts_for_provider,
+};
 use repo_manager::workspace_sources::{RepositoryListMode, WorkspaceSource};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 enum NavLocation {
@@ -49,6 +61,12 @@ struct ReleaseDesk {
     message: String,
     nav_history: Vec<NavLocation>,
     nav_index: usize,
+    secret_store: Arc<OsSecretStore>,
+    auth_uc: AuthenticateProviderUseCase,
+    selected_saved_account: Option<String>,
+    saved_credential_ref: Option<String>,
+    auth_mode_choice: AuthModeChoice,
+    auth_status_message: Option<String>,
 }
 
 impl ReleaseDesk {
@@ -73,6 +91,15 @@ impl ReleaseDesk {
             cx.new(|cx| InputState::new(window, cx).placeholder("Personal access token"));
         let source_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Handle or profile URL"));
+        let secret_store = Arc::new(OsSecretStore::new());
+        let browser_auth = Arc::new(SystemBrowserAuthPort::new());
+        let webview_auth = Arc::new(ModalWebviewAuthPort::new());
+        let auth_uc = AuthenticateProviderUseCase::new(
+            secret_store.clone(),
+            browser_auth.clone(),
+            webview_auth.clone(),
+            EventBroadcaster::default(),
+        );
         let app = Self {
             settings,
             projects,
@@ -98,6 +125,12 @@ impl ReleaseDesk {
             message,
             nav_history: vec![initial_loc],
             nav_index: 0,
+            secret_store,
+            auth_uc,
+            selected_saved_account: None,
+            saved_credential_ref: None,
+            auth_mode_choice: AuthModeChoice::SavedAccount,
+            auth_status_message: None,
         };
         app.apply_appearance(window, cx);
         app
@@ -220,12 +253,44 @@ impl ReleaseDesk {
             .and_then(|project| project.custom_host.as_deref())
             .unwrap_or_default()
             .to_string();
+
+        if let Some(ref orig) = original {
+            self.saved_credential_ref = orig.credential_ref.clone();
+            self.selected_saved_account = Some(orig.account.clone());
+            self.auth_mode_choice = AuthModeChoice::SavedAccount;
+            self.auth_status_message = None;
+        } else {
+            let saved = find_saved_accounts_for_provider(&self.projects, self.setup_provider);
+            if let Some(first) = saved.first() {
+                self.selected_saved_account = Some(first.handle.clone());
+                self.saved_credential_ref = first.credential_ref.clone();
+                self.auth_mode_choice = AuthModeChoice::SavedAccount;
+                self.auth_status_message = Some(format!(
+                    "✓ Using Keychain credentials for @{}. No token needed!",
+                    first.handle
+                ));
+            } else {
+                self.selected_saved_account = None;
+                self.saved_credential_ref = None;
+                self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+                self.auth_status_message = None;
+            }
+        }
+
+        let initial_account = if !account.is_empty() {
+            account
+        } else if let Some(ref sel) = self.selected_saved_account {
+            sel.clone()
+        } else {
+            String::new()
+        };
+
         self.name_input
             .update(cx, |input, cx| input.set_value(name, window, cx));
         self.directory_input
             .update(cx, |input, cx| input.set_value(directory, window, cx));
         self.account_input
-            .update(cx, |input, cx| input.set_value(account, window, cx));
+            .update(cx, |input, cx| input.set_value(initial_account, window, cx));
         self.custom_host_input
             .update(cx, |input, cx| input.set_value(host, window, cx));
         self.token_input
@@ -233,10 +298,238 @@ impl ReleaseDesk {
         cx.notify();
     }
 
+    fn change_setup_provider(
+        &mut self,
+        provider: ProviderChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.setup_provider = provider;
+        let saved = find_saved_accounts_for_provider(&self.projects, provider);
+        if let Some(first) = saved.first() {
+            self.selected_saved_account = Some(first.handle.clone());
+            self.saved_credential_ref = first.credential_ref.clone();
+            self.auth_mode_choice = AuthModeChoice::SavedAccount;
+            self.auth_status_message = Some(format!(
+                "✓ Using Keychain credentials for @{}. No token needed!",
+                first.handle
+            ));
+            self.account_input.update(cx, |input, cx| {
+                input.set_value(first.handle.clone(), window, cx)
+            });
+        } else {
+            self.selected_saved_account = None;
+            self.saved_credential_ref = None;
+            self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+            self.auth_status_message = None;
+            self.account_input
+                .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        }
+        cx.notify();
+    }
+
+    fn select_saved_account(
+        &mut self,
+        handle: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cred_key = format!("release_desk_{}_{}", self.setup_provider.as_str(), handle);
+        self.selected_saved_account = Some(handle.clone());
+        self.saved_credential_ref = Some(cred_key);
+        self.auth_mode_choice = AuthModeChoice::SavedAccount;
+        self.auth_status_message = Some(format!(
+            "✓ Using Keychain credentials for @{}. No token needed!",
+            handle
+        ));
+        self.account_input
+            .update(cx, |input, cx| input.set_value(handle, window, cx));
+        cx.notify();
+    }
+
+    fn toggle_new_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.auth_mode_choice == AuthModeChoice::SavedAccount {
+            self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+            self.selected_saved_account = None;
+            self.saved_credential_ref = None;
+            self.auth_status_message = None;
+            self.account_input
+                .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        } else {
+            let saved = find_saved_accounts_for_provider(&self.projects, self.setup_provider);
+            if let Some(first) = saved.first() {
+                self.select_saved_account(first.handle.clone(), window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn trigger_browser_auth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.account_input.read(cx).value().trim().to_string();
+        let account = if handle.is_empty() {
+            "default-user".to_string()
+        } else {
+            handle
+        };
+        let provider_kind = GitProviderKind::from(self.setup_provider);
+        let account_login = match AccountLogin::new(&account) {
+            Ok(l) => l,
+            Err(_) => match AccountLogin::new("default-user") {
+                Ok(l) => l,
+                Err(e) => {
+                    self.message = format!("Invalid account handle: {e}");
+                    cx.notify();
+                    return;
+                }
+            },
+        };
+        let oauth = OAuthConfig {
+            client_id: "release-desk-app".into(),
+            auth_url: match self.setup_provider {
+                ProviderChoice::GitLab => "https://gitlab.com/oauth/authorize".into(),
+                ProviderChoice::Bitbucket => "https://bitbucket.org/site/oauth2/authorize".into(),
+                _ => "https://github.com/login/oauth/authorize".into(),
+            },
+            token_url: match self.setup_provider {
+                ProviderChoice::GitLab => "https://gitlab.com/oauth/token".into(),
+                ProviderChoice::Bitbucket => {
+                    "https://bitbucket.org/site/oauth2/access_token".into()
+                }
+                _ => "https://github.com/login/oauth/access_token".into(),
+            },
+            redirect_uri: "http://127.0.0.1:4567/callback".into(),
+            scopes: vec!["repo".into(), "read:user".into()],
+        };
+        let cmd = AuthenticateCommand {
+            provider: provider_kind,
+            account_login: account_login.clone(),
+            method: AuthMethod::OAuthBrowser,
+            oauth_config: Some(oauth),
+        };
+        match self.auth_uc.execute(cmd) {
+            Ok(AuthResult::Success {
+                credential_ref,
+                account: logged_in,
+                ..
+            }) => {
+                let acc_name = logged_in.as_str().to_string();
+                self.account_input.update(cx, |input, cx| {
+                    input.set_value(acc_name.clone(), window, cx)
+                });
+                self.saved_credential_ref = Some(credential_ref);
+                self.selected_saved_account = Some(acc_name.clone());
+                self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+                self.auth_status_message = Some(format!(
+                    "✓ Authenticated with {} (@{}) via Browser. Token saved to macOS Keychain.",
+                    self.setup_provider.label(),
+                    acc_name
+                ));
+                self.message = "Authenticated successfully via browser.".into();
+            }
+            Ok(AuthResult::Failed { error, .. }) => {
+                self.message = format!("Browser authentication failed: {error}");
+            }
+            Ok(AuthResult::Cancelled) => {
+                self.message = "Browser authentication was cancelled.".into();
+            }
+            Err(e) => {
+                self.message = format!("Authentication error: {e}");
+            }
+        }
+        cx.notify();
+    }
+
+    fn trigger_webview_auth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.account_input.read(cx).value().trim().to_string();
+        let account = if handle.is_empty() {
+            "default-user".to_string()
+        } else {
+            handle
+        };
+        let provider_kind = GitProviderKind::from(self.setup_provider);
+        let account_login = match AccountLogin::new(&account) {
+            Ok(l) => l,
+            Err(_) => match AccountLogin::new("default-user") {
+                Ok(l) => l,
+                Err(e) => {
+                    self.message = format!("Invalid account handle: {e}");
+                    cx.notify();
+                    return;
+                }
+            },
+        };
+        let oauth = OAuthConfig {
+            client_id: "release-desk-app".into(),
+            auth_url: match self.setup_provider {
+                ProviderChoice::GitLab => "https://gitlab.com/oauth/authorize".into(),
+                ProviderChoice::Bitbucket => "https://bitbucket.org/site/oauth2/authorize".into(),
+                _ => "https://github.com/login/oauth/authorize".into(),
+            },
+            token_url: match self.setup_provider {
+                ProviderChoice::GitLab => "https://gitlab.com/oauth/token".into(),
+                ProviderChoice::Bitbucket => {
+                    "https://bitbucket.org/site/oauth2/access_token".into()
+                }
+                _ => "https://github.com/login/oauth/access_token".into(),
+            },
+            redirect_uri: "http://127.0.0.1:4567/callback".into(),
+            scopes: vec!["repo".into(), "read:user".into()],
+        };
+        let cmd = AuthenticateCommand {
+            provider: provider_kind,
+            account_login: account_login.clone(),
+            method: AuthMethod::OAuthWebview,
+            oauth_config: Some(oauth),
+        };
+        match self.auth_uc.execute(cmd) {
+            Ok(AuthResult::Success {
+                credential_ref,
+                account: logged_in,
+                ..
+            }) => {
+                let acc_name = logged_in.as_str().to_string();
+                self.account_input.update(cx, |input, cx| {
+                    input.set_value(acc_name.clone(), window, cx)
+                });
+                self.saved_credential_ref = Some(credential_ref);
+                self.selected_saved_account = Some(acc_name.clone());
+                self.auth_mode_choice = AuthModeChoice::OAuthWebview;
+                self.auth_status_message = Some(format!(
+                    "✓ Authenticated with {} (@{}) via In-App Webview. Token saved to macOS Keychain.",
+                    self.setup_provider.label(),
+                    acc_name
+                ));
+                self.message = "Authenticated successfully via in-app webview.".into();
+            }
+            Ok(AuthResult::Failed { error, .. }) => {
+                self.message = format!("Webview authentication failed: {error}");
+            }
+            Ok(AuthResult::Cancelled) => {
+                self.message = "Webview authentication was cancelled.".into();
+            }
+            Err(e) => {
+                self.message = format!("Authentication error: {e}");
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_token_mode(&mut self, cx: &mut Context<Self>) {
+        if self.auth_mode_choice == AuthModeChoice::Token {
+            self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+        } else {
+            self.auth_mode_choice = AuthModeChoice::Token;
+        }
+        cx.notify();
+    }
+
     fn setup_back(&mut self, cx: &mut Context<Self>) {
         if self.setup_step == 0 {
             self.setup_active = false;
             self.editing_project_id = None;
+            self.selected_saved_account = None;
+            self.saved_credential_ref = None;
+            self.auth_status_message = None;
         } else {
             self.setup_step -= 1;
         }
@@ -300,10 +593,19 @@ impl ReleaseDesk {
                 + 1
         });
         let token = self.token_input.read(cx).value().trim().to_string();
-        let credential_ref = if token.is_empty() {
-            None
+        let credential_ref = if let Some(ref saved_ref) = self.saved_credential_ref {
+            Some(saved_ref.clone())
+        } else if !token.is_empty() {
+            let cred_key = format!("release_desk_{}_{}", self.setup_provider.as_str(), account);
+            let _ = self.secret_store.set_secret(&cred_key, &token);
+            Some(cred_key)
+        } else if let Some(existing) = self
+            .editing_project_id
+            .and_then(|id| self.projects.iter().find(|project| project.id == id))
+        {
+            existing.credential_ref.clone()
         } else {
-            Some(format!("token:project-{id}"))
+            None
         };
         let project = WorkspaceProject {
             id,
@@ -602,32 +904,64 @@ impl Render for ReleaseDesk {
                 },
             )
             .into_any_element(),
-            _ if self.setup_active => views::render_project_setup(
-                views::ProjectSetupProps {
-                    editing: self.editing_project_id.is_some(),
-                    step: self.setup_step,
-                    provider: self.setup_provider,
-                    disk_layout: self.setup_layout,
-                    name: &self.name_input,
-                    directory: &self.directory_input,
-                    account: &self.account_input,
-                    custom_host: &self.custom_host_input,
-                    token: &self.token_input,
-                },
-                cx,
-                |provider, this: &mut Self, cx| {
-                    this.setup_provider = provider;
-                    cx.notify();
-                },
-                |layout, this: &mut Self, cx| {
-                    this.setup_layout = layout;
-                    cx.notify();
-                },
-                |this: &mut Self, cx| this.setup_next(cx),
-                |this: &mut Self, cx| this.setup_back(cx),
-                |this: &mut Self, window, cx| this.browse_directory(window, cx),
-            )
-            .into_any_element(),
+            _ if self.setup_active => {
+                let saved_accounts =
+                    find_saved_accounts_for_provider(&self.projects, self.setup_provider);
+                let has_existing_credential = self
+                    .editing_project_id
+                    .and_then(|id| self.projects.iter().find(|p| p.id == id))
+                    .is_some_and(|p| p.credential_ref.is_some());
+
+                views::render_project_setup(
+                    views::ProjectSetupProps {
+                        editing: self.editing_project_id.is_some(),
+                        step: self.setup_step,
+                        provider: self.setup_provider,
+                        disk_layout: self.setup_layout,
+                        name: &self.name_input,
+                        directory: &self.directory_input,
+                        account: &self.account_input,
+                        custom_host: &self.custom_host_input,
+                        token: &self.token_input,
+                        saved_accounts,
+                        selected_saved_account: self.selected_saved_account.clone(),
+                        auth_mode: self.auth_mode_choice,
+                        auth_status_message: self.auth_status_message.clone(),
+                        has_existing_credential,
+                    },
+                    cx,
+                    views::ProjectSetupActions {
+                        on_provider: |this: &mut Self, provider, window, cx| {
+                            this.change_setup_provider(provider, window, cx);
+                        },
+                        on_layout: |this: &mut Self, layout, cx: &mut Context<Self>| {
+                            this.setup_layout = layout;
+                            cx.notify();
+                        },
+                        on_next: |this: &mut Self, cx| this.setup_next(cx),
+                        on_back: |this: &mut Self, cx| this.setup_back(cx),
+                        on_browse: |this: &mut Self, window, cx| {
+                            this.browse_directory(window, cx);
+                        },
+                        on_select_account: |this: &mut Self, handle, window, cx| {
+                            this.select_saved_account(handle, window, cx);
+                        },
+                        on_toggle_new_account: |this: &mut Self, window, cx| {
+                            this.toggle_new_account(window, cx);
+                        },
+                        on_auth_browser: |this: &mut Self, window, cx| {
+                            this.trigger_browser_auth(window, cx);
+                        },
+                        on_auth_webview: |this: &mut Self, window, cx| {
+                            this.trigger_webview_auth(window, cx);
+                        },
+                        on_toggle_token_mode: |this: &mut Self, cx| {
+                            this.toggle_token_mode(cx);
+                        },
+                    },
+                )
+                .into_any_element()
+            }
             _ => {
                 if let Some(project) = self
                     .selected_project_id
