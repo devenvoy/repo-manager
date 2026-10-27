@@ -12,6 +12,7 @@ pub mod downloader;
 pub mod github_client;
 pub mod gitlab_client;
 pub mod migration;
+pub mod project_backup;
 pub mod scheduler;
 pub mod sqlite_store;
 
@@ -24,6 +25,7 @@ pub use downloader::HttpDownloadPort;
 pub use github_client::HttpGitHubGateway;
 pub use gitlab_client::HttpGitLabGateway;
 pub use migration::{MigrationError, migrate as run_migrations};
+pub use project_backup::{MismatchReport, ProjectSnapshotManager, RevisionMismatch};
 pub use scheduler::OsSchedulerPort;
 pub use sqlite_store::SqliteStore;
 

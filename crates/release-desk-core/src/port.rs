@@ -8,7 +8,8 @@ use crate::model::{
     ProjectId, ProjectIdentity, PullRequest, Release, RepositoryIdentity,
 };
 use crate::provider::{AuthCallbackStatus, GitProviderKind, WebviewWindowSpec};
-use std::path::Path;
+use crate::snapshot::{MismatchReport, Repository, Snapshot};
+use std::path::{Path, PathBuf};
 
 pub use crate::error::DomainError;
 
@@ -139,6 +140,26 @@ pub trait ArchivePort: Send + Sync {
 
     /// Extract an archive into `target_dir` with traversal protection.
     fn extract_archive(&self, archive_file: &Path, target_dir: &Path) -> Result<(), DomainError>;
+}
+
+/// Abstract project local backup and mismatch reconciliation port.
+pub trait ProjectBackupPort: Send + Sync {
+    /// Write or update the local `data.json` backup snapshot inside the project directory.
+    fn write_backup_snapshot(
+        &self,
+        project_root: &Path,
+        snapshot: &Snapshot,
+    ) -> Result<PathBuf, DomainError>;
+
+    /// Read the local `data.json` backup snapshot if it exists.
+    fn read_backup_snapshot(&self, project_root: &Path) -> Result<Option<Snapshot>, DomainError>;
+
+    /// Compare the local `.release-desk/data.json` backup snapshot against the database records.
+    fn detect_mismatch(
+        &self,
+        project_root: &Path,
+        db_repos: &[Repository],
+    ) -> Result<MismatchReport, DomainError>;
 }
 
 #[cfg(test)]

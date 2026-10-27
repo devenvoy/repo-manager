@@ -70,6 +70,7 @@ async fn full_lifecycle_application_tracer() {
             id: project_id,
             name: project_name.clone(),
             account: account.clone(),
+            clone_location: None,
         })
         .expect("project creation succeeds");
 

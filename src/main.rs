@@ -210,7 +210,7 @@ impl ReleaseDesk {
                     snapshot
                         .repos
                         .iter()
-                        .map(|repo| repo.releases.nodes.len())
+                        .map(|repo| repo.releases.as_ref().map_or(0, |r| r.nodes.len()))
                         .sum::<usize>(),
                     snapshot
                         .repos

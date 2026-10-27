@@ -3,6 +3,7 @@
 use crate::error::{ValidationError, validate_name};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::path::PathBuf;
 
 /// A user-facing project name. Names are never used as filesystem components.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -79,6 +80,30 @@ pub struct AccountIdentity {
 pub struct ProjectIdentity {
     pub id: ProjectId,
     pub name: ProjectName,
+    #[serde(default)]
+    pub clone_location: Option<PathBuf>,
+}
+
+impl ProjectIdentity {
+    pub fn new(id: ProjectId, name: ProjectName) -> Self {
+        Self {
+            id,
+            name,
+            clone_location: None,
+        }
+    }
+
+    pub fn with_clone_location(
+        id: ProjectId,
+        name: ProjectName,
+        clone_location: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            clone_location,
+        }
+    }
 }
 
 /// Independent tracking choices for one repository in one project.

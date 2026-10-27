@@ -7,13 +7,14 @@ pub mod discovery;
 pub mod installer;
 pub mod project;
 pub mod pull_request;
+pub mod reconcile;
 pub mod sync;
 
 pub use auth::{AuthResult, AuthenticateCommand, AuthenticateProviderUseCase, OAuthConfig};
 
 pub use discovery::{
     DiscoverRepositoriesUseCase, DiscoveredRepository, InMemoryTrackingStore,
-    SetTrackingPreferencesUseCase, TrackingStatus, TrackingStore,
+    ProjectRepositoryRecord, SetTrackingPreferencesUseCase, TrackingStatus, TrackingStore,
 };
 pub use installer::{
     CheckInstallerStatusUseCase, CheckInstallerUpdatesUseCase, DownloadAndPlanInstallerUseCase,
@@ -24,4 +25,5 @@ pub use pull_request::{
     InMemoryPullRequestStore, ListPullRequestsUseCase, PullRequestFilter, PullRequestStore,
     SyncPullRequestsUseCase,
 };
+pub use reconcile::ReconcileProjectSnapshotUseCase;
 pub use sync::{SyncAllRepositoriesUseCase, SyncOutcome, SyncRepositoryUseCase, SyncTarget};

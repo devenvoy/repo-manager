@@ -2,18 +2,19 @@
 
 use crate::git::BranchRef;
 use crate::release::ReleaseConnection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
-/// The read-only snapshot written by `storytold-sync.sh`.
-#[derive(Debug, Deserialize)]
+/// The snapshot written by sync operations or legacy scripts.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Snapshot {
     pub org: String,
     pub generated: String,
     pub repos: Vec<Repository>,
 }
 
-/// A repository as captured in the legacy snapshot JSON.
-#[derive(Debug, Deserialize)]
+/// A repository as captured in the snapshot JSON.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Repository {
     pub name: String,
@@ -24,13 +25,43 @@ pub struct Repository {
     pub pushed_at: Option<String>,
     pub primary_language: Option<Language>,
     pub default_branch_ref: Option<BranchRef>,
-    pub releases: ReleaseConnection,
+    #[serde(default)]
+    pub releases: Option<ReleaseConnection>,
 }
 
 /// Primary programming language metadata.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Language {
     pub name: String,
+}
+
+/// Detailed discrepancy report comparing a project folder's data.json backup against SQLite.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MismatchReport {
+    pub project_root: PathBuf,
+    pub disk_snapshot_present: bool,
+    pub matched_repositories: Vec<String>,
+    pub missing_in_database: Vec<String>,
+    pub missing_on_disk: Vec<String>,
+    pub revision_mismatches: Vec<RevisionMismatch>,
+}
+
+impl MismatchReport {
+    /// Returns true if the database and the project folder data.json are in complete sync.
+    pub fn is_synchronized(&self) -> bool {
+        self.disk_snapshot_present
+            && self.missing_in_database.is_empty()
+            && self.missing_on_disk.is_empty()
+            && self.revision_mismatches.is_empty()
+    }
+}
+
+/// A revision or head commit discrepancy for a specific repository.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RevisionMismatch {
+    pub repository: String,
+    pub disk_revision: Option<String>,
+    pub db_revision: Option<String>,
 }
 
 /// Parse a snapshot without performing I/O. Rejects non-snapshot JSON documents.

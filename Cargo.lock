@@ -5847,12 +5847,16 @@ name = "release-desk-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "release-desk-application",
  "release-desk-core",
  "release-desk-git",
  "release-desk-store",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

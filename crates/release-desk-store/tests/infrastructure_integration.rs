@@ -29,10 +29,7 @@ fn real_sqlite_and_storage_lifecycle_integration() {
     // 2. Project lifecycle via ProjectStore
     let project_id = ProjectId::from_u128(999);
     let project_name = ProjectName::new("Storytold Infrastructure").unwrap();
-    let project = ProjectIdentity {
-        id: project_id,
-        name: project_name.clone(),
-    };
+    let project = ProjectIdentity::new(project_id, project_name.clone());
 
     store.save_project(&project).expect("save project");
 

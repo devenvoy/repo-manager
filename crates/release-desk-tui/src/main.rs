@@ -286,7 +286,7 @@ fn draw_repositories(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Re
             format!("{}\n\n{}\n\nLanguage: {}\nArchived: {}\nReleases: {}\nDefault branch: {}\n\n{}",
                 repo.name, repo.description.as_deref().unwrap_or("No description"),
                 repo.primary_language.as_ref().map_or("Unknown", |language| &language.name),
-                if repo.is_archived { "Yes" } else { "No" }, repo.releases.nodes.len(),
+                if repo.is_archived { "Yes" } else { "No" }, repo.releases.as_ref().map_or(0, |r| r.nodes.len()),
                 repo.default_branch_ref.as_ref().map_or("Unknown", |branch| &branch.name), repo.url)
         }
     }).unwrap_or_else(|| "No repositories match this search.".to_owned());

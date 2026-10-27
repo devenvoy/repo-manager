@@ -123,6 +123,7 @@ pub fn latest_installer<'a>(
 ) -> Option<(&'a Release, Vec<&'a Asset>)> {
     let extension = extension.trim_start_matches('.');
     repo.releases
+        .as_ref()?
         .nodes
         .iter()
         .filter(|release| !release.is_draft && (include_prereleases || !release.is_prerelease))

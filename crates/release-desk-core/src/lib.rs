@@ -20,6 +20,7 @@ pub mod storage;
 pub use error::{DomainError, ValidationError};
 pub use git::GitSyncState;
 pub use installer::{Asset, AssetConnection, InstallerExtension, InstallerStatus};
+pub use port::ProjectBackupPort;
 pub use project::{
     AccountIdentity, AccountKind, AccountLogin, ProjectId, ProjectIdentity, ProjectName,
     TrackingPreferences,
@@ -30,5 +31,7 @@ pub use provider::{
 pub use pull_request::{PullRequest, PullRequestLabel, PullRequestNumber, PullRequestState};
 pub use release::{Architecture, Release, ReleaseConnection, ReleaseTag, latest_installer};
 pub use repository::{GitHubRepositoryId, RepositoryIdentity, RepositoryName};
-pub use snapshot::{Language, Repository, Snapshot, parse_snapshot};
+pub use snapshot::{
+    Language, MismatchReport, Repository, RevisionMismatch, Snapshot, parse_snapshot,
+};
 pub use storage::{BackupId, BackupMode, FileSize, RelativeManagedPath, Sha256Checksum};

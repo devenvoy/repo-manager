@@ -1,8 +1,8 @@
 # Planning state
 
 - Date: 2026-10-27
-- Current phase: 5 — CLI
-- Status: Phase 4 (Infrastructure) completed and verified across all adapters (SqliteStore with WAL & migrations, ManagedLibrary with ArtCraft read-only safety guard, SystemGitPort, HttpDownloadPort with SHA-256 streaming, TarGzArchivePort, OsSecretStore, OsSchedulerPort, HttpGitHubGateway); 62 workspace tests passing; transitioning to Phase 5 (CLI).
+- Current phase: 5 — CLI (Completed) -> Phase 6 (TUI)
+- Status: Phase 5 (CLI & Local Backup Engine) completed and verified across all commands (`init`, `project`, `auth`, `discovery`, `track`, `sync`, `installers`, `pr`, `backup`), project clone location automated `.release-desk/data.json` backup snapshot and database mismatch reconciliation engine; 65 workspace tests passing; ArtCraft safety boundary 100% verified untouched; transitioning to Phase 6 (TUI).
 - Locked decisions: D-01 through D-06 in `DECISIONS.md`
 - Existing code: modular pure domain in `crates/release-desk-core`, decoupled application layer in `crates/release-desk-application`, storage and infrastructure adapters in `crates/release-desk-store`, git in `crates/release-desk-git`, and prototypes for CLI, TUI, GUI
 - Source documents: `docs/FEATURE_PARITY.md`, `docs/ARCHITECTURE.md`, `docs/SCHEMA.md`, `docs/BOUNDARIES.md`, `docs/UX-SPEC.md`, `docs/TEST-STRATEGY.md`

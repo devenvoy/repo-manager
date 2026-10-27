@@ -51,11 +51,12 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    description: "Initial core schema for projects, repositories, tracking, jobs, and PRs",
-    checksum: "v1_core_schema",
-    sql: r#"
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "Initial core schema for projects, repositories, tracking, jobs, and PRs",
+        checksum: "v1_core_schema",
+        sql: r#"
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL UNIQUE,
@@ -136,7 +137,16 @@ const MIGRATIONS: &[Migration] = &[Migration {
             next_run TEXT
         );
         "#,
-}];
+    },
+    Migration {
+        version: 2,
+        description: "Add clone_location to projects table",
+        checksum: "v2_add_clone_location",
+        sql: r#"
+            ALTER TABLE projects ADD COLUMN clone_location TEXT;
+        "#,
+    },
+];
 
 /// Apply standard SQLite connection pragmas (WAL mode, foreign keys, busy timeout).
 pub fn configure_connection(conn: &Connection) -> Result<(), MigrationError> {
@@ -218,6 +228,6 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
     }
 }

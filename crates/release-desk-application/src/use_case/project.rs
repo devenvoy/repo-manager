@@ -1,8 +1,10 @@
 //! Project management use cases.
 
 use release_desk_core::error::DomainError;
-use release_desk_core::port::ProjectStore;
+use release_desk_core::port::{ProjectBackupPort, ProjectStore};
 use release_desk_core::project::{AccountIdentity, ProjectId, ProjectIdentity, ProjectName};
+use release_desk_core::snapshot::Snapshot;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Input command for creating a new project.
@@ -10,29 +12,54 @@ pub struct CreateProjectCommand {
     pub id: ProjectId,
     pub name: ProjectName,
     pub account: AccountIdentity,
+    pub clone_location: Option<PathBuf>,
 }
 
 /// Use case for creating and registering a new project.
 pub struct CreateProjectUseCase {
     project_store: Arc<dyn ProjectStore>,
+    backup_port: Option<Arc<dyn ProjectBackupPort>>,
 }
 
 impl CreateProjectUseCase {
     pub fn new(project_store: Arc<dyn ProjectStore>) -> Self {
-        Self { project_store }
+        Self {
+            project_store,
+            backup_port: None,
+        }
+    }
+
+    pub fn with_backup_port(
+        project_store: Arc<dyn ProjectStore>,
+        backup_port: Arc<dyn ProjectBackupPort>,
+    ) -> Self {
+        Self {
+            project_store,
+            backup_port: Some(backup_port),
+        }
     }
 
     pub fn execute(&self, cmd: CreateProjectCommand) -> Result<ProjectIdentity, DomainError> {
-        let identity = ProjectIdentity {
-            id: cmd.id,
-            name: cmd.name,
-        };
+        let identity =
+            ProjectIdentity::with_clone_location(cmd.id, cmd.name, cmd.clone_location.clone());
 
         // Check if project already exists
         if self.project_store.get_project(identity.id)?.is_some() {
             return Err(DomainError::Conflict {
                 message: format!("Project with id {} already exists", identity.id.as_u128()),
             });
+        }
+
+        // If clone location is specified and backup port is present, initialize/verify local backup snapshot
+        if let (Some(root), Some(backup)) = (&cmd.clone_location, &self.backup_port) {
+            if backup.read_backup_snapshot(root)?.is_none() {
+                let initial = Snapshot {
+                    org: cmd.account.login.as_str().to_string(),
+                    generated: "2026-10-27T00:00:00Z".to_string(),
+                    repos: Vec::new(),
+                };
+                backup.write_backup_snapshot(root, &initial)?;
+            }
         }
 
         self.project_store.save_project(&identity)?;
@@ -101,6 +128,7 @@ mod tests {
                 id: project_id,
                 name: name.clone(),
                 account,
+                clone_location: None,
             })
             .expect("create project");
 
