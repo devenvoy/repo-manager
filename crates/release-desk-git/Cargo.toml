@@ -1,0 +1,10 @@
+[package]
+name = "release-desk-git"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Safe system Git operations for Release Desk"
+license = "MIT"
+
+[dependencies]
+release-desk-core = { path = "../release-desk-core" }

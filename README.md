@@ -1,10 +1,9 @@
-# repo-manager
+# Release Desk
 
-A new Rust binary project. It currently contains the default starter program; repository management features have not been implemented yet.
-
-## Requirements
-
-- Rust toolchain with support for the 2024 edition
+An early native desktop app for inspecting a `storytold-sync.sh` snapshot. It
+uses Rust and GPUI Kit. The current window shows repositories, their latest
+eligible installer release, and a **Settings** panel. Settings persist locally;
+no credentials are stored by this version.
 
 ## Run
 
@@ -12,7 +11,18 @@ A new Rust binary project. It currently contains the default starter program; re
 cargo run
 ```
 
-## Development
+Open **Settings**, enter the absolute path to an existing
+`.release-desk/data.json`, choose whether to include pre-releases and archived
+repositories, and select an installer extension (default `dmg`). Save settings
+to load the snapshot. **Reload snapshot** rereads the file after the shell sync
+updates it.
+
+This version reads the snapshot only. It does not yet sync Git repositories,
+download installers, or contact GitHub. See [reference analysis](docs/REFERENCE_ANALYSIS.md)
+and [architecture plan](docs/ARCHITECTURE.md) for the behavior map and next
+milestones.
+
+## Verify
 
 ```sh
 cargo fmt --check
@@ -20,4 +30,4 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Project development guidance is in [AGENTS.md](AGENTS.md). The `actionbook/rust-skills` collection is installed for Codex in [`.agents/skills/`](.agents/skills/) and recorded in [`skills-lock.json`](skills-lock.json). These skills are local to this project.
+Project development guidance is in [AGENTS.md](AGENTS.md).

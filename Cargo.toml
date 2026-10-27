@@ -2,5 +2,24 @@
 name = "repo-manager"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+
+[workspace]
+members = [
+    "crates/release-desk-core",
+    "crates/release-desk-application",
+    "crates/release-desk-store",
+    "crates/release-desk-cli",
+    "crates/release-desk-git",
+    "crates/release-desk-tui",
+]
 
 [dependencies]
+gpui-kit = "0.7"
+release-desk-core = { path = "crates/release-desk-core" }
+release-desk-store = { path = "crates/release-desk-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "warn"
