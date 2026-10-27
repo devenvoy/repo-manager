@@ -26,7 +26,11 @@ mkdir -p "$BUNDLE_PATH/Contents/Resources"
 # 3. Copy binaries
 echo "-> Installing executables..."
 cp "$WORKSPACE_ROOT/target/release/repo-manager" "$BUNDLE_PATH/Contents/MacOS/repo-manager"
-cp "$WORKSPACE_ROOT/target/release/release-desk" "$BUNDLE_PATH/Contents/MacOS/release-desk"
+CLI_BIN="$WORKSPACE_ROOT/target/release/release-desk"
+if [ ! -f "$CLI_BIN" ]; then
+    CLI_BIN="$WORKSPACE_ROOT/target/release/release-desk-cli"
+fi
+cp "$CLI_BIN" "$BUNDLE_PATH/Contents/MacOS/release-desk"
 chmod +x "$BUNDLE_PATH/Contents/MacOS/repo-manager"
 chmod +x "$BUNDLE_PATH/Contents/MacOS/release-desk"
 
