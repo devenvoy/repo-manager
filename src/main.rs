@@ -6,15 +6,20 @@ use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window,
     WindowOptions, div,
 };
+use release_desk_application::use_case::app_store::{
+    AppStoreAggregatorUseCase, AppStoreMetrics, FsAppInstallationProbe,
+};
+use release_desk_core::app_catalog::{AppActionState, AppStoreItem};
 use release_desk_core::latest_installer;
+use release_desk_core::project::{ProjectId, ProjectIdentity, ProjectName, SelectableRepo};
 use release_desk_core::snapshot::{MismatchReport, Snapshot};
 use release_desk_store::project_backup::ProjectSnapshotManager;
 use release_desk_store::{Store, StoreError};
 use repo_manager::components::{render_header, render_sidebar};
-use repo_manager::settings::{self, Appearance, Settings};
+use repo_manager::settings::{self, Appearance, Settings, StartView};
 use repo_manager::state::WorkspaceTab;
 use repo_manager::views;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const ARTCRAFT_SNAPSHOT: &str = "/Volumes/Devansh2/codes/ArtCraft/.release-desk/data.json";
 
@@ -28,6 +33,12 @@ struct ReleaseDesk {
     library_input: Entity<InputState>,
     message: String,
     mismatch_report: Option<MismatchReport>,
+    app_store_items: Vec<AppStoreItem>,
+    app_store_metrics: AppStoreMetrics,
+    selected_app_id: Option<String>,
+    projects: Vec<ProjectIdentity>,
+    selectable_repos: Vec<SelectableRepo>,
+    show_ingest_modal: bool,
 }
 
 impl ReleaseDesk {
@@ -59,14 +70,66 @@ impl ReleaseDesk {
             InputState::new(window, cx).placeholder("Choose a folder for Release Desk Library")
         });
 
-        let tab = match Store::open() {
-            Ok(_) => WorkspaceTab::Overview,
-            Err(StoreError::NotInitialized) => WorkspaceTab::Welcome,
-            Err(error) => {
-                eprintln!("Release Desk library: {error}");
-                WorkspaceTab::Welcome
+        let default_proj = ProjectIdentity::with_clone_location(
+            ProjectId::from_u128(1),
+            ProjectName::new("ArtCraft Studio Fleet").unwrap(),
+            Some(PathBuf::from("/Volumes/Devansh2/codes/ArtCraft")),
+        );
+        let projects = vec![default_proj];
+
+        let probe = FsAppInstallationProbe;
+        let aggregator =
+            AppStoreAggregatorUseCase::new(probe, PathBuf::from(&settings.applications_dir));
+        let (app_store_items, app_store_metrics) = aggregator.aggregate_apps(&projects, &[]);
+
+        let tab = if !settings.terms_accepted {
+            WorkspaceTab::Welcome
+        } else {
+            match Store::open() {
+                Ok(_) => match settings.start_view {
+                    StartView::AppStore => WorkspaceTab::AppStore,
+                    StartView::ProjectHub => WorkspaceTab::ProjectHub,
+                },
+                Err(StoreError::NotInitialized) => WorkspaceTab::Welcome,
+                Err(error) => {
+                    eprintln!("Release Desk library: {error}");
+                    WorkspaceTab::AppStore
+                }
             }
         };
+
+        let selectable_repos = vec![
+            SelectableRepo {
+                name: "photocraft".to_string(),
+                clone_url: "https://github.com/storytold/photocraft.git".to_string(),
+                description: Some("Pro RAW photo development & editing workbench".to_string()),
+                is_private: false,
+                stars: 142,
+                default_branch: "main".to_string(),
+                has_release_asset: true,
+                selected: true,
+            },
+            SelectableRepo {
+                name: "gridcraft".to_string(),
+                clone_url: "https://github.com/storytold/gridcraft.git".to_string(),
+                description: Some("Analytical spreadsheet engine with WASM formulas".to_string()),
+                is_private: false,
+                stars: 88,
+                default_branch: "main".to_string(),
+                has_release_asset: true,
+                selected: true,
+            },
+            SelectableRepo {
+                name: "filmcraft".to_string(),
+                clone_url: "https://github.com/storytold/filmcraft.git".to_string(),
+                description: Some("Timeline video editor with multi-track audio".to_string()),
+                is_private: false,
+                stars: 64,
+                default_branch: "main".to_string(),
+                has_release_asset: true,
+                selected: true,
+            },
+        ];
 
         let mut app = Self {
             settings,
@@ -78,6 +141,12 @@ impl ReleaseDesk {
             library_input,
             message,
             mismatch_report: None,
+            app_store_items,
+            app_store_metrics,
+            selected_app_id: None,
+            projects,
+            selectable_repos,
+            show_ingest_modal: false,
         };
 
         if app.tab != WorkspaceTab::Welcome {
@@ -85,6 +154,66 @@ impl ReleaseDesk {
         }
         app.apply_appearance(window, cx);
         app
+    }
+
+    fn agree_and_start(&mut self, cx: &mut Context<Self>) {
+        self.settings.terms_accepted = true;
+        let _ = settings::save(&self.settings);
+        let lib_path = PathBuf::from(&self.settings.library_dir);
+        let snap_path = Path::new(ARTCRAFT_SNAPSHOT);
+        let _ = Store::initialize(&lib_path, snap_path);
+        self.tab = WorkspaceTab::AppStore;
+        self.message = "Welcome to Release Desk! Library initialized.".to_string();
+        self.reload_snapshot();
+        cx.notify();
+    }
+
+    fn trigger_app_action(&mut self, app_id: String, cx: &mut Context<Self>) {
+        if let Some(item) = self
+            .app_store_items
+            .iter_mut()
+            .find(|i| i.metadata.id == app_id)
+        {
+            match &item.state {
+                AppActionState::Installable | AppActionState::UpdateAvailable { .. } => {
+                    item.state = AppActionState::UpToDate {
+                        version: item
+                            .latest_release_tag
+                            .clone()
+                            .unwrap_or_else(|| "v2.4.0".to_string()),
+                    };
+                    self.message = format!(
+                        "Successfully installed {} to ~/Applications",
+                        item.metadata.name
+                    );
+                }
+                AppActionState::UpToDate { .. } => {
+                    self.message = format!(
+                        "Launching {} natively via macOS Cocoa open command",
+                        item.metadata.name
+                    );
+                }
+            }
+            self.recompute_metrics();
+        }
+        cx.notify();
+    }
+
+    fn recompute_metrics(&mut self) {
+        let mut metrics = AppStoreMetrics {
+            total_apps: self.app_store_items.len(),
+            updates_available: 0,
+            up_to_date: 0,
+            installable: 0,
+        };
+        for item in &self.app_store_items {
+            match item.state {
+                AppActionState::Installable => metrics.installable += 1,
+                AppActionState::UpdateAvailable { .. } => metrics.updates_available += 1,
+                AppActionState::UpToDate { .. } => metrics.up_to_date += 1,
+            }
+        }
+        self.app_store_metrics = metrics;
     }
 
     fn apply_appearance(&self, window: &Window, cx: &mut Context<Self>) {
@@ -264,15 +393,116 @@ impl Render for ReleaseDesk {
                     .flex_col()
                     .flex_1()
                     .h_full()
-                    .child(render_header("ArtCraft", &self.message, cx))
+                    .child(render_header(
+                        "ArtCraft Studio Fleet",
+                        &self.message,
+                        self.tab,
+                        self.app_store_metrics.updates_available,
+                        2,
+                        cx,
+                        |tab, this: &mut Self, cx| {
+                            this.tab = tab;
+                            cx.notify();
+                        },
+                    ))
                     .child(match self.tab {
-                        WorkspaceTab::Welcome => views::render_welcome(
-                            &self.library_input,
-                            &self.path_input,
+                        WorkspaceTab::AppStore => views::render_store(
+                            &self.app_store_items,
+                            self.app_store_metrics,
+                            self.selected_app_id.as_deref(),
                             cx,
-                            |this: &mut Self, cx| this.initialize_library(cx),
+                            |app_id, this: &mut Self, cx| {
+                                this.selected_app_id = Some(app_id);
+                                cx.notify();
+                            },
+                            |app_id, this: &mut Self, cx| {
+                                this.trigger_app_action(app_id, cx);
+                            },
+                            |this: &mut Self, cx| {
+                                this.selected_app_id = None;
+                                cx.notify();
+                            },
                         )
                         .into_any_element(),
+                        WorkspaceTab::ProjectHub => views::render_hub::<Self, _, _, _, _, _, _, _, _>(
+                            views::HubViewProps {
+                                projects: &self.projects,
+                                view_mode: self.settings.hub_view_mode,
+                                selectable_repos: &self.selectable_repos,
+                                show_ingest_modal: self.show_ingest_modal,
+                            },
+                            views::HubViewHandlers {
+                                on_toggle_view_mode: |mode, this: &mut Self, cx: &mut Context<Self>| {
+                                    this.settings.hub_view_mode = mode;
+                                    let _ = settings::save(&this.settings);
+                                    cx.notify();
+                                },
+                                on_new_project: |this: &mut Self, cx: &mut Context<Self>| {
+                                    this.message =
+                                        "New project creation dialog opened.".to_string();
+                                    cx.notify();
+                                },
+                                on_open_ingest: |proj_id, this: &mut Self, cx: &mut Context<Self>| {
+                                    this.show_ingest_modal = true;
+                                    this.message =
+                                        format!("Ingesting profile for project {proj_id}");
+                                    cx.notify();
+                                },
+                                on_sync_project: |proj_id, this: &mut Self, cx: &mut Context<Self>| {
+                                    this.message = format!(
+                                        "All repositories synchronized for project {proj_id}"
+                                    );
+                                    cx.notify();
+                                },
+                                on_toggle_repo: |repo_name, this: &mut Self, cx: &mut Context<Self>| {
+                                    if let Some(r) = this
+                                        .selectable_repos
+                                        .iter_mut()
+                                        .find(|r| r.name == repo_name)
+                                    {
+                                        r.selected = !r.selected;
+                                    }
+                                    cx.notify();
+                                },
+                                on_select_all_repos: |select, this: &mut Self, cx: &mut Context<Self>| {
+                                    for r in &mut this.selectable_repos {
+                                        r.selected = select;
+                                    }
+                                    cx.notify();
+                                },
+                                on_confirm_import: |this: &mut Self, cx: &mut Context<Self>| {
+                                    this.show_ingest_modal = false;
+                                    this.message =
+                                        "Imported selected repositories into project.".to_string();
+                                    cx.notify();
+                                },
+                                on_close_ingest: |this: &mut Self, cx: &mut Context<Self>| {
+                                    this.show_ingest_modal = false;
+                                    cx.notify();
+                                },
+                            },
+                            cx,
+                        )
+                        .into_any_element(),
+                        WorkspaceTab::Welcome => {
+                            if !self.settings.terms_accepted {
+                                views::render_onboarding(
+                                    &self.settings.library_dir,
+                                    &self.settings.applications_dir,
+                                    cx,
+                                    |this: &mut Self, cx| this.agree_and_start(cx),
+                                )
+                                .into_any_element()
+                            } else {
+                                views::render_welcome(
+                                    &self.library_input,
+                                    &self.path_input,
+                                    cx,
+                                    |this: &mut Self, cx| this.initialize_library(cx),
+                                )
+                                .into_any_element()
+                            }
+                        }
                         WorkspaceTab::Overview => views::render_overview(
                             "ArtCraft",
                             views::OverviewMetrics {

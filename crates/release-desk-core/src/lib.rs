@@ -1,5 +1,6 @@
 //! Pure domain types, deterministic rules, and abstract ports for Release Desk.
 
+pub mod app_catalog;
 pub mod error;
 pub mod git;
 pub mod installer;
@@ -18,6 +19,9 @@ pub mod snapshot;
 pub mod storage;
 
 // Top-level re-exports for clean, direct domain usage
+pub use app_catalog::{
+    AppActionState, AppMetadata, AppStoreItem, default_artcraft_catalog, find_known_app,
+};
 pub use error::{DomainError, ValidationError};
 pub use git::GitSyncState;
 pub use installer::{Asset, AssetConnection, InstallerExtension, InstallerStatus};
@@ -26,8 +30,8 @@ pub use migration::{
 };
 pub use port::{LegacyScannerPort, ProjectBackupPort};
 pub use project::{
-    AccountIdentity, AccountKind, AccountLogin, ProjectId, ProjectIdentity, ProjectName,
-    TrackingPreferences,
+    AccountIdentity, AccountKind, AccountLogin, DiskLayout, ProfileSource, ProjectId,
+    ProjectIdentity, ProjectName, SelectableRepo, TrackingPreferences,
 };
 pub use provider::{
     AuthCallbackStatus, AuthMethod, GitProviderKind, ProviderAccount, WebviewWindowSpec,

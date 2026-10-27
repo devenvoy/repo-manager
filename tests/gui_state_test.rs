@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 #[test]
 fn test_workspace_tab_titles() {
+    assert_eq!(WorkspaceTab::AppStore.title(), "App Store");
+    assert_eq!(WorkspaceTab::ProjectHub.title(), "Project Hub");
     assert_eq!(WorkspaceTab::Overview.title(), "Overview");
     assert_eq!(WorkspaceTab::Repositories.title(), "Repositories");
     assert_eq!(WorkspaceTab::Installers.title(), "Installers");
@@ -22,7 +24,7 @@ fn test_workspace_tab_titles() {
 #[test]
 fn test_desktop_state_default() {
     let state = DesktopState::default();
-    assert_eq!(state.active_tab, WorkspaceTab::Overview);
+    assert_eq!(state.active_tab, WorkspaceTab::AppStore);
     assert!(state.active_project.is_none());
     assert!(state.projects.is_empty());
     assert!(state.repositories.is_empty());

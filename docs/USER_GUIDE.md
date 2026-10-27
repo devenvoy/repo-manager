@@ -10,16 +10,22 @@ Release Desk is a native Git release manager, installer library, and multi-host 
 ## 1. Core Architecture & Storage Model
 
 ```
-Managed Library (User Chosen Directory)
-├── release-desk.sqlite3               <- Main database (WAL mode, schema migrations)
+Managed Library (Default: ~/Library/Application Support/Release Desk)
+├── release-desk.sqlite3               <- Main database (WAL mode, schema v3)
 ├── projects/                          <- Internal project records & metadata
 └── archives/                          <- Compressed .tar.gz backups
 
 Project Clone Directory (e.g., ~/Developer/MyProject)
 ├── .release-desk/
 │   └── data.json                      <- Local backup snapshot (Disaster Recovery & Mismatch Engine)
-├── repo-alpha/                        <- Git repository clone
-└── repo-beta/                         <- Git repository clone
+├── Grouped Layout:
+│   └── <organization_or_user>/        <- Per-user namespace
+│       └── <repository>/              <- Git repository clone
+└── Flat Layout:
+    └── <repository>/                  <- Git repository clone directly under project
+
+Local Applications Directory (Default: ~/Applications or /Applications)
+└── <AppName>.app                      <- Headless 1-click installed desktop applications
 ```
 
 ### The Local Backup Snapshot Guarantee
@@ -34,12 +40,21 @@ Legacy ArtCraft directories (`/Volumes/Devansh2/codes/ArtCraft/`) are strictly p
 
 ## 2. Getting Started
 
-### 2.1 First-Run Setup via GUI
+### 2.1 First-Run Setup & Onboarding via GUI
 Launch the desktop application:
 ```bash
 cargo run --release -p repo-manager
 ```
-On first run, the **Welcome Wizard** prompts you to select a folder for the Release Desk Library and optionally links your existing ArtCraft snapshot.
+On first run, Release Desk presents the **First-Run Onboarding Screen**:
+- Displays Terms of Service, Privacy Policy, and Local Storage Commitments.
+- Click **"Accept & Continue"** to automatically initialize the local library in `~/Library/Application Support/Release Desk` and default applications in `~/Applications`.
+- No blank input dialogs or startup blockers. You are immediately taken to the unified navigation workspace.
+
+### 2.2 Fluid Top Navigation & Live Metric Badges
+The top header provides instant switching between primary modes:
+- **App Store**: Shows live update counts (e.g., `App Store (1 Update)`).
+- **Project Hub**: Shows live git pull counts (e.g., `Project Hub (2 Pulls)`).
+- **Layout Switcher**: Toggle between **Grouped** (`<project>/<user>/<repo>`) and **Flat** (`<project>/<repo>`) directory organization.
 
 ### 2.2 First-Run Setup via CLI
 Initialize your library directly from the command line:
@@ -167,17 +182,57 @@ release-desk pr --project-id 1 --status open
 
 ---
 
-## 7. Legacy Migration & Adoption Engine
+## 7. Project-Centric Git Fleet Manager (Project Hub)
+
+Release Desk treats projects as independent workspaces bound to specific disk locations, isolated credentials, and multiple user/org sources.
+
+### 7.1 Project-Scoped Auth & Multi-User Ingestion
+- **Per-Project Isolation**: Project A can authenticate with GitHub using Account X, while Project B connects to GitLab using Account Y.
+- **Multiple Profile Ingestion**: Ingest repositories from multiple creators or organizations into the same project by pasting handles or full URLs (e.g., `https://github.com/storytold` or `storytold`).
+- **Repository Picker**: Interactive checklist allowing individual selection or `Select All` / `Deselect All` with language, stars, visibility, and description indicators.
+- **Automated Clone Planning**:
+  - **Grouped Layout**: `<project_path>/<user_handle>/<repo_name>` (prevents name collisions between different users).
+  - **Flat Layout**: `<project_path>/<repo_name>` (streamlined single-level hierarchy).
+- **Offline Redundancy**: Writes `<project_path>/.release-desk/data.json` snapshot automatically upon configuration change.
+
+---
+
+## 8. Local App Store & 1-Click Headless DMG Installer
+
+The **Local App Store** acts as an aggregator across all managed projects and built-in production suites (ArtCraft), presenting an Apple App Store-grade experience.
+
+### 8.1 Visual Experience & Bento Grid
+- **Spotlight Hero**: Features trending releases with gradient highlights and instant action buttons.
+- **Bento Grid**: Organized card layout with category tags, semantic version badges, release sizes, and rich squircle app icons.
+- **Rich Detail Modal**: Detailed overview with full release notes, hardware architecture specs (Apple Silicon / Intel / Universal), feature checklists, and system requirements.
+
+### 8.2 3-State Smart Action Button
+The system probes local directories (`~/Applications` and `/Applications`) to dynamically compute the application state:
+1. **`Install`**: App is not present locally. Clicking downloads and executes headless installation.
+2. **`Update`**: App is installed, but a newer release tag is available. Clicking triggers clean in-place upgrade.
+3. **`Open`**: App is installed and at the latest version. Clicking launches the native macOS app immediately (`open -a`).
+
+### 8.3 Headless 1-Click macOS DMG Installer Architecture
+Release Desk includes a native installer engine that bypasses manual Finder mounting:
+1. Mounts DMG quietly in the background: `hdiutil attach -nobrowse -readonly <dmg_path>`.
+2. Verifies cryptographic checksum (SHA-256) of the asset against known release metadata.
+3. Copies `<App>.app` bundle into `~/Applications` with preserved file permissions.
+4. Detaches mounted disk image: `hdiutil detach <mount_point> -force`.
+5. Launches or notifies user upon successful installation.
+
+---
+
+## 9. Legacy Migration & Adoption Engine
 
 Adopt legacy ArtCraft workspaces, custom sync shell scripts, or standalone `data.json` files without touching the original source directory.
 
-### 7.1 Step 1: Read-Only Analysis
+### 9.1 Step 1: Read-Only Analysis
 ```bash
 release-desk migrate analyze --path "/path/to/legacy-workspace"
 ```
 Outputs detected setup kind (`ArtCraftWorkspace`, `SnapshotFile`, `ShellScript`, `CloneDirectory`), discovered organization, repositories, and installer packages.
 
-### 7.2 Step 2: Non-Destructive Preview
+### 9.2 Step 2: Non-Destructive Preview
 ```bash
 release-desk migrate preview \
   --path "/path/to/legacy-workspace" \
@@ -187,7 +242,7 @@ release-desk migrate preview \
 ```
 Displays all planned migration actions before any execution.
 
-### 7.3 Step 3: Verified Execution
+### 9.3 Step 3: Verified Execution
 ```bash
 release-desk migrate execute \
   --path "/path/to/legacy-workspace" \
@@ -205,7 +260,7 @@ Execution performs:
 
 ---
 
-## 8. Terminal User Interface (TUI) Keybindings
+## 10. Terminal User Interface (TUI) Keybindings
 
 Launch the interactive TUI:
 ```bash
@@ -226,7 +281,7 @@ cargo run --release -p release-desk-tui
 
 ---
 
-## 9. Creating Compressed Library Backups
+## 11. Creating Compressed Library Backups
 ```bash
 release-desk backup --output "$HOME/Desktop/ReleaseDesk_Backup.tar.gz"
 ```

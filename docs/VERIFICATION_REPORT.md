@@ -1,7 +1,7 @@
 # Release Desk Verification & Traceability Closure Report
 
 > **Project:** Release Desk (`repo-manager`)  
-> **Status:** All Phases (1 through 9) Complete  
+> **Status:** All Phases (1 through 9 + Vision Phases A through F) Complete  
 > **Date:** October 2026  
 > **Specification References:** `docs/FEATURE_PARITY.md`, `docs/ARCHITECTURE.md`, `docs/UX-SPEC.md`, `docs/TEST-STRATEGY.md`, `.planning/REQUIREMENTS.md`
 
@@ -46,18 +46,22 @@ Every project clone directory automatically maintains an atomic `<clone_location
 | **GUI-02** | Coherent visual system matching `docs/UX-SPEC.md` with system/light/dark tokens. | `repo-manager::theme` | `test_theme_colors`. |
 | **MIG-01** | Read-only legacy adoption engine with pre-/post-flight SHA-256 fingerprint verification. | `release-desk-application::migration`, `release-desk-store::legacy_scanner` | `legacy_migration_test.rs` (1 test passing, source immutability verified). |
 | **OPS-01** | Structured diagnostics, disk status, and secret store status reporting. | `release-desk-cli::commands`, `release-desk-store` | `test_secret_store_roundtrip`, `test_credentials`. |
-| **SHIP-01** | Workspace quality gates passing (0 warnings), macOS bundle configuration, Linux/Windows plan. | `resources/Info.plist`, `scripts/package_macos.sh`, `docs/DISTRIBUTION.md` | `cargo test --workspace` (88 tests passing), `cargo clippy` (0 warnings). |
+| **STORE-01** | Local App Store aggregator with Spotlight Hero, Bento Grid, 8 ArtCraft applications, and 3-state (`Install`/`Update`/`Open`) actions. | `release-desk-core::app_catalog`, `release-desk-application::app_store`, `repo-manager::views::store` | `app_store_test.rs` (3 tests passing). |
+| **INST-02** | 1-Click Headless DMG installer engine with `hdiutil` background attach, SHA-256 check, bundle copy, unmount, and native app launch. | `release-desk-application::macos_installer`, `release_desk_core` | `headless_installer_test.rs` (2 tests passing). |
+| **HUB-01** | Project Hub fleet management with project-scoped credentials, multi-user/org URL ingestion, repo picker checklist, and Grouped/Flat layouts. | `release-desk-application::profile_ingestion`, `release-desk-store::migration_v3`, `repo-manager::views::hub` | `profile_ingestion_test.rs` (4 tests passing). |
+| **ONB-01** | First-run onboarding flow with Terms of Service, Privacy agreement, zero empty path blockers, and automatic default library initialization. | `repo-manager::views::onboarding`, `repo-manager::settings` | `gui_state_test.rs`, interactive verification. |
+| **SHIP-01** | Workspace quality gates passing (0 warnings), macOS bundle configuration, Linux/Windows plan. | `resources/Info.plist`, `scripts/package_macos.sh`, `docs/DISTRIBUTION.md` | `cargo test --workspace` (98 tests passing), `cargo clippy` (0 warnings). |
 
 ---
 
 ## 3. Test Suites & Verification Results
 
-All 88 tests in the workspace pass without warnings or failures:
+All 98 tests in the workspace pass without warnings or failures:
 
 ```
-running 12 tests in release-desk-application (unittests) ... ok (12 passed)
+running 16 tests in release-desk-application (unittests) ... ok (16 passed)
 running 1 test in release-desk-application (tracer) ... ok (1 passed)
-running 26 tests in release-desk-core ... ok (26 passed)
+running 29 tests in release-desk-core ... ok (29 passed)
 running 7 tests in release-desk-git ... ok (7 passed)
 running 22 tests in release-desk-store (unittests) ... ok (22 passed)
 running 6 tests in release-desk-store (artcraft_safety_test) ... ok (6 passed)
@@ -67,11 +71,14 @@ running 1 test in release-desk-tui (unittests) ... ok (1 passed)
 running 4 tests in release-desk-tui (tui_render_test) ... ok (4 passed)
 running 1 test in repo-manager (unittests) ... ok (1 passed)
 running 7 tests in repo-manager (gui_state_test) ... ok (7 passed)
+running 3 tests in repo-manager (app_store_test) ... ok (3 passed)
+running 2 tests in repo-manager (headless_installer_test) ... ok (2 passed)
+running 4 tests in repo-manager (profile_ingestion_test) ... ok (4 passed)
 running 1 test in release-desk-cli (cli_e2e_test) ... ok (1 passed)
 running 1 test in release-desk-cli (commands) ... ok (1 passed)
 running 1 test in release-desk-cli (legacy_migration_test) ... ok (1 passed)
 
-Overall Result: 88 passed, 0 failed, 0 ignored.
+Overall Result: 98 passed, 0 failed, 0 ignored.
 ```
 
 ---

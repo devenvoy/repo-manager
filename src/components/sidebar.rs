@@ -35,6 +35,8 @@ pub fn render_sidebar<T: 'static>(
         );
 
     let tabs = [
+        (WorkspaceTab::AppStore, "app-store", "App Store"),
+        (WorkspaceTab::ProjectHub, "project-hub", "Project Hub"),
         (WorkspaceTab::Overview, "overview", "Overview"),
         (WorkspaceTab::Repositories, "repositories", "Repositories"),
         (WorkspaceTab::Installers, "installers", "Installers"),

@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, io, path::PathBuf};
 
-/// Settings used by the first desktop milestone. Credentials are deliberately
-/// absent: a later authentication service will use the OS credential store.
+/// Settings used by the desktop application.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -11,6 +10,27 @@ pub struct Settings {
     pub show_archived: bool,
     pub installer_extension: String,
     pub appearance: Appearance,
+    pub terms_accepted: bool,
+    pub applications_dir: String,
+    pub library_dir: String,
+    pub start_view: StartView,
+    pub hub_view_mode: HubViewMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StartView {
+    #[default]
+    AppStore,
+    ProjectHub,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HubViewMode {
+    #[default]
+    Grouped,
+    Flat,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,8 +50,26 @@ impl Default for Settings {
             show_archived: false,
             installer_extension: "dmg".into(),
             appearance: Appearance::System,
+            terms_accepted: false,
+            applications_dir: "~/Applications".into(),
+            library_dir: default_library_dir_string(),
+            start_view: StartView::AppStore,
+            hub_view_mode: HubViewMode::Grouped,
         }
     }
+}
+
+pub fn default_library_dir_string() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library/Application Support/Release Desk")
+                .to_string_lossy()
+                .to_string();
+        }
+    }
+    "~/.local/share/release-desk".to_string()
 }
 
 pub fn settings_path() -> io::Result<PathBuf> {

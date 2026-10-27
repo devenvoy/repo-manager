@@ -1,12 +1,17 @@
 //! Desktop application state and navigation models.
 
-use release_desk_core::project::ProjectIdentity;
+use crate::settings::HubViewMode;
+use release_desk_application::use_case::app_store::AppStoreMetrics;
+use release_desk_core::app_catalog::AppStoreItem;
+use release_desk_core::project::{ProjectId, ProjectIdentity, SelectableRepo};
 use release_desk_core::snapshot::{MismatchReport, Repository};
 use std::path::PathBuf;
 
 /// Active workspace tabs in the desktop interface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkspaceTab {
+    AppStore,
+    ProjectHub,
     Overview,
     Repositories,
     Installers,
@@ -19,6 +24,8 @@ pub enum WorkspaceTab {
 impl WorkspaceTab {
     pub fn title(self) -> &'static str {
         match self {
+            Self::AppStore => "App Store",
+            Self::ProjectHub => "Project Hub",
             Self::Overview => "Overview",
             Self::Repositories => "Repositories",
             Self::Installers => "Installers",
@@ -42,12 +49,23 @@ pub struct DesktopState {
     pub mismatch_report: Option<MismatchReport>,
     pub status_message: String,
     pub library_path: Option<PathBuf>,
+    pub app_store_items: Vec<AppStoreItem>,
+    pub selected_app_id: Option<String>,
+    pub app_store_metrics: AppStoreMetrics,
+    pub hub_view_mode: HubViewMode,
+    pub terms_accepted: bool,
+    pub show_onboarding_modal: bool,
+    pub show_new_project_modal: bool,
+    pub show_ingest_source_modal: bool,
+    pub ingest_target_project_id: Option<ProjectId>,
+    pub selectable_repos: Vec<SelectableRepo>,
+    pub install_progress_pct: Option<u8>,
 }
 
 impl Default for DesktopState {
     fn default() -> Self {
         Self {
-            active_tab: WorkspaceTab::Overview,
+            active_tab: WorkspaceTab::AppStore,
             active_project: None,
             projects: Vec::new(),
             repositories: Vec::new(),
@@ -56,6 +74,17 @@ impl Default for DesktopState {
             mismatch_report: None,
             status_message: "Ready".to_string(),
             library_path: None,
+            app_store_items: Vec::new(),
+            selected_app_id: None,
+            app_store_metrics: AppStoreMetrics::default(),
+            hub_view_mode: HubViewMode::Grouped,
+            terms_accepted: false,
+            show_onboarding_modal: false,
+            show_new_project_modal: false,
+            show_ingest_source_modal: false,
+            ingest_target_project_id: None,
+            selectable_repos: Vec::new(),
+            install_progress_pct: None,
         }
     }
 }
@@ -75,5 +104,21 @@ impl DesktopState {
                         .is_some_and(|d| d.to_lowercase().contains(&needle))
             })
             .collect()
+    }
+
+    pub fn select_all_repos(&mut self, select: bool) {
+        for repo in &mut self.selectable_repos {
+            repo.selected = select;
+        }
+    }
+
+    pub fn toggle_repo_selection(&mut self, repo_name: &str) {
+        if let Some(repo) = self
+            .selectable_repos
+            .iter_mut()
+            .find(|r| r.name == repo_name)
+        {
+            repo.selected = !repo.selected;
+        }
     }
 }

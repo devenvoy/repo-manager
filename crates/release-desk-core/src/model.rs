@@ -1,5 +1,8 @@
 //! Domain models re-exported for ergonomic use and backwards compatibility.
 
+pub use crate::app_catalog::{
+    AppActionState, AppMetadata, AppStoreItem, default_artcraft_catalog, find_known_app,
+};
 pub use crate::error::{DomainError, ValidationError};
 pub use crate::git::{BranchRef, GitSyncState, Revision};
 pub use crate::installer::{
@@ -10,8 +13,8 @@ pub use crate::job::{
     DownloadProgress, IdempotencyKey, JobId, JobKind, JobPriority, JobState, RetryBackoff,
 };
 pub use crate::project::{
-    AccountIdentity, AccountKind, AccountLogin, ProjectId, ProjectIdentity, ProjectName,
-    TrackingPreferences,
+    AccountIdentity, AccountKind, AccountLogin, DiskLayout, ProfileSource, ProjectId,
+    ProjectIdentity, ProjectName, SelectableRepo, TrackingPreferences,
 };
 pub use crate::pull_request::{PullRequest, PullRequestLabel, PullRequestNumber, PullRequestState};
 pub use crate::release::{Architecture, Release, ReleaseConnection, ReleaseTag, latest_installer};

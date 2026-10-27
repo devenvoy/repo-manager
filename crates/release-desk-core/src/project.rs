@@ -75,6 +75,56 @@ pub struct AccountIdentity {
     pub kind: AccountKind,
 }
 
+/// On-disk folder layout for repositories cloned under a project directory.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiskLayout {
+    /// Repositories are placed in subdirectories by user/organization:
+    /// `<project_dir>/<user>/<repo>`
+    #[default]
+    Grouped,
+    /// Repositories are placed directly under the project root:
+    /// `<project_dir>/<repo>`
+    Flat,
+}
+
+impl DiskLayout {
+    pub fn compute_clone_path(
+        self,
+        project_root: &std::path::Path,
+        user_login: &str,
+        repo_name: &str,
+    ) -> PathBuf {
+        match self {
+            Self::Grouped => project_root.join(user_login).join(repo_name),
+            Self::Flat => project_root.join(repo_name),
+        }
+    }
+}
+
+/// Metadata describing an ingested remote user or organization profile.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProfileSource {
+    pub identity: AccountIdentity,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub bio: Option<String>,
+    pub public_repos_count: u32,
+}
+
+/// A repository item discovered from an ingested profile, ready for selection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SelectableRepo {
+    pub name: String,
+    pub clone_url: String,
+    pub description: Option<String>,
+    pub is_private: bool,
+    pub stars: u32,
+    pub default_branch: String,
+    pub has_release_asset: bool,
+    pub selected: bool,
+}
+
 /// Project identity and its user-facing label.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProjectIdentity {
@@ -82,6 +132,8 @@ pub struct ProjectIdentity {
     pub name: ProjectName,
     #[serde(default)]
     pub clone_location: Option<PathBuf>,
+    #[serde(default)]
+    pub disk_layout: DiskLayout,
 }
 
 impl ProjectIdentity {
@@ -90,6 +142,7 @@ impl ProjectIdentity {
             id,
             name,
             clone_location: None,
+            disk_layout: DiskLayout::default(),
         }
     }
 
@@ -102,7 +155,13 @@ impl ProjectIdentity {
             id,
             name,
             clone_location,
+            disk_layout: DiskLayout::default(),
         }
+    }
+
+    pub fn with_layout(mut self, layout: DiskLayout) -> Self {
+        self.disk_layout = layout;
+        self
     }
 }
 
@@ -152,5 +211,18 @@ mod tests {
         };
         assert!(prefs.is_tracked());
         assert!(!TrackingPreferences::default().is_tracked());
+    }
+
+    #[test]
+    fn test_disk_layout_path_computation() {
+        let root = PathBuf::from("/Users/devansh/Projects/MyFleet");
+        assert_eq!(
+            DiskLayout::Grouped.compute_clone_path(&root, "storytold", "photocraft"),
+            PathBuf::from("/Users/devansh/Projects/MyFleet/storytold/photocraft")
+        );
+        assert_eq!(
+            DiskLayout::Flat.compute_clone_path(&root, "storytold", "photocraft"),
+            PathBuf::from("/Users/devansh/Projects/MyFleet/photocraft")
+        );
     }
 }

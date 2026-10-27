@@ -146,6 +146,40 @@ const MIGRATIONS: &[Migration] = &[
             ALTER TABLE projects ADD COLUMN clone_location TEXT;
         "#,
     },
+    Migration {
+        version: 3,
+        description: "Add disk_layout and provider to projects, and add project_credentials and project_sources tables",
+        checksum: "v3_project_sources_and_credentials",
+        sql: r#"
+            ALTER TABLE projects ADD COLUMN disk_layout TEXT NOT NULL DEFAULT 'grouped';
+            ALTER TABLE projects ADD COLUMN provider TEXT NOT NULL DEFAULT 'github';
+
+            CREATE TABLE IF NOT EXISTS project_credentials (
+                project_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                auth_method TEXT NOT NULL,
+                encrypted_secret TEXT NOT NULL,
+                account_login TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (project_id, provider)
+            );
+
+            CREATE TABLE IF NOT EXISTS project_sources (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                login TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                display_name TEXT,
+                avatar_url TEXT,
+                bio TEXT,
+                public_repos_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE(project_id, provider, login)
+            );
+        "#,
+    },
 ];
 
 /// Apply standard SQLite connection pragmas (WAL mode, foreign keys, busy timeout).
@@ -228,6 +262,6 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT count(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
     }
 }

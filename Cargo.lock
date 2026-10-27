@@ -5838,6 +5838,7 @@ dependencies = [
  "release-desk-core",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]
@@ -5923,6 +5924,7 @@ dependencies = [
  "release-desk-store",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

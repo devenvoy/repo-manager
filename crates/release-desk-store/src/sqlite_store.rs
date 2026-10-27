@@ -74,7 +74,7 @@ impl ProjectStore for SqliteStore {
     fn list_projects(&self) -> Result<Vec<ProjectIdentity>, DomainError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare("SELECT id, name, clone_location FROM projects ORDER BY name ASC")
+            .prepare("SELECT id, name, clone_location, disk_layout FROM projects ORDER BY name ASC")
             .map_err(|e| DomainError::PortFailure {
                 port: "SQLite",
                 message: e.to_string(),
@@ -85,7 +85,8 @@ impl ProjectStore for SqliteStore {
                 let id_raw: String = row.get(0)?;
                 let name_raw: String = row.get(1)?;
                 let clone_location_raw: Option<String> = row.get(2)?;
-                Ok((id_raw, name_raw, clone_location_raw))
+                let disk_layout_raw: Option<String> = row.get(3)?;
+                Ok((id_raw, name_raw, clone_location_raw, disk_layout_raw))
             })
             .map_err(|e| DomainError::PortFailure {
                 port: "SQLite",
@@ -94,7 +95,7 @@ impl ProjectStore for SqliteStore {
 
         let mut projects = Vec::new();
         for row in rows {
-            let (id_raw, name_raw, clone_location_raw) =
+            let (id_raw, name_raw, clone_location_raw, disk_layout_raw) =
                 row.map_err(|e| DomainError::PortFailure {
                     port: "SQLite",
                     message: e.to_string(),
@@ -106,11 +107,16 @@ impl ProjectStore for SqliteStore {
             })?;
             let project_name = ProjectName::new(&name_raw).map_err(DomainError::from)?;
             let clone_location = clone_location_raw.map(std::path::PathBuf::from);
+            let disk_layout = match disk_layout_raw.as_deref() {
+                Some("flat") => release_desk_core::project::DiskLayout::Flat,
+                _ => release_desk_core::project::DiskLayout::Grouped,
+            };
 
             projects.push(ProjectIdentity {
                 id: ProjectId::from_u128(id_num),
                 name: project_name,
                 clone_location,
+                disk_layout,
             });
         }
 
@@ -122,7 +128,7 @@ impl ProjectStore for SqliteStore {
         let id_str = id.as_u128().to_string();
 
         let mut stmt = conn
-            .prepare("SELECT id, name, clone_location FROM projects WHERE id = ?1")
+            .prepare("SELECT id, name, clone_location, disk_layout FROM projects WHERE id = ?1")
             .map_err(|e| DomainError::PortFailure {
                 port: "SQLite",
                 message: e.to_string(),
@@ -133,7 +139,8 @@ impl ProjectStore for SqliteStore {
                 let id_raw: String = row.get(0)?;
                 let name_raw: String = row.get(1)?;
                 let clone_location_raw: Option<String> = row.get(2)?;
-                Ok((id_raw, name_raw, clone_location_raw))
+                let disk_layout_raw: Option<String> = row.get(3)?;
+                Ok((id_raw, name_raw, clone_location_raw, disk_layout_raw))
             })
             .optional()
             .map_err(|e| DomainError::PortFailure {
@@ -142,13 +149,18 @@ impl ProjectStore for SqliteStore {
             })?;
 
         match res {
-            Some((_, name_raw, clone_location_raw)) => {
+            Some((_, name_raw, clone_location_raw, disk_layout_raw)) => {
                 let project_name = ProjectName::new(&name_raw).map_err(DomainError::from)?;
                 let clone_location = clone_location_raw.map(std::path::PathBuf::from);
+                let disk_layout = match disk_layout_raw.as_deref() {
+                    Some("flat") => release_desk_core::project::DiskLayout::Flat,
+                    _ => release_desk_core::project::DiskLayout::Grouped,
+                };
                 Ok(Some(ProjectIdentity {
                     id,
                     name: project_name,
                     clone_location,
+                    disk_layout,
                 }))
             }
             None => Ok(None),
@@ -163,18 +175,23 @@ impl ProjectStore for SqliteStore {
             .clone_location
             .as_ref()
             .map(|p| p.to_string_lossy().to_string());
+        let layout_str = match project.disk_layout {
+            release_desk_core::project::DiskLayout::Grouped => "grouped",
+            release_desk_core::project::DiskLayout::Flat => "flat",
+        };
         let now = "2026-10-27T00:00:00Z";
 
         conn.execute(
             r#"
-            INSERT INTO projects (id, name, clone_location, account_login, account_kind, created_at, updated_at)
-            VALUES (?1, ?2, ?3, 'owner', 'organization', ?4, ?4)
+            INSERT INTO projects (id, name, clone_location, disk_layout, account_login, account_kind, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, 'owner', 'organization', ?5, ?5)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 clone_location = excluded.clone_location,
+                disk_layout = excluded.disk_layout,
                 updated_at = excluded.updated_at
             "#,
-            params![id_str, name_str, clone_loc_str, now],
+            params![id_str, name_str, clone_loc_str, layout_str, now],
         )
         .map_err(|e| DomainError::PortFailure {
             port: "SQLite",
@@ -642,6 +659,20 @@ mod tests {
 
         let list = store.list_projects().unwrap();
         assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0].disk_layout,
+            release_desk_core::project::DiskLayout::Grouped
+        );
+
+        // Update to Flat layout
+        let flat_project = project.with_layout(release_desk_core::project::DiskLayout::Flat);
+        store.save_project(&flat_project).unwrap();
+
+        let fetched_flat = store.get_project(id).unwrap().unwrap();
+        assert_eq!(
+            fetched_flat.disk_layout,
+            release_desk_core::project::DiskLayout::Flat
+        );
 
         store.delete_project(id).unwrap();
         assert!(store.get_project(id).unwrap().is_none());
