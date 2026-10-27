@@ -5898,8 +5898,13 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "ratatui",
+ "release-desk-application",
  "release-desk-core",
+ "release-desk-git",
  "release-desk-store",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

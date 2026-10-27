@@ -1,8 +1,8 @@
 # Planning state
 
 - Date: 2026-10-27
-- Current phase: 5 — CLI (Completed) -> Phase 6 (TUI)
-- Status: Phase 5 (CLI & Local Backup Engine) completed and verified across all commands (`init`, `project`, `auth`, `discovery`, `track`, `sync`, `installers`, `pr`, `backup`), project clone location automated `.release-desk/data.json` backup snapshot and database mismatch reconciliation engine; 65 workspace tests passing; ArtCraft safety boundary 100% verified untouched; transitioning to Phase 6 (TUI).
+- Current phase: 6 — TUI (Completed) -> Phase 7 (GPUI Desktop GUI)
+- Status: Phase 6 (TUI) completed and verified across all views (Repositories, Installers, PullRequests, Reconcile with local backup snapshot inspection and recovery, Projects, Auth, and Help modal), RAII terminal lifecycle guard, and headless Ratatui TestBackend tests; 83 workspace tests passing; ArtCraft safety boundary 100% verified untouched; transitioning to Phase 7 (Desktop GUI).
 - Locked decisions: D-01 through D-06 in `DECISIONS.md`
 - Existing code: modular pure domain in `crates/release-desk-core`, decoupled application layer in `crates/release-desk-application`, storage and infrastructure adapters in `crates/release-desk-store`, git in `crates/release-desk-git`, and prototypes for CLI, TUI, GUI
 - Source documents: `docs/FEATURE_PARITY.md`, `docs/ARCHITECTURE.md`, `docs/SCHEMA.md`, `docs/BOUNDARIES.md`, `docs/UX-SPEC.md`, `docs/TEST-STRATEGY.md`
