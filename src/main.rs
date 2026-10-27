@@ -12,7 +12,8 @@ use release_desk_core::app_catalog::{AppActionState, AppStoreItem};
 use release_desk_core::port::SecretStorePort as _;
 use release_desk_core::project::DiskLayout;
 use release_desk_store::auth::{
-    LocalOAuthServer, ModalWebviewAuthPort, OAuthRedirectOutcome, SystemBrowserAuthPort,
+    DevicePollOutcome, GitHubDeviceFlow, LocalOAuthServer, ModalWebviewAuthPort,
+    OAuthRedirectOutcome, SystemBrowserAuthPort, copy_to_macos_clipboard,
 };
 use release_desk_store::credentials::OsSecretStore;
 use repo_manager::components::{render_header, render_sidebar};
@@ -70,6 +71,10 @@ struct ReleaseDesk {
     auth_status_message: Option<String>,
     detected_system_credential: Option<(String, String)>,
     local_oauth_server: Option<LocalOAuthServer>,
+    device_flow_user_code: Option<String>,
+    device_flow_verification_uri: Option<String>,
+    device_flow_canceller: Option<Arc<std::sync::atomic::AtomicBool>>,
+    active_webview_child: Option<std::process::Child>,
 }
 
 fn find_webview_binary() -> Option<std::path::PathBuf> {
@@ -161,6 +166,10 @@ impl ReleaseDesk {
             auth_status_message: None,
             detected_system_credential,
             local_oauth_server: None,
+            device_flow_user_code: None,
+            device_flow_verification_uri: None,
+            device_flow_canceller: None,
+            active_webview_child: None,
         };
         app.apply_appearance(window, cx);
         app
@@ -410,12 +419,22 @@ impl ReleaseDesk {
         cx.notify();
     }
 
+    fn copy_user_code(&mut self, code: String, cx: &mut Context<Self>) {
+        copy_to_macos_clipboard(&code);
+        self.message = format!("Code {code} copied to clipboard.");
+        cx.notify();
+    }
+
     fn trigger_browser_auth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(ref mut server) = self.local_oauth_server {
             server.stop();
         }
         self.local_oauth_server = None;
 
+        if let Some(c) = self.device_flow_canceller.take() {
+            c.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
         let custom_client_id = self
             .oauth_client_id_input
             .read(cx)
@@ -423,129 +442,451 @@ impl ReleaseDesk {
             .trim()
             .to_string();
 
-        if custom_client_id.is_empty() {
-            let url = self.setup_provider.token_creation_url();
-            #[cfg(target_os = "macos")]
-            let _ = std::process::Command::new("open").arg(url).spawn();
-            #[cfg(not(target_os = "macos"))]
-            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        if self.setup_provider == ProviderChoice::GitHub {
+            let flow = GitHubDeviceFlow::default();
+            let scopes = ["repo", "read:user"];
+            match flow.request_code(&custom_client_id, &scopes) {
+                Ok(resp) => {
+                    let user_code = resp.user_code;
+                    let device_code = resp.device_code;
+                    let verify_url = resp.verification_uri;
+                    let interval = resp.interval.max(5);
 
-            self.auth_mode_choice = AuthModeChoice::Token;
-            self.auth_status_message = Some(
-                "Opened official provider page in browser with pre-selected scopes. Copy and paste token below.".into(),
-            );
-            self.message =
-                "Opened token creator in browser (0% 404 risk). Paste token below.".into();
-            cx.notify();
-            return;
-        }
+                    copy_to_macos_clipboard(&user_code);
 
-        match LocalOAuthServer::start(4567) {
-            Ok(server) => {
-                let redirect_uri = format!("http://127.0.0.1:{}/callback", server.port());
-                let url = self
-                    .setup_provider
-                    .oauth_authorize_url(&custom_client_id, &redirect_uri);
+                    self.device_flow_user_code = Some(user_code.clone());
+                    self.device_flow_verification_uri = Some(verify_url.clone());
+                    self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+                    self.auth_status_message = Some(format!(
+                        "Enter code {user_code} on GitHub (copied to clipboard). Waiting for authorization..."
+                    ));
+                    self.message = format!("One-time code {user_code} copied to clipboard.");
 
-                self.local_oauth_server = Some(server);
-                self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
-                self.auth_status_message = Some(
-                    "Listening on http://127.0.0.1:4567/callback... Waiting for browser authorization.".into(),
-                );
-                self.message = "Launched browser OAuth. Listening on local port 4567.".into();
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("open").arg(&verify_url).spawn();
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&verify_url)
+                        .spawn();
 
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("open").arg(&url).spawn();
-                #[cfg(not(target_os = "macos"))]
-                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                    let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    self.device_flow_canceller = Some(cancel_token.clone());
 
-                cx.spawn_in(window, async move |this, cx| {
-                    for _ in 0..600 {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(100))
-                            .await;
-                        let outcome = this.update_in(cx, |this, _window, _cx| {
-                            this.local_oauth_server
-                                .as_ref()
-                                .and_then(|s| s.poll_outcome())
-                        });
+                    cx.spawn_in(window, async move |this, cx| {
+                        let cid = custom_client_id.clone();
+                        let dcode = device_code.clone();
+                        for _ in 0..180 {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(interval))
+                                .await;
 
-                        if let Ok(Some(outcome)) = outcome {
-                            let _ = this.update_in(cx, |this, window, cx| {
-                                match outcome {
-                                    OAuthRedirectOutcome::Success { code } => {
-                                        let cred_key = format!(
-                                            "release_desk_{}_browser_oauth",
-                                            this.setup_provider.as_str()
-                                        );
-                                        let _ = this.secret_store.set_secret(&cred_key, &code);
+                            if cancel_token.load(std::sync::atomic::Ordering::SeqCst) {
+                                break;
+                            }
+
+                            let flow_bg = GitHubDeviceFlow::default();
+                            let cid_clone = cid.clone();
+                            let dcode_clone = dcode.clone();
+                            let outcome = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    flow_bg.poll_token(&cid_clone, &dcode_clone)
+                                })
+                                .await;
+
+                            match outcome {
+                                Ok(DevicePollOutcome::Success { access_token, .. }) => {
+                                    let flow_bg2 = GitHubDeviceFlow::default();
+                                    let token_clone = access_token.clone();
+                                    let user_login = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            flow_bg2.fetch_user_login(&token_clone)
+                                        })
+                                        .await
+                                        .unwrap_or_else(|_| "github-user".to_string());
+
+                                    let _ = this.update_in(cx, |this, window, cx| {
+                                        let cred_key = format!("release_desk_github_{user_login}");
+                                        let _ = this.secret_store.set_secret(&cred_key, &access_token);
                                         this.saved_credential_ref = Some(cred_key);
-                                        this.selected_saved_account =
-                                            Some("browser-authorized".into());
+                                        this.selected_saved_account = Some(user_login.clone());
+                                        this.auth_status_message = Some(format!(
+                                            "Successfully authorized via GitHub OAuth (@{user_login})."
+                                        ));
+                                        this.message = format!("Connected to GitHub as @{user_login}.");
+                                        this.account_input.update(cx, |input, cx| {
+                                            input.set_value(user_login, window, cx);
+                                        });
+                                        this.device_flow_user_code = None;
+                                        this.device_flow_canceller = None;
+                                        cx.notify();
+                                    });
+                                    break;
+                                }
+                                Ok(DevicePollOutcome::Pending) => {}
+                                Ok(DevicePollOutcome::SlowDown) => {
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_secs(5))
+                                        .await;
+                                }
+                                Ok(DevicePollOutcome::Expired) => {
+                                    let _ = this.update_in(cx, |this, _window, cx| {
                                         this.auth_status_message = Some(
-                                            "Successfully authenticated via browser (5,000 req/hr)."
+                                            "Device code expired. Please click Start Sign-In again."
                                                 .into(),
                                         );
-                                        this.message =
-                                            "Browser authentication received successfully.".into();
-                                        this.account_input.update(cx, |input, cx| {
-                                            input.set_value("browser-authorized", window, cx);
-                                        });
-                                    }
-                                    OAuthRedirectOutcome::Error { message } => {
-                                        this.auth_status_message = Some(format!(
-                                            "Browser authentication failed: {message}"
-                                        ));
-                                    }
+                                        this.device_flow_user_code = None;
+                                        this.device_flow_canceller = None;
+                                        cx.notify();
+                                    });
+                                    break;
                                 }
-                                if let Some(ref mut s) = this.local_oauth_server {
-                                    s.stop();
+                                Ok(DevicePollOutcome::AccessDenied) => {
+                                    let _ = this.update_in(cx, |this, _window, cx| {
+                                        this.auth_status_message = Some(
+                                            "Authorization was denied by user on GitHub.".into(),
+                                        );
+                                        this.device_flow_user_code = None;
+                                        this.device_flow_canceller = None;
+                                        cx.notify();
+                                    });
+                                    break;
                                 }
-                                this.local_oauth_server = None;
-                                cx.notify();
+                                Ok(DevicePollOutcome::Error(err)) => {
+                                    let _ = this.update_in(cx, |this, _window, cx| {
+                                        this.auth_status_message =
+                                            Some(format!("OAuth error: {err}"));
+                                        this.device_flow_user_code = None;
+                                        this.device_flow_canceller = None;
+                                        cx.notify();
+                                    });
+                                    break;
+                                }
+                                Err(e) => {
+                                    let _ = this.update_in(cx, |this, _window, cx| {
+                                        this.auth_status_message =
+                                            Some(format!("Connection error: {e}"));
+                                        this.device_flow_user_code = None;
+                                        this.device_flow_canceller = None;
+                                        cx.notify();
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                    })
+                    .detach();
+
+                    cx.notify();
+                    return;
+                }
+                Err(e) => {
+                    self.auth_status_message = Some(format!("Could not start GitHub OAuth ({e})."));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
+        if !custom_client_id.is_empty() {
+            match LocalOAuthServer::start(4567) {
+                Ok(server) => {
+                    let redirect_uri = format!("http://127.0.0.1:{}/callback", server.port());
+                    let url = self
+                        .setup_provider
+                        .oauth_authorize_url(&custom_client_id, &redirect_uri);
+
+                    self.local_oauth_server = Some(server);
+                    self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+                    self.auth_status_message = Some(
+                        "Listening on http://127.0.0.1:4567/callback... Waiting for browser authorization.".into(),
+                    );
+                    self.message = "Launched browser OAuth. Listening on local port 4567.".into();
+
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("open").arg(&url).spawn();
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+
+                    cx.spawn_in(window, async move |this, cx| {
+                        for _ in 0..600 {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(100))
+                                .await;
+                            let outcome = this.update_in(cx, |this, _window, _cx| {
+                                this.local_oauth_server
+                                    .as_ref()
+                                    .and_then(|s| s.poll_outcome())
                             });
-                            break;
-                        }
 
-                        let is_still_listening = this.update_in(cx, |this, _window, _cx| {
-                            this.local_oauth_server
-                                .as_ref()
-                                .is_some_and(|s| s.is_listening())
-                        });
-                        if let Ok(false) = is_still_listening {
-                            break;
-                        }
-                    }
-                })
-                .detach();
+                            if let Ok(Some(outcome)) = outcome {
+                                let _ = this.update_in(cx, |this, window, cx| {
+                                    match outcome {
+                                        OAuthRedirectOutcome::Success { code } => {
+                                            let cred_key = format!(
+                                                "release_desk_{}_browser_oauth",
+                                                this.setup_provider.as_str()
+                                            );
+                                            let _ = this.secret_store.set_secret(&cred_key, &code);
+                                            this.saved_credential_ref = Some(cred_key);
+                                            this.selected_saved_account =
+                                                Some("browser-authorized".into());
+                                            this.auth_status_message = Some(
+                                                "Successfully authenticated via browser (5,000 req/hr)."
+                                                    .into(),
+                                            );
+                                            this.message =
+                                                "Browser authentication received successfully.".into();
+                                            this.account_input.update(cx, |input, cx| {
+                                                input.set_value("browser-authorized", window, cx);
+                                            });
+                                        }
+                                        OAuthRedirectOutcome::Error { message } => {
+                                            this.auth_status_message = Some(format!(
+                                                "Browser authentication failed: {message}"
+                                            ));
+                                        }
+                                    }
+                                    if let Some(ref mut s) = this.local_oauth_server {
+                                        s.stop();
+                                    }
+                                    this.local_oauth_server = None;
+                                    cx.notify();
+                                });
+                                break;
+                            }
 
-                cx.notify();
+                            let is_still_listening = this.update_in(cx, |this, _window, _cx| {
+                                this.local_oauth_server
+                                    .as_ref()
+                                    .is_some_and(|s| s.is_listening())
+                            });
+                            if let Ok(false) = is_still_listening {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+
+                    cx.notify();
+                }
+                Err(e) => {
+                    self.auth_status_message = Some(format!(
+                        "Could not start local redirect server on port 4567 ({e}). Please use Personal Access Token."
+                    ));
+                    cx.notify();
+                }
             }
-            Err(e) => {
-                self.auth_status_message = Some(format!(
-                    "Could not start local redirect server on port 4567 ({e}). Please use Token or In-App Webview."
-                ));
-                cx.notify();
-            }
+        } else {
+            self.auth_status_message = Some(
+                "Please configure an OAuth Client ID for this provider, or use Personal Access Token."
+                    .into(),
+            );
+            cx.notify();
         }
     }
 
     fn cancel_browser_auth(&mut self, cx: &mut Context<Self>) {
+        if let Some(c) = self.device_flow_canceller.take() {
+            c.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(mut child) = self.active_webview_child.take() {
+            let _ = child.kill();
+        }
         if let Some(ref mut server) = self.local_oauth_server {
             server.stop();
         }
         self.local_oauth_server = None;
+        self.device_flow_user_code = None;
         self.auth_status_message = None;
         cx.notify();
     }
 
-    fn trigger_webview_auth(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn trigger_webview_auth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(c) = self.device_flow_canceller.take() {
+            c.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        if let Some(mut child) = self.active_webview_child.take() {
+            let _ = child.kill();
+        }
+
         let custom_client_id = self
             .oauth_client_id_input
             .read(cx)
             .value()
             .trim()
             .to_string();
+
+        if self.setup_provider == ProviderChoice::GitHub {
+            let flow = GitHubDeviceFlow::default();
+            let scopes = ["repo", "read:user"];
+            match flow.request_code(&custom_client_id, &scopes) {
+                Ok(resp) => {
+                    let user_code = resp.user_code;
+                    let device_code = resp.device_code;
+                    let verify_url = resp.verification_uri;
+                    let interval = resp.interval.max(5);
+
+                    copy_to_macos_clipboard(&user_code);
+
+                    self.device_flow_user_code = Some(user_code.clone());
+                    self.device_flow_verification_uri = Some(verify_url.clone());
+                    self.auth_mode_choice = AuthModeChoice::OAuthWebview;
+                    self.auth_status_message = Some(format!(
+                        "Enter code {user_code} in the webview window (copied to clipboard)."
+                    ));
+                    self.message = format!("One-time code {user_code} copied to clipboard.");
+
+                    if let Some(webview_bin) = find_webview_binary() {
+                        if let Ok(child) = std::process::Command::new(webview_bin)
+                            .arg(&verify_url)
+                            .spawn()
+                        {
+                            self.active_webview_child = Some(child);
+                        }
+                    } else {
+                        #[cfg(target_os = "macos")]
+                        let _ = std::process::Command::new("open").arg(&verify_url).spawn();
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = std::process::Command::new("xdg-open")
+                            .arg(&verify_url)
+                            .spawn();
+                    }
+
+                    let cancel_token = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    self.device_flow_canceller = Some(cancel_token.clone());
+
+                    cx.spawn_in(window, async move |this, cx| {
+                        let cid = custom_client_id.clone();
+                        let dcode = device_code.clone();
+                        for _ in 0..180 {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(interval))
+                                .await;
+
+                            if cancel_token.load(std::sync::atomic::Ordering::SeqCst) {
+                                break;
+                            }
+
+                            let flow_bg = GitHubDeviceFlow::default();
+                            let cid_clone = cid.clone();
+                            let dcode_clone = dcode.clone();
+                            let outcome = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    flow_bg.poll_token(&cid_clone, &dcode_clone)
+                                })
+                                .await;
+
+                            match outcome {
+                                Ok(DevicePollOutcome::Success { access_token, .. }) => {
+                                    let flow_bg2 = GitHubDeviceFlow::default();
+                                    let token_clone = access_token.clone();
+                                    let user_login = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            flow_bg2.fetch_user_login(&token_clone)
+                                        })
+                                        .await
+                                        .unwrap_or_else(|_| "github-user".to_string());
+
+                                    let _ = this.update_in(cx, |this, window, cx| {
+                                        if let Some(mut child) = this.active_webview_child.take() {
+                                            let _ = child.kill();
+                                        }
+                                        let cred_key = format!("release_desk_github_{user_login}");
+                                        let _ = this.secret_store.set_secret(&cred_key, &access_token);
+                                        this.saved_credential_ref = Some(cred_key);
+                                        this.selected_saved_account = Some(user_login.clone());
+                                        this.auth_status_message = Some(format!(
+                                            "Successfully authorized via In-App Webview OAuth (@{user_login})."
+                                        ));
+                                        this.message = format!("Connected to GitHub as @{user_login}.");
+                                        this.account_input.update(cx, |input, cx| {
+                                            input.set_value(user_login, window, cx);
+                                        });
+                                        this.device_flow_user_code = None;
+                                        this.device_flow_canceller = None;
+                                        cx.notify();
+                                    });
+                                    break;
+                                }
+                                Ok(DevicePollOutcome::Pending) => {}
+                                Ok(DevicePollOutcome::SlowDown) => {
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_secs(5))
+                                        .await;
+                                }
+                                Ok(DevicePollOutcome::Expired) => {
+                                    let _ = this.update_in(cx, |this, _window, cx| {
+                                        if let Some(mut child) = this.active_webview_child.take() {
+                                            let _ = child.kill();
+                                        }
+                                        this.auth_status_message = Some(
+                                            "Device code expired. Please click Open Webview Sign-In again."
+                                                .into(),
+                                        );
+                                        this.device_flow_user_code = None;
+                                        this.device_flow_canceller = None;
+                                        cx.notify();
+                                    });
+                                    break;
+                                }
+                                Ok(DevicePollOutcome::AccessDenied) => {
+                                    let _ = this.update_in(cx, |this, _window, cx| {
+                                        if let Some(mut child) = this.active_webview_child.take() {
+                                            let _ = child.kill();
+                                        }
+                                        this.auth_status_message =
+                                            Some("Authorization was denied by user.".into());
+                                        this.device_flow_user_code = None;
+                                        this.device_flow_canceller = None;
+                                        cx.notify();
+                                    });
+                                    break;
+                                }
+                                Ok(DevicePollOutcome::Error(err)) => {
+                                    let _ = this.update_in(cx, |this, _window, cx| {
+                                        if let Some(mut child) = this.active_webview_child.take() {
+                                            let _ = child.kill();
+                                        }
+                                        this.auth_status_message =
+                                            Some(format!("OAuth error: {err}"));
+                                        this.device_flow_user_code = None;
+                                        this.device_flow_canceller = None;
+                                        cx.notify();
+                                    });
+                                    break;
+                                }
+                                Err(e) => {
+                                    let _ = this.update_in(cx, |this, _window, cx| {
+                                        if let Some(mut child) = this.active_webview_child.take() {
+                                            let _ = child.kill();
+                                        }
+                                        this.auth_status_message =
+                                            Some(format!("Connection error: {e}"));
+                                        this.device_flow_user_code = None;
+                                        this.device_flow_canceller = None;
+                                        cx.notify();
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                    })
+                    .detach();
+
+                    cx.notify();
+                    return;
+                }
+                Err(e) => {
+                    self.auth_status_message = Some(format!("Could not start GitHub OAuth ({e})."));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
 
         let target_url = if !custom_client_id.is_empty() {
             self.setup_provider
@@ -560,10 +901,13 @@ impl ReleaseDesk {
             } else {
                 ""
             };
-            let _ = std::process::Command::new(webview_bin)
+            if let Ok(child) = std::process::Command::new(webview_bin)
                 .arg(&target_url)
                 .arg(callback)
-                .spawn();
+                .spawn()
+            {
+                self.active_webview_child = Some(child);
+            }
             self.auth_mode_choice = AuthModeChoice::OAuthWebview;
             self.auth_status_message = Some(
                 "In-App Webview opened in dedicated modal window. Complete authorization there."
@@ -1029,6 +1373,7 @@ impl Render for ReleaseDesk {
                             .local_oauth_server
                             .as_ref()
                             .is_some_and(|s| s.is_listening()),
+                        device_user_code: self.device_flow_user_code.clone(),
                     },
                     cx,
                     views::ProjectSetupActions {
@@ -1061,6 +1406,9 @@ impl Render for ReleaseDesk {
                         },
                         on_cancel_browser_auth: |this: &mut Self, cx| {
                             this.cancel_browser_auth(cx);
+                        },
+                        on_copy_code: |this: &mut Self, code, cx| {
+                            this.copy_user_code(code, cx);
                         },
                         on_auth_webview: |this: &mut Self, window, cx| {
                             this.trigger_webview_auth(window, cx);

@@ -29,6 +29,7 @@ pub struct ProjectSetupProps<'a> {
     pub auth_status_message: Option<String>,
     pub has_existing_credential: bool,
     pub is_oauth_listening: bool,
+    pub device_user_code: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +45,7 @@ pub struct ProjectSetupActions<T> {
     pub on_select_auth_tab: fn(&mut T, AuthModeChoice, &mut Context<T>),
     pub on_auth_browser: fn(&mut T, &mut Window, &mut Context<T>),
     pub on_cancel_browser_auth: fn(&mut T, &mut Context<T>),
+    pub on_copy_code: fn(&mut T, String, &mut Context<T>),
     pub on_auth_webview: fn(&mut T, &mut Window, &mut Context<T>),
     pub on_save_token: fn(&mut T, &mut Window, &mut Context<T>),
     pub on_open_token_url: fn(&mut T, &mut Window, &mut Context<T>),
@@ -66,6 +68,7 @@ pub fn render_project_setup<T: 'static>(
         on_select_auth_tab,
         on_auth_browser,
         on_cancel_browser_auth,
+        on_copy_code,
         on_auth_webview,
         on_save_token,
         on_open_token_url,
@@ -298,7 +301,70 @@ pub fn render_project_setup<T: 'static>(
                         .flex_col()
                         .gap_3();
 
-                    if props.is_oauth_listening {
+                    if let Some(ref code) = props.device_user_code {
+                        let c_clone = code.clone();
+                        browser_box = browser_box
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_size(px(13.))
+                                                    .font_bold()
+                                                    .text_color(cx.theme().primary)
+                                                    .child("GitHub OAuth (Device Flow)"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.))
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child("Enter this code in your browser to authorize Release Desk:"),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("btn-cancel-oauth")
+                                            .label("Cancel")
+                                            .ghost()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                on_cancel_browser_auth(this, cx)
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .px_4()
+                                            .py_2()
+                                            .rounded(px(6.))
+                                            .bg(cx.theme().background)
+                                            .border_1()
+                                            .border_color(cx.theme().border)
+                                            .text_size(px(18.))
+                                            .font_bold()
+                                            .text_color(cx.theme().primary)
+                                            .child(code.clone()),
+                                    )
+                                    .child(
+                                        Button::new("btn-copy-device-code")
+                                            .label("Copy Code")
+                                            .outline()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                on_copy_code(this, c_clone.clone(), cx)
+                                            })),
+                                    ),
+                            );
+                    } else if props.is_oauth_listening {
                         browser_box = browser_box
                             .child(
                                 div()
@@ -342,7 +408,7 @@ pub fn render_project_setup<T: 'static>(
                                     .text_size(px(12.))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(
-                                        "Starts a local redirect listener on http://127.0.0.1:4567/callback and opens your system browser to sign in.",
+                                        "Authenticates directly with GitHub OAuth (identical to gh auth login). Opens github.com in your browser.",
                                     ),
                             )
                             .child(
@@ -363,7 +429,7 @@ pub fn render_project_setup<T: 'static>(
                                 Form::new().child(
                                     Field::new()
                                         .label(
-                                            "OAuth Client ID (optional, for custom registered OAuth apps)",
+                                            "OAuth Client ID (optional, defaults to official GitHub CLI Client ID)",
                                         )
                                         .child(Input::new(props.oauth_client_id)),
                                 ),
@@ -371,7 +437,7 @@ pub fn render_project_setup<T: 'static>(
                     }
                     content = content.child(browser_box);
                 } else if is_webview {
-                    let webview_box = div()
+                    let mut webview_box = div()
                         .p_4()
                         .rounded(px(8.))
                         .bg(cx.theme().secondary)
@@ -379,29 +445,96 @@ pub fn render_project_setup<T: 'static>(
                         .border_color(cx.theme().border)
                         .flex()
                         .flex_col()
-                        .gap_3()
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(
-                                    "Opens an embedded webview modal panel without leaving Release Desk.",
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    Button::new("btn-start-webview-oauth")
-                                        .label("Open Webview Sign-In")
-                                        .primary()
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            on_auth_webview(this, window, cx)
-                                        })),
-                                ),
-                        );
+                        .gap_3();
+
+                    if let Some(ref code) = props.device_user_code {
+                        let c_clone = code.clone();
+                        webview_box = webview_box
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_size(px(13.))
+                                                    .font_bold()
+                                                    .text_color(cx.theme().primary)
+                                                    .child("In-App Webview Active"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.))
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child("Enter this code in the opened webview modal window:"),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("btn-cancel-webview-oauth")
+                                            .label("Cancel")
+                                            .ghost()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                on_cancel_browser_auth(this, cx)
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .px_4()
+                                            .py_2()
+                                            .rounded(px(6.))
+                                            .bg(cx.theme().background)
+                                            .border_1()
+                                            .border_color(cx.theme().border)
+                                            .text_size(px(18.))
+                                            .font_bold()
+                                            .text_color(cx.theme().primary)
+                                            .child(code.clone()),
+                                    )
+                                    .child(
+                                        Button::new("btn-copy-device-code-wv")
+                                            .label("Copy Code")
+                                            .outline()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                on_copy_code(this, c_clone.clone(), cx)
+                                            })),
+                                    ),
+                            );
+                    } else {
+                        webview_box = webview_box
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        "Opens an embedded native WebKit modal window without leaving Release Desk.",
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        Button::new("btn-start-webview-oauth")
+                                            .label("Open Webview Sign-In")
+                                            .primary()
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                on_auth_webview(this, window, cx)
+                                            })),
+                                    ),
+                            );
+                    }
                     content = content.child(webview_box);
                 } else if is_token {
                     let token_box = div()
