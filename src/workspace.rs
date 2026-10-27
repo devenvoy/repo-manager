@@ -116,6 +116,35 @@ impl ProviderChoice {
             }
         }
     }
+
+    pub fn oauth_authorize_url(self, client_id: &str, redirect_uri: &str) -> String {
+        let cid = if client_id.trim().is_empty() {
+            "release-desk-app"
+        } else {
+            client_id.trim()
+        };
+        match self {
+            Self::GitHub => format!(
+                "https://github.com/login/oauth/authorize?client_id={cid}&redirect_uri={redirect_uri}&scope=repo%20read:user&response_type=code"
+            ),
+            Self::GitLab => format!(
+                "https://gitlab.com/oauth/authorize?client_id={cid}&redirect_uri={redirect_uri}&response_type=code&scope=read_user%20read_repository"
+            ),
+            Self::Bitbucket => format!(
+                "https://bitbucket.org/site/oauth2/authorize?client_id={cid}&response_type=code"
+            ),
+            Self::Codeberg | Self::Forgejo => format!(
+                "https://codeberg.org/login/oauth/authorize?client_id={cid}&redirect_uri={redirect_uri}&response_type=code"
+            ),
+            Self::Gitea => format!(
+                "https://gitea.com/login/oauth/authorize?client_id={cid}&redirect_uri={redirect_uri}&response_type=code"
+            ),
+            _ => format!(
+                "https://{}/login/oauth/authorize?client_id={cid}&redirect_uri={redirect_uri}&response_type=code",
+                self.default_host()
+            ),
+        }
+    }
 }
 
 impl From<ProviderChoice> for release_desk_core::provider::GitProviderKind {
@@ -143,10 +172,10 @@ pub struct SavedAccountInfo {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AuthModeChoice {
     #[default]
-    SavedAccount,
     OAuthBrowser,
     OAuthWebview,
     Token,
+    SavedAccount,
 }
 
 /// Find unique saved accounts for a given provider across projects.

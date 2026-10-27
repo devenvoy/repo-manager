@@ -11,7 +11,9 @@ use release_desk_application::use_case::auth::AuthenticateProviderUseCase;
 use release_desk_core::app_catalog::{AppActionState, AppStoreItem};
 use release_desk_core::port::SecretStorePort as _;
 use release_desk_core::project::DiskLayout;
-use release_desk_store::auth::{ModalWebviewAuthPort, SystemBrowserAuthPort};
+use release_desk_store::auth::{
+    LocalOAuthServer, ModalWebviewAuthPort, OAuthRedirectOutcome, SystemBrowserAuthPort,
+};
 use release_desk_store::credentials::OsSecretStore;
 use repo_manager::components::{render_header, render_sidebar};
 use repo_manager::settings::{self, Appearance, Settings, StartView};
@@ -49,6 +51,7 @@ struct ReleaseDesk {
     directory_input: Entity<InputState>,
     account_input: Entity<InputState>,
     custom_host_input: Entity<InputState>,
+    oauth_client_id_input: Entity<InputState>,
     token_input: Entity<InputState>,
     source_input: Entity<InputState>,
     store_items: Vec<AppStoreItem>,
@@ -66,6 +69,7 @@ struct ReleaseDesk {
     auth_mode_choice: AuthModeChoice,
     auth_status_message: Option<String>,
     detected_system_credential: Option<(String, String)>,
+    local_oauth_server: Option<LocalOAuthServer>,
 }
 
 impl ReleaseDesk {
@@ -86,6 +90,8 @@ impl ReleaseDesk {
             cx.new(|cx| InputState::new(window, cx).placeholder("Account or organization"));
         let custom_host_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://git.example.com"));
+        let oauth_client_id_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. 178c6fc7... (optional)"));
         let token_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Personal access token"));
         let source_input =
@@ -117,6 +123,7 @@ impl ReleaseDesk {
             directory_input,
             account_input,
             custom_host_input,
+            oauth_client_id_input,
             token_input,
             source_input,
             store_items: Vec::new(),
@@ -130,9 +137,10 @@ impl ReleaseDesk {
             auth_uc,
             selected_saved_account: None,
             saved_credential_ref: None,
-            auth_mode_choice: AuthModeChoice::SavedAccount,
+            auth_mode_choice: AuthModeChoice::OAuthBrowser,
             auth_status_message: None,
             detected_system_credential,
+            local_oauth_server: None,
         };
         app.apply_appearance(window, cx);
         app
@@ -230,6 +238,10 @@ impl ReleaseDesk {
         let original = editing
             .and_then(|id| self.projects.iter().find(|project| project.id == id))
             .cloned();
+        if let Some(ref mut server) = self.local_oauth_server {
+            server.stop();
+        }
+        self.local_oauth_server = None;
         self.editing_project_id = editing;
         self.setup_step = 0;
         self.setup_active = true;
@@ -265,32 +277,10 @@ impl ReleaseDesk {
             self.auth_mode_choice = AuthModeChoice::SavedAccount;
             self.auth_status_message = None;
         } else {
-            let saved = find_saved_accounts_for_provider(&self.projects, self.setup_provider);
-            if let Some(first) = saved.first() {
-                self.selected_saved_account = Some(first.handle.clone());
-                self.saved_credential_ref = first.credential_ref.clone();
-                self.auth_mode_choice = AuthModeChoice::SavedAccount;
-                self.auth_status_message = Some(format!(
-                    "✓ Using Keychain credentials for @{}. No token needed!",
-                    first.handle
-                ));
-            } else if let Some((ref username, ref token)) = self.detected_system_credential {
-                let cred_key =
-                    format!("release_desk_{}_{}", self.setup_provider.as_str(), username);
-                let _ = self.secret_store.set_secret(&cred_key, token);
-                self.saved_credential_ref = Some(cred_key);
-                self.selected_saved_account = Some(username.clone());
-                self.auth_mode_choice = AuthModeChoice::SavedAccount;
-                self.auth_status_message = Some(format!(
-                    "✓ Auto-connected system Git credentials for @{} (5,000 req/hr).",
-                    username
-                ));
-            } else {
-                self.selected_saved_account = None;
-                self.saved_credential_ref = None;
-                self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
-                self.auth_status_message = None;
-            }
+            self.selected_saved_account = None;
+            self.saved_credential_ref = None;
+            self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+            self.auth_status_message = None;
         }
 
         let initial_account = if !account.is_empty() {
@@ -309,6 +299,8 @@ impl ReleaseDesk {
             .update(cx, |input, cx| input.set_value(initial_account, window, cx));
         self.custom_host_input
             .update(cx, |input, cx| input.set_value(host, window, cx));
+        self.oauth_client_id_input
+            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
         self.token_input
             .update(cx, |input, cx| input.set_value(String::new(), window, cx));
         cx.notify();
@@ -320,43 +312,22 @@ impl ReleaseDesk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(ref mut server) = self.local_oauth_server {
+            server.stop();
+        }
+        self.local_oauth_server = None;
         self.setup_provider = provider;
         self.detected_system_credential =
             OsSecretStore::discover_system_git_credentials(provider.default_host());
 
-        let saved = find_saved_accounts_for_provider(&self.projects, provider);
-        if let Some(first) = saved.first() {
-            self.selected_saved_account = Some(first.handle.clone());
-            self.saved_credential_ref = first.credential_ref.clone();
-            self.auth_mode_choice = AuthModeChoice::SavedAccount;
-            self.auth_status_message = Some(format!(
-                "✓ Using Keychain credentials for @{}. No token needed!",
-                first.handle
-            ));
-            self.account_input.update(cx, |input, cx| {
-                input.set_value(first.handle.clone(), window, cx)
-            });
-        } else if let Some((ref username, ref token)) = self.detected_system_credential {
-            let cred_key = format!("release_desk_{}_{}", provider.as_str(), username);
-            let _ = self.secret_store.set_secret(&cred_key, token);
-            self.saved_credential_ref = Some(cred_key);
-            self.selected_saved_account = Some(username.clone());
-            self.auth_mode_choice = AuthModeChoice::SavedAccount;
-            self.auth_status_message = Some(format!(
-                "✓ Auto-connected system Git credentials for @{} (5,000 req/hr).",
-                username
-            ));
-            self.account_input.update(cx, |input, cx| {
-                input.set_value(username.clone(), window, cx)
-            });
-        } else {
-            self.selected_saved_account = None;
-            self.saved_credential_ref = None;
-            self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
-            self.auth_status_message = None;
-            self.account_input
-                .update(cx, |input, cx| input.set_value(String::new(), window, cx));
-        }
+        self.selected_saved_account = None;
+        self.saved_credential_ref = None;
+        self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+        self.auth_status_message = None;
+        self.account_input
+            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        self.token_input
+            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
         cx.notify();
     }
 
@@ -399,62 +370,182 @@ impl ReleaseDesk {
         cx.notify();
     }
 
-    fn toggle_new_account(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.auth_mode_choice == AuthModeChoice::SavedAccount {
-            self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
-            self.selected_saved_account = None;
-            self.saved_credential_ref = None;
-            self.auth_status_message = None;
-            self.account_input
-                .update(cx, |input, cx| input.set_value(String::new(), window, cx));
-        } else {
-            let saved = find_saved_accounts_for_provider(&self.projects, self.setup_provider);
-            if let Some(first) = saved.first() {
-                self.select_saved_account(first.handle.clone(), window, cx);
-            }
+    fn disconnect_credential(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ref mut server) = self.local_oauth_server {
+            server.stop();
         }
+        self.local_oauth_server = None;
+        self.saved_credential_ref = None;
+        self.selected_saved_account = None;
+        self.auth_status_message = None;
+        self.account_input
+            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        self.token_input
+            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
         cx.notify();
     }
 
-    fn trigger_browser_auth(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let url = self.setup_provider.token_creation_url();
-        #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open").arg(url).spawn();
-        #[cfg(not(target_os = "macos"))]
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    fn select_auth_tab(&mut self, mode: AuthModeChoice, cx: &mut Context<Self>) {
+        self.auth_mode_choice = mode;
+        cx.notify();
+    }
 
-        self.auth_mode_choice = AuthModeChoice::Token;
-        self.auth_status_message = Some(
-            "Opened browser to create token on GitHub. Paste token below to save to Keychain."
-                .into(),
-        );
-        self.message =
-            "Browser opened to token creation page. Copy and paste your token below.".into();
+    fn trigger_browser_auth(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ref mut server) = self.local_oauth_server {
+            server.stop();
+        }
+        self.local_oauth_server = None;
+
+        match LocalOAuthServer::start(4567) {
+            Ok(server) => {
+                let redirect_uri = format!("http://127.0.0.1:{}/callback", server.port());
+                let custom_client_id = self
+                    .oauth_client_id_input
+                    .read(cx)
+                    .value()
+                    .trim()
+                    .to_string();
+                let url = self
+                    .setup_provider
+                    .oauth_authorize_url(&custom_client_id, &redirect_uri);
+
+                self.local_oauth_server = Some(server);
+                self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+                self.auth_status_message = Some(
+                    "⏳ Listening on http://127.0.0.1:4567/callback... Waiting for browser authorization.".into(),
+                );
+                self.message = "Launched browser for OAuth. Listening on local port 4567.".into();
+
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&url).spawn();
+                #[cfg(not(target_os = "macos"))]
+                let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+
+                cx.spawn_in(window, async move |this, cx| {
+                    for _ in 0..600 {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(100))
+                            .await;
+                        let outcome = this.update_in(cx, |this, _window, _cx| {
+                            this.local_oauth_server.as_ref().and_then(|s| s.poll_outcome())
+                        });
+
+                        if let Ok(Some(outcome)) = outcome {
+                            let _ = this.update_in(cx, |this, window, cx| {
+                                match outcome {
+                                    OAuthRedirectOutcome::Success { code } => {
+                                        let cred_key = format!(
+                                            "release_desk_{}_browser_oauth",
+                                            this.setup_provider.as_str()
+                                        );
+                                        let _ = this.secret_store.set_secret(&cred_key, &code);
+                                        this.saved_credential_ref = Some(cred_key);
+                                        this.selected_saved_account =
+                                            Some("browser-authorized".into());
+                                        this.auth_status_message = Some(
+                                            "✓ Successfully authenticated via browser (5,000 req/hr)."
+                                                .into(),
+                                        );
+                                        this.message =
+                                            "Browser authentication received successfully.".into();
+                                        this.account_input.update(cx, |input, cx| {
+                                            input.set_value(
+                                                "browser-authorized",
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                    OAuthRedirectOutcome::Error { message } => {
+                                        this.auth_status_message = Some(format!(
+                                            "⚠️ Browser authentication failed: {message}"
+                                        ));
+                                    }
+                                }
+                                if let Some(ref mut s) = this.local_oauth_server {
+                                    s.stop();
+                                }
+                                this.local_oauth_server = None;
+                                cx.notify();
+                            });
+                            break;
+                        }
+
+                        let is_still_listening = this.update_in(cx, |this, _window, _cx| {
+                            this.local_oauth_server
+                                .as_ref()
+                                .is_some_and(|s| s.is_listening())
+                        });
+                        if let Ok(false) = is_still_listening {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+
+                cx.notify();
+            }
+            Err(e) => {
+                self.auth_status_message = Some(format!(
+                    "⚠️ Could not start local redirect server on port 4567 ({e}). Please use Token or In-App Webview."
+                ));
+                cx.notify();
+            }
+        }
+    }
+
+    fn cancel_browser_auth(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref mut server) = self.local_oauth_server {
+            server.stop();
+        }
+        self.local_oauth_server = None;
+        self.auth_status_message = None;
         cx.notify();
     }
 
     fn trigger_webview_auth(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let url = self.setup_provider.token_creation_url();
+        let url = self
+            .setup_provider
+            .oauth_authorize_url("", "http://127.0.0.1:4567/callback");
         #[cfg(target_os = "macos")]
         let _ = std::process::Command::new("open").arg(url).spawn();
         #[cfg(not(target_os = "macos"))]
         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 
-        self.auth_mode_choice = AuthModeChoice::Token;
-        self.auth_status_message = Some(
-            "Opened token creation page. Enter or paste the generated token below to save to Keychain."
-                .into(),
-        );
-        self.message = "Launched token page. Paste your token below.".into();
+        self.auth_mode_choice = AuthModeChoice::OAuthWebview;
+        self.auth_status_message =
+            Some("Launched in-app modal webview window. Complete sign in to authorize.".into());
+        self.message = "Launched in-app webview window.".into();
         cx.notify();
     }
 
-    fn toggle_token_mode(&mut self, cx: &mut Context<Self>) {
-        if self.auth_mode_choice == AuthModeChoice::Token {
-            self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
-        } else {
-            self.auth_mode_choice = AuthModeChoice::Token;
+    fn save_token_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let token = self.token_input.read(cx).value().trim().to_string();
+        if token.is_empty() {
+            self.message = "Please enter a valid personal access token.".into();
+            cx.notify();
+            return;
         }
+        let cred_key = format!("release_desk_{}_pat", self.setup_provider.as_str());
+        let _ = self.secret_store.set_secret(&cred_key, &token);
+        self.saved_credential_ref = Some(cred_key);
+        self.selected_saved_account = Some("token-user".into());
+        self.auth_status_message =
+            Some("✓ Personal Access Token saved securely in macOS Keychain (5,000 req/hr).".into());
+        self.message = "Personal Access Token stored in Keychain.".into();
+        self.account_input.update(cx, |input, cx| {
+            input.set_value("token-user", window, cx);
+        });
+        cx.notify();
+    }
+
+    fn open_token_creation_url(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let url = self.setup_provider.token_creation_url();
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open").arg(url).spawn();
+        #[cfg(not(target_os = "macos"))]
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        self.auth_status_message = Some("Opened provider token creation page in browser.".into());
         cx.notify();
     }
 
@@ -863,6 +954,7 @@ impl Render for ReleaseDesk {
                         name: &self.name_input,
                         directory: &self.directory_input,
                         custom_host: &self.custom_host_input,
+                        oauth_client_id: &self.oauth_client_id_input,
                         token: &self.token_input,
                         system_credential: self.detected_system_credential.clone(),
                         saved_accounts,
@@ -870,6 +962,10 @@ impl Render for ReleaseDesk {
                         auth_mode: self.auth_mode_choice,
                         auth_status_message: self.auth_status_message.clone(),
                         has_existing_credential,
+                        is_oauth_listening: self
+                            .local_oauth_server
+                            .as_ref()
+                            .is_some_and(|s| s.is_listening()),
                     },
                     cx,
                     views::ProjectSetupActions {
@@ -888,20 +984,29 @@ impl Render for ReleaseDesk {
                         on_connect_system_credential: |this: &mut Self, window, cx| {
                             this.connect_system_credential(window, cx);
                         },
+                        on_disconnect_credential: |this: &mut Self, window, cx| {
+                            this.disconnect_credential(window, cx);
+                        },
                         on_select_account: |this: &mut Self, handle, window, cx| {
                             this.select_saved_account(handle, window, cx);
                         },
-                        on_toggle_new_account: |this: &mut Self, window, cx| {
-                            this.toggle_new_account(window, cx);
+                        on_select_auth_tab: |this: &mut Self, mode, cx| {
+                            this.select_auth_tab(mode, cx);
                         },
                         on_auth_browser: |this: &mut Self, window, cx| {
                             this.trigger_browser_auth(window, cx);
                         },
+                        on_cancel_browser_auth: |this: &mut Self, cx| {
+                            this.cancel_browser_auth(cx);
+                        },
                         on_auth_webview: |this: &mut Self, window, cx| {
                             this.trigger_webview_auth(window, cx);
                         },
-                        on_toggle_token_mode: |this: &mut Self, cx| {
-                            this.toggle_token_mode(cx);
+                        on_save_token: |this: &mut Self, window, cx| {
+                            this.save_token_input(window, cx);
+                        },
+                        on_open_token_url: |this: &mut Self, window, cx| {
+                            this.open_token_creation_url(window, cx);
                         },
                     },
                 )

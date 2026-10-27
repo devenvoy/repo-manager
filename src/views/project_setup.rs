@@ -9,10 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::{
-    Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
-};
+use gpui_kit::{Context, Entity, IntoElement, ParentElement as _, Styled as _, Window, div, px};
 use release_desk_core::project::DiskLayout;
 
 pub struct ProjectSetupProps<'a> {
@@ -23,6 +20,7 @@ pub struct ProjectSetupProps<'a> {
     pub name: &'a Entity<InputState>,
     pub directory: &'a Entity<InputState>,
     pub custom_host: &'a Entity<InputState>,
+    pub oauth_client_id: &'a Entity<InputState>,
     pub token: &'a Entity<InputState>,
     pub system_credential: Option<(String, String)>,
     pub saved_accounts: Vec<SavedAccountInfo>,
@@ -30,6 +28,7 @@ pub struct ProjectSetupProps<'a> {
     pub auth_mode: AuthModeChoice,
     pub auth_status_message: Option<String>,
     pub has_existing_credential: bool,
+    pub is_oauth_listening: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -40,11 +39,14 @@ pub struct ProjectSetupActions<T> {
     pub on_back: fn(&mut T, &mut Context<T>),
     pub on_browse: fn(&mut T, &mut Window, &mut Context<T>),
     pub on_connect_system_credential: fn(&mut T, &mut Window, &mut Context<T>),
+    pub on_disconnect_credential: fn(&mut T, &mut Window, &mut Context<T>),
     pub on_select_account: fn(&mut T, String, &mut Window, &mut Context<T>),
-    pub on_toggle_new_account: fn(&mut T, &mut Window, &mut Context<T>),
+    pub on_select_auth_tab: fn(&mut T, AuthModeChoice, &mut Context<T>),
     pub on_auth_browser: fn(&mut T, &mut Window, &mut Context<T>),
+    pub on_cancel_browser_auth: fn(&mut T, &mut Context<T>),
     pub on_auth_webview: fn(&mut T, &mut Window, &mut Context<T>),
-    pub on_toggle_token_mode: fn(&mut T, &mut Context<T>),
+    pub on_save_token: fn(&mut T, &mut Window, &mut Context<T>),
+    pub on_open_token_url: fn(&mut T, &mut Window, &mut Context<T>),
 }
 
 pub fn render_project_setup<T: 'static>(
@@ -59,11 +61,14 @@ pub fn render_project_setup<T: 'static>(
         on_back,
         on_browse,
         on_connect_system_credential,
+        on_disconnect_credential,
         on_select_account,
-        on_toggle_new_account,
+        on_select_auth_tab,
         on_auth_browser,
+        on_cancel_browser_auth,
         on_auth_webview,
-        on_toggle_token_mode,
+        on_save_token,
+        on_open_token_url,
     } = actions;
     let title = match props.step {
         0 => "Name and folder",
@@ -141,34 +146,64 @@ pub fn render_project_setup<T: 'static>(
                                 .child(status_msg.clone()),
                         ),
                 );
-            } else if props.editing && props.has_existing_credential {
-                content = content.child(
-                    div()
-                        .p_3()
-                        .rounded(px(8.))
-                        .bg(cx.theme().secondary)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child("This project has authenticated credentials safely stored in macOS Keychain. You do not need to re-enter your token unless you wish to replace it."),
-                        ),
-                );
             }
 
-            // Auto-detected system credential banner (e.g. devenvoy from macOS Keychain / gh CLI)
-            if let Some((ref username, _)) = props.system_credential {
-                if props.selected_saved_account.as_deref() != Some(username.as_str()) {
+            // Connection state display
+            let is_connected =
+                props.selected_saved_account.is_some() || props.has_existing_credential;
+
+            if is_connected {
+                let current_user = props
+                    .selected_saved_account
+                    .clone()
+                    .unwrap_or_else(|| "Saved Keychain Account".into());
+                content =
+                    content.child(
+                        div()
+                            .p_3()
+                            .rounded(px(8.))
+                            .bg(cx.theme().primary.opacity(0.08))
+                            .border_1()
+                            .border_color(cx.theme().primary.opacity(0.3))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_size(px(14.))
+                                            .text_color(cx.theme().primary)
+                                            .child("✓"),
+                                    )
+                                    .child(div().text_size(px(13.)).font_bold().child(format!(
+                                        "Connected as @{current_user} (5,000 req/hr)"
+                                    ))),
+                            )
+                            .child(
+                                Button::new("btn-disconnect-cred")
+                                    .label("Disconnect / Change")
+                                    .ghost()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        on_disconnect_credential(this, window, cx)
+                                    })),
+                            ),
+                    );
+            } else {
+                // If a system credential (e.g. devenvoy from macOS Keychain / gh CLI) was detected:
+                if let Some((ref username, _)) = props.system_credential {
                     let user_label = username.clone();
                     content = content.child(
                         div()
                             .p_3()
                             .rounded(px(8.))
-                            .bg(cx.theme().primary.opacity(0.09))
+                            .bg(cx.theme().secondary)
                             .border_1()
-                            .border_color(cx.theme().primary.opacity(0.3))
+                            .border_color(cx.theme().border)
                             .flex()
                             .items_center()
                             .justify_between()
@@ -180,36 +215,24 @@ pub fn render_project_setup<T: 'static>(
                                     .gap_1()
                                     .child(
                                         div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .text_size(px(13.))
-                                                    .font_bold()
-                                                    .text_color(cx.theme().primary)
-                                                    .child(format!("⚡ System Git Credential Detected (@{user_label})")),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.))
-                                                    .bg(cx.theme().primary.opacity(0.2))
-                                                    .text_color(cx.theme().primary)
-                                                    .p_1()
-                                                    .rounded(px(4.))
-                                                    .child("Instant Connect"),
-                                            ),
+                                            .text_size(px(13.))
+                                            .font_bold()
+                                            .child(format!(
+                                                "⚡ Detected system account: @{user_label}"
+                                            )),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(11.))
                                             .text_color(cx.theme().muted_foreground)
-                                            .child("Active GitHub token found in your macOS Git Keychain / gh CLI. Click to authenticate without opening browser."),
+                                            .child(
+                                                "Available in your macOS Git Keychain. Click to connect this account, or choose an option below.",
+                                            ),
                                     ),
                             )
                             .child(
                                 Button::new("btn-connect-system-cred")
-                                    .label(format!("Connect @{user_label}"))
+                                    .label(format!("Use @{user_label}"))
                                     .primary()
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         on_connect_system_credential(this, window, cx)
@@ -217,310 +240,230 @@ pub fn render_project_setup<T: 'static>(
                             ),
                     );
                 }
-            }
 
-            // Section 1: Connected Accounts from Keychain
-            if !props.saved_accounts.is_empty() {
-                let mut accounts_section = div().flex().flex_col().gap_2();
-                accounts_section = accounts_section.child(
-                    div()
-                        .text_size(px(11.))
-                        .font_bold()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("SAVED PROVIDER TOKENS (1-CLICK SELECT)"),
-                );
+                // If saved Keychain accounts exist from other projects:
+                if !props.saved_accounts.is_empty() {
+                    let mut saved_row = div().flex().items_center().gap_2().flex_wrap();
+                    saved_row = saved_row.child(
+                        div()
+                            .text_size(px(11.))
+                            .font_bold()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Saved Accounts:"),
+                    );
+                    for acc in &props.saved_accounts {
+                        let h_clone = acc.handle.clone();
+                        saved_row = saved_row.child(
+                            Button::new(format!("btn-use-saved-{}", acc.handle))
+                                .label(format!("@{h_clone}"))
+                                .ghost()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_select_account(this, h_clone.clone(), window, cx)
+                                })),
+                        );
+                    }
+                    content = content.child(saved_row);
+                }
 
-                let mut accounts_grid = div().flex().flex_wrap().gap_3();
-                for acc in &props.saved_accounts {
-                    let is_selected = props.selected_saved_account.as_deref() == Some(&acc.handle)
-                        && props.auth_mode == AuthModeChoice::SavedAccount;
-                    let handle_clone = acc.handle.clone();
-                    let card = div()
-                        .id(format!("saved-acc-card-{}", acc.handle))
-                        .p_3()
+                // Authentication Methods Switcher
+                let is_browser = props.auth_mode == AuthModeChoice::OAuthBrowser;
+                let is_webview = props.auth_mode == AuthModeChoice::OAuthWebview;
+                let is_token = props.auth_mode == AuthModeChoice::Token;
+
+                let tab_bar = div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        toggle_button(
+                            "auth-tab-browser",
+                            "🌐 Browser OAuth (127.0.0.1:4567)",
+                            is_browser,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            on_select_auth_tab(this, AuthModeChoice::OAuthBrowser, cx)
+                        })),
+                    )
+                    .child(
+                        toggle_button("auth-tab-webview", "🖥️ In-App Webview", is_webview)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                on_select_auth_tab(this, AuthModeChoice::OAuthWebview, cx)
+                            })),
+                    )
+                    .child(
+                        toggle_button("auth-tab-token", "🔑 Personal Access Token", is_token)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                on_select_auth_tab(this, AuthModeChoice::Token, cx)
+                            })),
+                    );
+
+                content = content.child(tab_bar);
+
+                if is_browser {
+                    let mut browser_box = div()
+                        .p_4()
                         .rounded(px(8.))
+                        .bg(cx.theme().secondary)
                         .border_1()
-                        .border_color(if is_selected {
-                            cx.theme().primary
-                        } else {
-                            cx.theme().border
-                        })
-                        .bg(if is_selected {
-                            cx.theme().primary.opacity(0.08)
-                        } else {
-                            cx.theme().secondary
-                        })
+                        .border_color(cx.theme().border)
                         .flex()
                         .flex_col()
-                        .gap_1()
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            on_select_account(this, handle_clone.clone(), window, cx)
-                        }))
+                        .gap_3();
+
+                    if props.is_oauth_listening {
+                        browser_box = browser_box
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_size(px(13.))
+                                                    .font_bold()
+                                                    .text_color(cx.theme().primary)
+                                                    .child("⏳ Waiting for browser callback..."),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.))
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(
+                                                        "Listening on http://127.0.0.1:4567/callback. Approve Release Desk in your browser.",
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("btn-cancel-oauth")
+                                            .label("Cancel")
+                                            .ghost()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                on_cancel_browser_auth(this, cx)
+                                            })),
+                                    ),
+                            );
+                    } else {
+                        browser_box = browser_box
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        "Starts a local redirect listener on http://127.0.0.1:4567/callback and opens your system browser to sign in.",
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        Button::new("btn-start-browser-oauth")
+                                            .label("Start Browser Sign-In")
+                                            .primary()
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                on_auth_browser(this, window, cx)
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                Form::new().child(
+                                    Field::new()
+                                        .label(
+                                            "OAuth Client ID (optional, for custom registered OAuth apps)",
+                                        )
+                                        .child(Input::new(props.oauth_client_id)),
+                                ),
+                            );
+                    }
+                    content = content.child(browser_box);
+                } else if is_webview {
+                    let webview_box = div()
+                        .p_4()
+                        .rounded(px(8.))
+                        .bg(cx.theme().secondary)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .gap_3()
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
                                 .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .font_bold()
-                                        .child(format!("@{}", acc.handle)),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .p_1()
-                                        .rounded(px(4.))
-                                        .bg(if is_selected {
-                                            cx.theme().primary.opacity(0.18)
-                                        } else {
-                                            cx.theme().muted_foreground.opacity(0.12)
-                                        })
-                                        .text_color(if is_selected {
-                                            cx.theme().primary
-                                        } else {
-                                            cx.theme().muted_foreground
-                                        })
-                                        .child(if is_selected {
-                                            "Selected"
-                                        } else {
-                                            "Keychain Ready"
-                                        }),
+                                    "Opens an embedded webview modal panel without leaving Release Desk.",
                                 ),
                         )
                         .child(
                             div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Reuses stored macOS Keychain token · 5,000 req/hr"),
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    Button::new("btn-start-webview-oauth")
+                                        .label("Open Webview Sign-In")
+                                        .primary()
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            on_auth_webview(this, window, cx)
+                                        })),
+                                ),
                         );
-                    accounts_grid = accounts_grid.child(card);
-                }
-
-                let toggle_label = if props.auth_mode == AuthModeChoice::SavedAccount {
-                    "+ Connect a different token"
-                } else {
-                    "Use saved token instead"
-                };
-
-                accounts_section = accounts_section.child(accounts_grid).child(
-                    div().pt_1().child(
-                        Button::new("toggle-new-account-mode")
-                            .label(toggle_label)
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                on_toggle_new_account(this, window, cx)
-                            })),
-                    ),
-                );
-                content = content.child(accounts_section);
-            }
-
-            // Section 2: Auth Methods for raising rate limits
-            if props.saved_accounts.is_empty() || props.auth_mode != AuthModeChoice::SavedAccount {
-                let mut methods = div().flex().flex_col().gap_3();
-                methods = methods.child(
-                    div()
-                        .text_size(px(11.))
-                        .font_bold()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("AUTHENTICATE FOR HIGH RATE LIMITS (5,000 REQ/HR)"),
-                );
-
-                // Option 1: Browser token generator
-                let browser_card = div()
-                    .p_3()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(if props.auth_mode == AuthModeChoice::OAuthBrowser {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().border
-                    })
-                    .bg(cx.theme().secondary)
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_size(px(13.))
-                                            .font_bold()
-                                            .child("Generate Token in Browser"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .bg(cx.theme().primary.opacity(0.15))
-                                            .text_color(cx.theme().primary)
-                                            .p_1()
-                                            .rounded(px(4.))
-                                            .child("Recommended"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Opens official token creation page with 'Release Desk' and 'repo' pre-checked. Copy token to raise API limits."),
-                            ),
-                    )
-                    .child(
-                        Button::new("auth-browser-btn")
-                            .label("Open Token Page")
-                            .primary()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                on_auth_browser(this, window, cx)
-                            })),
-                    );
-                methods = methods.child(browser_card);
-
-                // Option 2: Embedded Webview
-                let webview_card = div()
-                    .p_3()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(if props.auth_mode == AuthModeChoice::OAuthWebview {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().border
-                    })
-                    .bg(cx.theme().secondary)
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_size(px(13.))
-                                            .font_bold()
-                                            .child("Sign in with In-App Webview"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .bg(cx.theme().muted_foreground.opacity(0.12))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .p_1()
-                                            .rounded(px(4.))
-                                            .child("In-App Modal"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Opens an embedded modal webview panel without switching apps."),
-                            ),
-                    )
-                    .child(
-                        Button::new("auth-webview-btn")
-                            .label("Launch Webview")
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                on_auth_webview(this, window, cx)
-                            })),
-                    );
-                methods = methods.child(webview_card);
-
-                // Option 3: Manual Personal Access Token
-                let is_token_active = props.auth_mode == AuthModeChoice::Token;
-                let mut token_card = div()
-                    .p_3()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(if is_token_active {
-                        cx.theme().primary
-                    } else {
-                        cx.theme().border
-                    })
-                    .bg(cx.theme().secondary)
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_size(px(13.))
-                                            .font_bold()
-                                            .child("Personal Access Token (PAT)"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Paste a token from GitHub/GitLab to store securely in macOS Keychain."),
-                                    ),
-                            )
-                            .child(
-                                Button::new("toggle-token-btn")
-                                    .label(if is_token_active {
-                                        "Hide token field"
-                                    } else {
-                                        "Enter token"
-                                    })
-                                    .ghost()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        on_toggle_token_mode(this, cx)
-                                    })),
-                            ),
-                    );
-
-                if is_token_active {
-                    token_card = token_card
+                    content = content.child(webview_box);
+                } else if is_token {
+                    let token_box = div()
+                        .p_4()
+                        .rounded(px(8.))
+                        .bg(cx.theme().secondary)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .gap_3()
                         .child(
                             Form::new().child(
                                 Field::new()
-                                    .label("Personal access token")
+                                    .label("Personal Access Token or App Password")
                                     .child(Input::new(props.token)),
                             ),
                         )
                         .child(
                             div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Stored securely in macOS Keychain. Release Desk will remember this so you won't need to re-enter it."),
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    Button::new("btn-save-pat")
+                                        .label("Save Token to Keychain")
+                                        .primary()
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            on_save_token(this, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("btn-open-token-gen")
+                                        .label("↗ Create token on provider site")
+                                        .ghost()
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            on_open_token_url(this, window, cx)
+                                        })),
+                                ),
                         );
+                    content = content.child(token_box);
                 }
-                methods = methods.child(token_card);
-                content = content.child(methods);
             }
 
             content = content.child(
                 div()
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
-                    .child("Note: You can click Continue without a token to use public access (60 requests/hr). You can add users and repositories to clone in the project workspace."),
+                    .child(
+                        "Note: Authentication is optional. You can click Continue to use public access (60 requests/hr). Upstream users and repositories to clone are added inside the project workspace.",
+                    ),
             );
         }
         _ => {

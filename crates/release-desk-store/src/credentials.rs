@@ -27,8 +27,10 @@ impl OsSecretStore {
         use std::io::Write as _;
         use std::process::Stdio;
 
-        // Try `git credential fill`
+        // Try `git credential fill` non-interactively
         if let Ok(mut child) = Command::new("git")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "true")
             .args(["credential", "fill"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

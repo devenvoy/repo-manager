@@ -18,7 +18,9 @@ pub mod scheduler;
 pub mod sqlite_store;
 
 pub use archive::TarGzArchivePort;
-pub use auth::{ModalWebviewAuthPort, SystemBrowserAuthPort};
+pub use auth::{
+    LocalOAuthServer, ModalWebviewAuthPort, OAuthRedirectOutcome, SystemBrowserAuthPort,
+};
 pub use bitbucket_client::HttpBitbucketGateway;
 pub use boundary::{BoundaryError, FORBIDDEN_ARTCRAFT_ROOT, ManagedLibrary};
 pub use credentials::OsSecretStore;
