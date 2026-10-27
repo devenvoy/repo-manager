@@ -1,38 +1,27 @@
-//! Window titlebar and header status banner with bidirectional view switcher.
+//! Compact workspace header shared by Projects and App Store with appearance toggle.
 
-use crate::state::WorkspaceTab;
+use crate::settings::Appearance;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, div, px};
+use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, Window, div, px};
 
-pub fn render_header<T: 'static>(
-    project_name: &str,
-    status_message: &str,
-    active_tab: WorkspaceTab,
-    updates_count: usize,
-    pulls_count: usize,
+pub fn render_header<
+    T: 'static,
+    FTheme: Fn(&mut T, Appearance, &Window, &mut Context<T>) + Copy + 'static,
+>(
+    location: &str,
+    status: &str,
+    current_theme: Appearance,
     cx: &Context<T>,
-    on_tab_switch: impl Fn(WorkspaceTab, &mut T, &mut Context<T>) + Copy + 'static,
+    on_theme: FTheme,
 ) -> impl IntoElement {
-    let store_badge = if updates_count > 0 {
-        format!("App Store ({updates_count} updates)")
-    } else {
-        "App Store".to_string()
-    };
-
-    let hub_badge = if pulls_count > 0 {
-        format!("Project Hub ({pulls_count} pulls)")
-    } else {
-        "Project Hub".to_string()
-    };
-
     div()
         .flex()
         .items_center()
         .justify_between()
-        .px_4()
-        .py_2p5()
+        .px_5()
+        .py_3()
         .bg(cx.theme().secondary)
         .border_b_1()
         .border_color(cx.theme().border)
@@ -40,13 +29,31 @@ pub fn render_header<T: 'static>(
             div()
                 .flex()
                 .items_center()
-                .gap_4()
+                .gap_2()
                 .child(
                     div()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Workspace  ›"),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
                         .font_bold()
-                        .text_sm()
                         .text_color(cx.theme().foreground)
-                        .child(format!("Release Desk • {}", project_name)),
+                        .child(location.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(status.to_string()),
                 )
                 .child(
                     div()
@@ -56,42 +63,42 @@ pub fn render_header<T: 'static>(
                         .p_1()
                         .rounded_lg()
                         .bg(cx.theme().muted)
-                        .child(if active_tab == WorkspaceTab::AppStore {
-                            Button::new("nav-store")
-                                .label(store_badge)
-                                .primary()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    on_tab_switch(WorkspaceTab::AppStore, this, cx);
-                                }))
-                        } else {
-                            Button::new("nav-store")
-                                .label(store_badge)
+                        .child(
+                            Button::new("theme-light")
+                                .label(if current_theme == Appearance::Light {
+                                    "● Light"
+                                } else {
+                                    "Light"
+                                })
                                 .ghost()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    on_tab_switch(WorkspaceTab::AppStore, this, cx);
-                                }))
-                        })
-                        .child(if active_tab == WorkspaceTab::ProjectHub {
-                            Button::new("nav-hub")
-                                .label(hub_badge)
-                                .primary()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    on_tab_switch(WorkspaceTab::ProjectHub, this, cx);
-                                }))
-                        } else {
-                            Button::new("nav-hub")
-                                .label(hub_badge)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_theme(this, Appearance::Light, window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("theme-dark")
+                                .label(if current_theme == Appearance::Dark {
+                                    "● Dark"
+                                } else {
+                                    "Dark"
+                                })
                                 .ghost()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    on_tab_switch(WorkspaceTab::ProjectHub, this, cx);
-                                }))
-                        }),
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_theme(this, Appearance::Dark, window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("theme-system")
+                                .label(if current_theme == Appearance::System {
+                                    "● Auto"
+                                } else {
+                                    "Auto"
+                                })
+                                .ghost()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_theme(this, Appearance::System, window, cx);
+                                })),
+                        ),
                 ),
-        )
-        .child(
-            div()
-                .text_size(px(11.))
-                .text_color(cx.theme().muted_foreground)
-                .child(status_message.to_string()),
         )
 }

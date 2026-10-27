@@ -1,3 +1,4 @@
+use crate::workspace::WorkspaceProject;
 use serde::{Deserialize, Serialize};
 use std::{fs, io, path::PathBuf};
 
@@ -15,13 +16,14 @@ pub struct Settings {
     pub library_dir: String,
     pub start_view: StartView,
     pub hub_view_mode: HubViewMode,
+    pub projects: Vec<WorkspaceProject>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum StartView {
-    #[default]
     AppStore,
+    #[default]
     ProjectHub,
 }
 
@@ -36,8 +38,8 @@ pub enum HubViewMode {
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Appearance {
-    #[default]
     System,
+    #[default]
     Light,
     Dark,
 }
@@ -49,12 +51,13 @@ impl Default for Settings {
             include_prereleases: true,
             show_archived: false,
             installer_extension: "dmg".into(),
-            appearance: Appearance::System,
+            appearance: Appearance::Light,
             terms_accepted: false,
             applications_dir: "~/Applications".into(),
             library_dir: default_library_dir_string(),
-            start_view: StartView::AppStore,
+            start_view: StartView::ProjectHub,
             hub_view_mode: HubViewMode::Grouped,
+            projects: Vec::new(),
         }
     }
 }

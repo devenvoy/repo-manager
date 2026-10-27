@@ -197,7 +197,7 @@ fn test_settings_extension_normalization() {
     assert!(settings::normalized_extension("../zip").is_err());
 
     let default_settings = Settings::default();
-    assert_eq!(default_settings.appearance, Appearance::System);
+    assert_eq!(default_settings.appearance, Appearance::Light);
     assert_eq!(default_settings.installer_extension, "dmg");
     assert!(default_settings.include_prereleases);
     assert!(!default_settings.show_archived);

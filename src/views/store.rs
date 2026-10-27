@@ -1,227 +1,99 @@
-//! Local App Store view featuring hero spotlight card, bento grid, squircle icons,
-//! and expansive detail view with 3-state action buttons.
+//! App Store grid and full detail page for the desktop design preview.
 
+use crate::components::app_icon::app_icon;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, div, px};
-use release_desk_application::use_case::app_store::AppStoreMetrics;
+use gpui_kit::{
+    Context, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, div, px,
+};
 use release_desk_core::app_catalog::{AppActionState, AppStoreItem};
 
-pub fn render_store<T: 'static>(
+pub fn render_store<
+    T: 'static,
+    FSelect: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
+    FAction: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
+    FBack: Fn(&mut T, &mut Context<T>) + Copy + 'static,
+>(
     items: &[AppStoreItem],
-    _metrics: AppStoreMetrics,
     selected_app_id: Option<&str>,
     cx: &Context<T>,
-    on_select_app: impl Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
-    on_trigger_action: impl Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
-    on_close_detail: impl Fn(&mut T, &mut Context<T>) + Copy + 'static,
+    on_select: FSelect,
+    on_action: FAction,
+    on_back: FBack,
 ) -> impl IntoElement {
-    let mut root = div().flex().flex_col().gap_6().p_6().overflow_y_scrollbar();
+    if let Some(item) =
+        selected_app_id.and_then(|id| items.iter().find(|item| item.metadata.id == id))
+    {
+        return render_detail(item, cx, on_action, on_back).into_any_element();
+    }
 
-    // 1. HERO SPOTLIGHT CARD (ArtCraft Studio)
-    root = root.child(render_hero_banner(cx, on_select_app, on_trigger_action));
-
-    // 2. CATEGORY & TARGET BAR
-    root = root.child(
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_4()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(cx.theme().primary)
-                            .text_color(cx.theme().primary_foreground)
-                            .text_size(px(11.))
-                            .font_bold()
-                            .child(format!("All Applications ({})", items.len())),
-                    )
-                    .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(cx.theme().muted)
-                            .text_color(cx.theme().muted_foreground)
-                            .text_size(px(11.))
-                            .child("Creative & Media"),
-                    )
-                    .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .rounded_full()
-                            .bg(cx.theme().muted)
-                            .text_color(cx.theme().muted_foreground)
-                            .text_size(px(11.))
-                            .child("Productivity"),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Install Directory: ~/Applications"),
-            ),
-    );
-
-    // 3. BENTO GRID OF APPS
     let mut grid = div().flex().flex_wrap().gap_4();
     for item in items {
-        grid = grid.child(render_app_card(item, cx, on_select_app, on_trigger_action));
-    }
-    root = root.child(grid);
-
-    // 4. DETAIL MODAL (Overlay if an app is selected)
-    if let Some(app_id) = selected_app_id {
-        if let Some(item) = items.iter().find(|i| i.metadata.id == app_id) {
-            root = root.child(render_detail_modal(
-                item,
-                cx,
-                on_trigger_action,
-                on_close_detail,
-            ));
-        }
+        grid = grid.child(render_card(item, cx, on_select, on_action));
     }
 
-    root
-}
-
-fn render_hero_banner<T: 'static>(
-    cx: &Context<T>,
-    on_select_app: impl Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
-    on_trigger_action: impl Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
-) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
-        .gap_4()
+        .gap_6()
         .p_6()
-        .rounded_xl()
-        .bg(cx.theme().accent)
-        .text_color(cx.theme().accent_foreground)
-        .border_1()
-        .border_color(cx.theme().border)
+        .overflow_y_scrollbar()
         .child(
             div()
                 .flex()
-                .items_center()
-                .justify_between()
-                .gap_6()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_5()
-                        .child(
-                            div()
-                                .w(px(72.))
-                                .h(px(72.))
-                                .rounded_xl()
-                                .bg(cx.theme().primary)
-                                .text_color(cx.theme().primary_foreground)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(26.))
-                                .font_bold()
-                                .child("AC"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .font_bold()
-                                        .text_color(cx.theme().warning)
-                                        .child("★ SPOTLIGHT APPLICATION"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(24.))
-                                        .font_bold()
-                                        .child("ArtCraft Studio"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child("Local AI generative workstation with Metal GPU acceleration."),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child("v2.4.0 Universal • Project: ArtCraft • 428 MB"),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(
-                            Button::new("hero-details")
-                                .label("View Details")
-                                .ghost()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    on_select_app("artcraft".to_string(), this, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("hero-open")
-                                .label("▶️ Open Application")
-                                .primary()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    on_trigger_action("artcraft".to_string(), this, cx);
-                                })),
-                        ),
-                ),
+                .flex_col()
+                .gap_2()
+                .child(div().text_size(px(11.)).font_bold().text_color(cx.theme().primary).child("LOCAL APP STORE"))
+                .child(div().text_size(px(27.)).font_bold().child("Apps from every project."))
+                .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child("Installable releases from selected repositories will appear together here.")),
         )
+        .child(if items.is_empty() {
+            div()
+                .p_8()
+                .rounded_xl()
+                .bg(cx.theme().secondary)
+                .border_1()
+                .border_color(cx.theme().border)
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_4()
+                .child(div().text_size(px(11.)).font_bold().text_color(cx.theme().primary).child("LOCAL APP STORE"))
+                .child(div().text_size(px(22.)).font_bold().child("No runnable applications yet."))
+                .child(div().text_size(px(13.)).text_color(cx.theme().muted_foreground).child("Applications with release builds across all your projects appear together in this store. Create a project and track repositories with published releases to install, update, and launch them here."))
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(div().text_size(px(17.)).font_bold().child(format!("All applications  ·  {}", items.len())))
+                .child(grid)
+                .into_any_element()
+        })
+        .into_any_element()
 }
 
-fn render_app_card<T: 'static>(
+fn render_card<
+    T: 'static,
+    FSelect: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
+    FAction: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
+>(
     item: &AppStoreItem,
     cx: &Context<T>,
-    on_select_app: impl Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
-    on_trigger_action: impl Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
+    on_select: FSelect,
+    on_action: FAction,
 ) -> impl IntoElement {
-    let app_id = item.metadata.id.clone();
-    let app_id_for_btn = app_id.clone();
-    let app_id_for_card = app_id.clone();
-
-    let (btn_label, is_primary) = match &item.state {
-        AppActionState::Installable => ("📥 Install", true),
-        AppActionState::UpdateAvailable { .. } => ("🔄 Update", true),
-        AppActionState::UpToDate { .. } => ("▶️ Open", false),
-    };
-
-    let badge_text = match &item.state {
-        AppActionState::Installable => item.metadata.size_estimate.clone(),
-        AppActionState::UpdateAvailable {
-            installed_version,
-            latest_version,
-        } => {
-            format!("{installed_version} → {latest_version}")
-        }
-        AppActionState::UpToDate { version } => format!("✓ {version}"),
-    };
-
+    let id_for_card = item.metadata.id.clone();
+    let id_for_action = item.metadata.id.clone();
+    let action = action_label(&item.state);
     div()
-        .w(px(270.))
+        .id(format!("app-card-{}", item.metadata.id))
+        .cursor_pointer()
+        .w(px(268.))
         .p_4()
         .rounded_xl()
         .bg(cx.theme().secondary)
@@ -229,64 +101,37 @@ fn render_app_card<T: 'static>(
         .border_color(cx.theme().border)
         .flex()
         .flex_col()
-        .justify_between()
         .gap_3()
+        .on_click(cx.listener(move |this, _, _, cx| on_select(id_for_card.clone(), this, cx)))
+        .child(app_icon(&item.metadata.id))
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .justify_between()
-                        .child(
-                            div()
-                                .w(px(48.))
-                                .h(px(48.))
-                                .rounded_lg()
-                                .bg(cx.theme().secondary)
-                                .text_color(cx.theme().secondary_foreground)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .font_bold()
-                                .text_size(px(16.))
-                                .child(item.metadata.icon_text.clone()),
-                        )
-                        .child(
-                            div()
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .bg(cx.theme().muted)
-                                .text_color(cx.theme().muted_foreground)
-                                .text_size(px(10.))
-                                .font_bold()
-                                .child(badge_text),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .font_bold()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(item.metadata.category_name.to_uppercase()),
-                )
-                .child(
-                    div()
-                        .text_size(px(15.))
-                        .font_bold()
-                        .text_color(cx.theme().foreground)
-                        .child(item.metadata.name.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(item.metadata.description.clone()),
-                ),
+                .text_size(px(10.))
+                .font_bold()
+                .text_color(cx.theme().muted_foreground)
+                .child(item.metadata.category_name.to_uppercase()),
+        )
+        .child(
+            div()
+                .text_size(px(16.))
+                .font_bold()
+                .child(item.metadata.name.clone()),
+        )
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(cx.theme().muted_foreground)
+                .child(item.metadata.description.clone()),
+        )
+        .child(
+            div()
+                .text_size(px(10.))
+                .text_color(cx.theme().primary)
+                .child(format!(
+                    "{} · {}",
+                    item.latest_release_tag.as_deref().unwrap_or("No release"),
+                    item.project_name
+                )),
         )
         .child(
             div()
@@ -296,146 +141,66 @@ fn render_app_card<T: 'static>(
                 .pt_2()
                 .border_t_1()
                 .border_color(cx.theme().border)
+                .child(div().text_size(px(11.)).child("View details  →"))
                 .child(
-                    Button::new(format!("btn-detail-{}", app_id))
-                        .label("Details")
-                        .ghost()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            on_select_app(app_id_for_card.clone(), this, cx);
-                        })),
-                )
-                .child(if is_primary {
-                    Button::new(format!("btn-act-{}", app_id))
-                        .label(btn_label)
+                    Button::new(format!("action-{}", item.metadata.id))
+                        .label(action)
                         .primary()
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            on_trigger_action(app_id_for_btn.clone(), this, cx);
-                        }))
-                } else {
-                    Button::new(format!("btn-act-{}", app_id))
-                        .label(btn_label)
-                        .secondary()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            on_trigger_action(app_id_for_btn.clone(), this, cx);
-                        }))
-                }),
+                            cx.stop_propagation();
+                            on_action(id_for_action.clone(), this, cx);
+                        })),
+                ),
         )
 }
 
-fn render_detail_modal<T: 'static>(
+fn render_detail<
+    T: 'static,
+    FAction: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
+    FBack: Fn(&mut T, &mut Context<T>) + Copy + 'static,
+>(
     item: &AppStoreItem,
     cx: &Context<T>,
-    on_trigger_action: impl Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
-    on_close_detail: impl Fn(&mut T, &mut Context<T>) + Copy + 'static,
+    on_action: FAction,
+    on_back: FBack,
 ) -> impl IntoElement {
-    let app_id = item.metadata.id.clone();
-    let (btn_label, _) = match &item.state {
-        AppActionState::Installable => ("📥 Install Application", true),
-        AppActionState::UpdateAvailable { .. } => ("🔄 Update Application", true),
-        AppActionState::UpToDate { .. } => ("▶️ Open Application", false),
-    };
-
+    let id = item.metadata.id.clone();
     div()
-        .p_6()
-        .rounded_2xl()
-        .bg(cx.theme().secondary)
-        .border_2()
-        .border_color(cx.theme().primary)
         .flex()
         .flex_col()
         .gap_5()
+        .p_6()
+        .overflow_y_scrollbar()
+        .child(Button::new("back-to-store").label("← All applications").ghost().on_click(cx.listener(move |this, _, _, cx| on_back(this, cx))))
         .child(
             div()
+                .p_5()
+                .rounded_xl()
+                .bg(cx.theme().secondary)
                 .flex()
-                .items_start()
-                .justify_between()
+                .items_center()
+                .gap_5()
+                .child(app_icon(&item.metadata.id))
                 .child(
                     div()
                         .flex()
-                        .gap_4()
-                        .child(
-                            div()
-                                .w(px(64.))
-                                .h(px(64.))
-                                .rounded_xl()
-                                .bg(cx.theme().primary)
-                                .text_color(cx.theme().primary_foreground)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_size(px(24.))
-                                .font_bold()
-                                .child(item.metadata.icon_text.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(22.))
-                                        .font_bold()
-                                        .child(item.metadata.name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(item.metadata.description.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(format!(
-                                            "Project: {} • Size: {}",
-                                            item.project_name, item.metadata.size_estimate
-                                        )),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
+                        .flex_col()
                         .gap_2()
-                        .child(
-                            Button::new("modal-action-btn")
-                                .label(btn_label)
-                                .primary()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    on_trigger_action(app_id.clone(), this, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("modal-close-btn")
-                                .label("✕ Close")
-                                .ghost()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    on_close_detail(this, cx);
-                                })),
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .p_4()
-                .rounded_lg()
-                .bg(cx.theme().muted)
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .font_bold()
-                        .child("What's New in this Release:"),
+                        .child(div().text_size(px(26.)).font_bold().child(item.metadata.name.clone()))
+                        .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child(item.metadata.description.clone()))
+                        .child(div().text_size(px(11.)).child(format!("{} · {} · {}", item.project_name, item.latest_release_tag.as_deref().unwrap_or("No release"), item.metadata.size_estimate))),
                 )
-                .children(item.metadata.changelog.iter().map(|line| {
-                    div()
-                        .text_size(px(11.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!("• {line}"))
-                })),
+                .child(Button::new("detail-action").label(action_label(&item.state)).primary().on_click(cx.listener(move |this, _, _, cx| on_action(id.clone(), this, cx)))),
         )
+        .child(div().text_size(px(18.)).font_bold().child("Release details"))
+        .child(div().p_5().rounded_xl().bg(cx.theme().secondary).text_size(px(12.)).child("Sample release tags and notes illustrate the layout. Live assets will come from the project's connected provider."))
+        .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child("macOS · Windows · Linux release formats will be listed here when available."))
+}
+
+fn action_label(state: &AppActionState) -> &'static str {
+    match state {
+        AppActionState::Installable => "Install",
+        AppActionState::UpdateAvailable { .. } => "Update",
+        AppActionState::UpToDate { .. } => "Open",
+    }
 }

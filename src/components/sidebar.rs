@@ -25,24 +25,18 @@ pub fn render_sidebar<T: 'static>(
                 .font_bold()
                 .text_sm()
                 .text_color(cx.theme().foreground)
-                .child("RELEASE DESK"),
+                .child("Release Desk"),
         )
         .child(
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(if ready { "PROJECT WORKSPACE" } else { "SETUP" }),
+                .child(if ready { "WORKSPACE" } else { "SETUP" }),
         );
 
     let tabs = [
+        (WorkspaceTab::ProjectHub, "project-hub", "Projects"),
         (WorkspaceTab::AppStore, "app-store", "App Store"),
-        (WorkspaceTab::ProjectHub, "project-hub", "Project Hub"),
-        (WorkspaceTab::Overview, "overview", "Overview"),
-        (WorkspaceTab::Repositories, "repositories", "Repositories"),
-        (WorkspaceTab::Installers, "installers", "Installers"),
-        (WorkspaceTab::PullRequests, "pull-requests", "Pull Requests"),
-        (WorkspaceTab::Reconcile, "reconcile", "Backup & Reconcile"),
-        (WorkspaceTab::Settings, "settings", "Settings"),
     ];
 
     for (tab, id, label) in tabs {
