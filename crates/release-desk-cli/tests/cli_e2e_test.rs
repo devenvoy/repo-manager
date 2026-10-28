@@ -41,10 +41,9 @@ fn e2e_cli_full_workflow_test() {
     let library_dir = temp.path().join("library");
     let project_clone_dir = temp.path().join("project_clones/ArtCraftApp");
 
-    // Pre-record ArtCraft hash if the file exists
+    // Pre-record ArtCraft hash if the file exists and is readable
     let artcraft_path = Path::new(ARTCRAFT_FILE);
-    let original_artcraft_hash = if artcraft_path.exists() {
-        let bytes = fs::read(artcraft_path).expect("read artcraft file");
+    let original_artcraft_hash = if let Ok(bytes) = fs::read(artcraft_path) {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(&bytes);

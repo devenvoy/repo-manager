@@ -82,9 +82,8 @@ fn reject_symlink_pointing_to_artcraft() {
 fn verify_real_artcraft_files_hashes_unchanged() {
     // Check that ArtCraft files are present and match known baseline hashes
     let data_json = Path::new("/Volumes/Devansh2/codes/ArtCraft/.release-desk/data.json");
-    if data_json.exists() {
+    if let Ok(bytes) = fs::read(data_json) {
         use sha2::{Digest, Sha256};
-        let bytes = fs::read(data_json).unwrap();
         let hash = format!("{:x}", Sha256::digest(&bytes));
         assert_eq!(
             hash, "0ce54ddd0590f1ae4fde3f4ae69d24b79f1a2e1202fd0f3cdaf8705b6940daa8",

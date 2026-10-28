@@ -161,6 +161,14 @@ fn git_client(target: &RepositoryTarget) -> Result<GitClient, String> {
     Ok(client)
 }
 
+/// Clone one selected repository target.
+pub fn clone_target(target: &RepositoryTarget) -> Result<SyncOutcome, String> {
+    validate_target_path(&target.project_root, &target.path)?;
+    git_client(target)?
+        .clone_only(&target.url, &target.path, &target.branch)
+        .map_err(|error| error.to_string())
+}
+
 /// Clone one selected repository after revalidating the project and destination.
 /// This never updates an existing directory. Run on a background thread.
 pub fn clone_selected(
@@ -172,9 +180,7 @@ pub fn clone_selected(
         .into_iter()
         .find(|target| target.source_index == source_index && target.repo_index == repo_index)
         .ok_or_else(|| "Repository is no longer selected".to_string())?;
-    git_client(&target)?
-        .clone_only(&target.url, &target.path, &target.branch)
-        .map_err(|error| error.to_string())
+    clone_target(&target)
 }
 
 /// Inspect local state without network access.
@@ -209,7 +215,7 @@ pub fn check_for_updates(target: &RepositoryTarget) -> RepositoryStatus {
     }
 }
 
-/// Fetch and fast-forward only a clean default branch. Never clones a missing checkout.
+/// Fetch and fast-forward default branch; clones if missing.
 pub fn update(target: &RepositoryTarget) -> Result<SyncOutcome, String> {
     validate_target_path(&target.project_root, &target.path)?;
     let git = git_client(target)?;
@@ -217,7 +223,9 @@ pub fn update(target: &RepositoryTarget) -> Result<SyncOutcome, String> {
         .inspect(&target.path, &target.branch)
         .map_err(|e| e.to_string())?;
     if state.status == CloneStatus::NotCloned {
-        return Err("Repository is not cloned. Use the clone review first.".into());
+        return git
+            .clone_only(&target.url, &target.path, &target.branch)
+            .map_err(|e| e.to_string());
     }
     git.sync_existing(&target.url, &target.path, &target.branch)
         .map_err(|e| e.to_string())

@@ -265,11 +265,107 @@ pub fn default_artcraft_catalog() -> Vec<AppMetadata> {
     ]
 }
 
+/// Returns sample suite applications from the design prototype.
+pub fn extended_sample_catalog() -> Vec<AppMetadata> {
+    vec![
+        AppMetadata {
+            id: "prism".to_string(),
+            name: "Prism Studio".to_string(),
+            category: "creative".to_string(),
+            category_name: "Creative Tools".to_string(),
+            description:
+                "Desktop workspace for visual storytelling, moodboards, and real-time previews."
+                    .to_string(),
+            size_estimate: "188 MB".to_string(),
+            icon_text: "PS".to_string(),
+            color_gradient: "from-indigo-600 to-violet-700".to_string(),
+            glow_color: "rgba(99, 102, 241, 0.4)".to_string(),
+            changelog: vec![
+                "New canvas presets, faster preview rendering, and refined export controls."
+                    .to_string(),
+                "Stability improvements and color profile fixes.".to_string(),
+            ],
+            binary_name: "Prism Studio.app".to_string(),
+        },
+        AppMetadata {
+            id: "quill".to_string(),
+            name: "Quill Notes".to_string(),
+            category: "productivity".to_string(),
+            category_name: "Productivity".to_string(),
+            description:
+                "A focused writing app with linked notes and a clean distraction-free editor."
+                    .to_string(),
+            size_estimate: "56 MB".to_string(),
+            icon_text: "QN".to_string(),
+            color_gradient: "from-amber-500 to-orange-600".to_string(),
+            glow_color: "rgba(245, 158, 11, 0.4)".to_string(),
+            changelog: vec![
+                "Improved search index and offline notebooks sync.".to_string(),
+                "Distraction-free typewriter scrolling mode.".to_string(),
+            ],
+            binary_name: "Quill Notes.app".to_string(),
+        },
+        AppMetadata {
+            id: "atlas".to_string(),
+            name: "Atlas Maps".to_string(),
+            category: "devtools".to_string(),
+            category_name: "Developer Tools".to_string(),
+            description: "Explore geographic data layers and build map-driven prototypes."
+                .to_string(),
+            size_estimate: "92 MB".to_string(),
+            icon_text: "AM".to_string(),
+            color_gradient: "from-teal-500 to-cyan-600".to_string(),
+            glow_color: "rgba(20, 184, 166, 0.4)".to_string(),
+            changelog: vec![
+                "Better vector tile layer controls and GeoJSON export support.".to_string(),
+                "Hardware-accelerated MapLibre renderer integration.".to_string(),
+            ],
+            binary_name: "Atlas Maps.app".to_string(),
+        },
+        AppMetadata {
+            id: "orbit".to_string(),
+            name: "Orbit Tasks".to_string(),
+            category: "productivity".to_string(),
+            category_name: "Task Board".to_string(),
+            description: "A lightweight task board for small teams working across time zones."
+                .to_string(),
+            size_estimate: "79 MB".to_string(),
+            icon_text: "OT".to_string(),
+            color_gradient: "from-sky-500 to-blue-600".to_string(),
+            glow_color: "rgba(14, 165, 233, 0.4)".to_string(),
+            changelog: vec![
+                "Timeline view and smart recurring tasks engine.".to_string(),
+                "Offline-first sync with Conflict-free Replicated Data Types.".to_string(),
+            ],
+            binary_name: "Orbit Tasks.app".to_string(),
+        },
+        AppMetadata {
+            id: "relay".to_string(),
+            name: "Relay Client".to_string(),
+            category: "devtools".to_string(),
+            category_name: "API Workbench".to_string(),
+            description:
+                "A clear, fast client for inspecting API requests, WebSockets, and live streams."
+                    .to_string(),
+            size_estimate: "72 MB".to_string(),
+            icon_text: "RC".to_string(),
+            color_gradient: "from-fuchsia-600 to-pink-600".to_string(),
+            glow_color: "rgba(217, 70, 239, 0.4)".to_string(),
+            changelog: vec![
+                "New streaming request history and keyboard shortcuts.".to_string(),
+                "gRPC reflection and automated protobuf decoding.".to_string(),
+            ],
+            binary_name: "Relay Client.app".to_string(),
+        },
+    ]
+}
+
 /// Matches a repository name against the known app catalog.
 pub fn find_known_app(repo_name: &str) -> Option<AppMetadata> {
     let lower = repo_name.to_lowercase();
     default_artcraft_catalog()
         .into_iter()
+        .chain(extended_sample_catalog())
         .find(|app| app.id == lower || app.name.to_lowercase() == lower || lower.contains(&app.id))
 }
 

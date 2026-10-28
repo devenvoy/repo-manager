@@ -1,12 +1,13 @@
 //! Selected project workspace and its settings boundary.
 
+use crate::components::card::{property_row, summary_stat_card};
 use crate::components::motion_button::Button;
 use crate::components::provider_icon::provider_icon;
+use crate::styles::CssExt as _;
 use crate::workspace::{ProjectSection, WorkspaceProject};
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::ButtonVariants as _;
-use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div, px,
 };
@@ -68,9 +69,9 @@ pub fn render_project_workspace<
                 .child(div().text_size(px(27.)).font_bold().child("Your repositories, together."))
                 .child(div().text_size(px(14.)).text_color(cx.theme().muted_foreground).child("Browse the repositories you discover, choose what to manage, and keep your local copies up to date."))
                 .child(div().flex().flex_wrap().gap_3()
-                    .child(summary_card("Sources", project.sources.len(), cx))
-                    .child(summary_card("Discovered repositories", discovered, cx))
-                    .child(summary_card("Selected to manage", selected, cx)))
+                    .child(summary_stat_card("Sources", project.sources.len(), cx.theme()))
+                    .child(summary_stat_card("Discovered repositories", discovered, cx.theme()))
+                    .child(summary_stat_card("Selected to manage", selected, cx.theme())))
                 .child(div().flex().flex_wrap().gap_2()
                     .child(Button::new("overview-sources").label(if project.sources.is_empty() { "Add your first source" } else { "Browse sources" }).primary().on_click(cx.listener(move |this, _, window, cx| on_section(ProjectSection::Sources, this, window, cx))))
                     .child(Button::new("overview-repos").label("View repositories").outline().on_click(cx.listener(move |this, _, window, cx| on_section(ProjectSection::Repositories, this, window, cx))))
@@ -84,9 +85,9 @@ pub fn render_project_workspace<
             .flex_col()
             .gap_5()
             .child(div().text_size(px(20.)).font_bold().child("Project settings"))
-            .child(detail_row("Folder", &project.directory.display().to_string(), cx))
-            .child(detail_row("Provider", project.provider.label(), cx))
-            .child(detail_row("Account", &project.account, cx))
+            .child(property_row("Folder", &project.directory.display().to_string(), cx.theme()))
+            .child(property_row("Provider", project.provider.label(), cx.theme()))
+            .child(property_row("Account", &project.account, cx.theme()))
             .child(Button::new("edit-project").label("Edit project setup").primary().on_click(cx.listener(move |this, _, window, cx| on_edit(this, window, cx))))
             .child(
                 div()
@@ -120,11 +121,7 @@ pub fn render_project_workspace<
     };
 
     div()
-        .flex()
-        .flex_col()
-        .gap_6()
-        .p_6()
-        .overflow_y_scrollbar()
+        .css_page_scroll()
         .child(
             div()
                 .flex()
@@ -178,56 +175,8 @@ pub fn render_project_workspace<
                     .child(body)
                     .into_any_element()
             } else {
-                div().min_h(px(560.)).child(body).into_any_element()
+                div().flex_1().min_h_0().child(body).into_any_element()
             },
-        )
-}
-
-fn summary_card<T: 'static>(label: &str, count: usize, cx: &Context<T>) -> impl IntoElement {
-    div()
-        .flex_1()
-        .min_w(px(150.))
-        .p_4()
-        .rounded_lg()
-        .bg(cx.theme().background)
-        .border_1()
-        .border_color(cx.theme().border)
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(
-            div()
-                .text_size(px(25.))
-                .font_bold()
-                .child(count.to_string()),
-        )
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(cx.theme().muted_foreground)
-                .child(label.to_string()),
-        )
-}
-
-fn detail_row<T: 'static>(label: &str, value: &str, cx: &Context<T>) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .py_2p5()
-        .border_b_1()
-        .border_color(cx.theme().border)
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(cx.theme().muted_foreground)
-                .child(label.to_string()),
-        )
-        .child(
-            div()
-                .text_size(px(12.))
-                .font_bold()
-                .child(value.to_string()),
         )
 }
 
