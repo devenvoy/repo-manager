@@ -3,6 +3,7 @@
 //! Call these functions on a background thread: Git and network operations block.
 
 use crate::workspace::WorkspaceProject;
+pub use release_desk_git::GitCommit;
 use release_desk_git::{CloneState, CloneStatus, GitClient, GitCredentialContext, SyncOutcome};
 use std::path::{Component, Path, PathBuf};
 
@@ -242,6 +243,13 @@ pub fn update(target: &RepositoryTarget) -> Result<SyncOutcome, String> {
     }
     git.sync_existing(&target.url, &target.path, &target.branch)
         .map_err(|e| e.to_string())
+}
+
+/// Read recent commits from a local repository clone.
+pub fn load_recent_commits(target_path: &Path, count: usize) -> Vec<GitCommit> {
+    GitClient::new()
+        .recent_commits(target_path, count)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

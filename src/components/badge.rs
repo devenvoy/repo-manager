@@ -1,6 +1,6 @@
 //! Reusable badge, pill, and tag components.
 
-use crate::components::ui_icons::check_icon;
+use crate::components::ui_icons::{branch_icon, check_icon, globe_icon, lock_icon};
 use crate::styles::CssExt as _;
 use gpui_kit::component::Theme;
 use gpui_kit::{IntoElement, ParentElement as _, Styled as _, div, px, rgb};
@@ -31,10 +31,10 @@ pub fn status_pill(
     }
     .flex()
     .items_center()
-    .gap_1();
+    .gap_1p5();
 
     if show_check {
-        pill = pill.child(check_icon().w(px(10.)).h(px(10.)));
+        pill = pill.child(check_icon().w(px(13.)).h(px(13.)));
     }
 
     pill.child(text.to_string())
@@ -45,11 +45,30 @@ pub fn version_pill(version: &str, theme: &Theme) -> impl IntoElement {
     div().css_pill_primary(theme).child(version.to_string())
 }
 
-/// Git branch chip (e.g. `main`, `master`).
+/// Git branch chip (e.g. `main`, `master`) with branch icon.
 pub fn branch_chip(branch: &str, theme: &Theme) -> impl IntoElement {
     div()
         .css_chip(theme)
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(branch_icon().w(px(13.)).h(px(13.)))
         .child(if branch.is_empty() { "main" } else { branch }.to_string())
+}
+
+/// Visibility chip (Public / Private) with globe or lock icon.
+pub fn visibility_chip(is_private: bool, theme: &Theme) -> impl IntoElement {
+    div()
+        .css_chip(theme)
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(if is_private {
+            lock_icon().w(px(13.)).h(px(13.))
+        } else {
+            globe_icon().w(px(13.)).h(px(13.))
+        })
+        .child(if is_private { "Private" } else { "Public" }.to_string())
 }
 
 /// Language indicator chip with syntax color dot.
@@ -70,8 +89,8 @@ pub fn language_chip(language: &str, theme: &Theme) -> impl IntoElement {
         .css_chip(theme)
         .flex()
         .items_center()
-        .gap_1p5()
-        .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(dot_color))
+        .gap_2()
+        .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(dot_color))
         .child(language.to_string())
 }
 

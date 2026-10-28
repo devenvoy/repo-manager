@@ -127,67 +127,70 @@ pub trait CssExt: Styled + StyledExt + ScrollableElement + Sized {
 
     /// `.pill-primary` - Primary accent pill.
     fn css_pill_primary(self, theme: &Theme) -> Self {
-        self.px_2()
-            .py_0p5()
+        self.px_2p5()
+            .py_1()
             .rounded_full()
-            .bg(theme.primary.opacity(0.12))
+            .bg(theme.primary.opacity(0.14))
             .text_color(theme.primary)
-            .text_size(px(10.))
+            .text_size(px(12.))
             .font_bold()
     }
 
     /// `.pill-success` - Green status indicator pill.
     fn css_pill_success(self, theme: &Theme) -> Self {
-        self.px_2()
-            .py_0p5()
+        self.px_2p5()
+            .py_1()
             .rounded_full()
             .bg(theme.success.opacity(0.14))
             .text_color(theme.success)
-            .text_size(px(10.))
+            .text_size(px(12.))
             .font_bold()
     }
 
     /// `.pill-warning` - Amber update/caution indicator pill.
     fn css_pill_warning(self, theme: &Theme) -> Self {
-        self.px_2()
-            .py_0p5()
+        self.px_2p5()
+            .py_1()
             .rounded_full()
             .bg(theme.warning.opacity(0.14))
             .text_color(theme.warning)
-            .text_size(px(10.))
+            .text_size(px(12.))
             .font_bold()
     }
 
     /// `.pill-danger` - Red error indicator pill.
     fn css_pill_danger(self, theme: &Theme) -> Self {
-        self.px_2()
-            .py_0p5()
+        self.px_2p5()
+            .py_1()
             .rounded_full()
-            .bg(theme.danger.opacity(0.12))
+            .bg(theme.danger.opacity(0.14))
             .text_color(theme.danger)
-            .text_size(px(10.))
+            .text_size(px(12.))
             .font_bold()
     }
 
     /// `.pill-neutral` - Muted gray badge pill.
     fn css_pill_neutral(self, theme: &Theme) -> Self {
-        self.px_2()
-            .py_0p5()
+        self.px_2p5()
+            .py_1()
             .rounded_full()
-            .bg(theme.secondary.opacity(0.15))
-            .text_color(theme.muted_foreground)
-            .text_size(px(10.))
+            .bg(theme.secondary.opacity(0.18))
+            .text_color(theme.foreground)
+            .text_size(px(12.))
             .font_bold()
     }
 
-    /// `.chip` - Compact metadata chip (e.g. branch, format).
+    /// `.chip` - Metadata chip (e.g. branch, format, language) with clear sizing and border.
     fn css_chip(self, theme: &Theme) -> Self {
-        self.px_1p5()
-            .py_0p5()
-            .rounded_md()
-            .bg(theme.secondary.opacity(0.12))
-            .text_color(theme.muted_foreground)
-            .text_size(px(9.))
+        self.px_3()
+            .py_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.secondary.opacity(0.15))
+            .text_color(theme.foreground)
+            .text_size(px(12.5))
+            .font_medium()
     }
 
     /// `.section-eyebrow` - Small uppercase category / tracker header.

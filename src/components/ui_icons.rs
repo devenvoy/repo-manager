@@ -107,3 +107,48 @@ pub fn copy_icon() -> Icon {
     let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>"##;
     Icon::default().data(svg).w(px(14.)).h(px(14.))
 }
+
+pub fn globe_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}
+
+pub fn chevron_down_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}
+
+pub fn chevron_right_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}
+
+pub fn alert_circle_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}
+
+pub fn git_commit_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}
+
+pub fn terminal_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}
+
+pub fn code_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}
+
+pub fn hammer_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m15 12-8.5 8.5c-.83.83-2.17.83-3 0 0 0 0 0 0 0a2.12 2.12 0 0 1 0-3L12 9"/><path d="M17.64 15 22 10.64"/><path d="m20.91 3.26-6.36 6.36"/><path d="m4.93 19.07 4.24-4.24"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}
+
+pub fn android_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="9" width="16" height="12" rx="3"/><path d="M8 5l2 4M16 5l-2 4"/><circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}

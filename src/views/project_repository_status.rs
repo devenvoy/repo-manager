@@ -2,10 +2,12 @@
 
 use crate::components::app_icon::repo_icon;
 use crate::components::avatar::source_avatar;
-use crate::components::badge::{branch_chip, language_chip, version_pill};
+use crate::components::badge::{branch_chip, language_chip, version_pill, visibility_chip};
 use crate::components::motion_button::Button;
 use crate::components::ui_icons::{
-    branch_icon, check_icon, copy_icon, download_icon, external_link_icon, refresh_icon,
+    alert_circle_icon, android_icon, check_icon, chevron_down_icon, chevron_right_icon, code_icon,
+    download_icon, external_link_icon, folder_icon, git_commit_icon, hammer_icon, refresh_icon,
+    terminal_icon,
 };
 use crate::repository_git::{RepositoryStatus, repository_owner};
 use crate::styles::CssExt as _;
@@ -17,10 +19,155 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     Context, ElementId, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Window, deferred, div, px,
 };
 use release_desk_core::app_catalog::find_known_app;
 use release_desk_git::CloneStatus;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorIconKind {
+    VsCode,
+    Cursor,
+    Xcode,
+    AndroidStudio,
+    Zed,
+    Terminal,
+    Finder,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalEditor {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub app_name: &'static str,
+    pub icon_kind: EditorIconKind,
+}
+
+pub fn is_app_installed(app_name: &str) -> bool {
+    if app_name == "Finder" || app_name == "Terminal" {
+        return true;
+    }
+    let paths = [
+        format!("/Applications/{app_name}.app"),
+        format!("/Applications/Utilities/{app_name}.app"),
+        format!("/System/Applications/{app_name}.app"),
+        format!("/System/Applications/Utilities/{app_name}.app"),
+    ];
+    for p in &paths {
+        if std::path::Path::new(p).exists() {
+            return true;
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let user_app = format!("{home}/Applications/{app_name}.app");
+        if std::path::Path::new(&user_app).exists() {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn available_editors() -> Vec<ExternalEditor> {
+    let all = [
+        ExternalEditor {
+            id: "vscode",
+            name: "Visual Studio Code",
+            app_name: "Visual Studio Code",
+            icon_kind: EditorIconKind::VsCode,
+        },
+        ExternalEditor {
+            id: "cursor",
+            name: "Cursor",
+            app_name: "Cursor",
+            icon_kind: EditorIconKind::Cursor,
+        },
+        ExternalEditor {
+            id: "xcode",
+            name: "Xcode",
+            app_name: "Xcode",
+            icon_kind: EditorIconKind::Xcode,
+        },
+        ExternalEditor {
+            id: "android-studio",
+            name: "Android Studio",
+            app_name: "Android Studio",
+            icon_kind: EditorIconKind::AndroidStudio,
+        },
+        ExternalEditor {
+            id: "zed",
+            name: "Zed",
+            app_name: "Zed",
+            icon_kind: EditorIconKind::Zed,
+        },
+        ExternalEditor {
+            id: "iterm",
+            name: "iTerm",
+            app_name: "iTerm",
+            icon_kind: EditorIconKind::Terminal,
+        },
+        ExternalEditor {
+            id: "terminal",
+            name: "Terminal",
+            app_name: "Terminal",
+            icon_kind: EditorIconKind::Terminal,
+        },
+        ExternalEditor {
+            id: "finder",
+            name: "Finder",
+            app_name: "Finder",
+            icon_kind: EditorIconKind::Finder,
+        },
+    ];
+
+    let installed: Vec<_> = all
+        .into_iter()
+        .filter(|e| is_app_installed(e.app_name))
+        .collect();
+
+    if installed.is_empty() {
+        vec![
+            ExternalEditor {
+                id: "finder",
+                name: "Finder",
+                app_name: "Finder",
+                icon_kind: EditorIconKind::Finder,
+            },
+            ExternalEditor {
+                id: "terminal",
+                name: "Terminal",
+                app_name: "Terminal",
+                icon_kind: EditorIconKind::Terminal,
+            },
+        ]
+    } else {
+        installed
+    }
+}
+
+pub fn open_path_in_editor(path: &std::path::Path, editor_id: &str) {
+    let editors = available_editors();
+    let editor = editors.iter().find(|e| e.id == editor_id);
+    let app_name = editor.map(|e| e.app_name).unwrap_or(editor_id);
+
+    if app_name == "Finder" {
+        let _ = std::process::Command::new("open").arg(path).spawn();
+    } else {
+        let _ = std::process::Command::new("open")
+            .args(["-a", app_name])
+            .arg(path)
+            .spawn();
+    }
+}
+
+fn editor_icon(kind: EditorIconKind) -> gpui_kit::component::Icon {
+    match kind {
+        EditorIconKind::VsCode | EditorIconKind::Cursor | EditorIconKind::Zed => code_icon(),
+        EditorIconKind::Xcode => hammer_icon(),
+        EditorIconKind::AndroidStudio => android_icon(),
+        EditorIconKind::Terminal => terminal_icon(),
+        EditorIconKind::Finder => folder_icon(),
+    }
+}
 
 fn format_date_short(raw: &str) -> String {
     if raw.len() >= 10 {
@@ -126,12 +273,19 @@ pub fn render_project_repository_status<
     FSelect: Fn(usize, usize, &mut T, &mut Context<T>) + Copy + 'static,
     FOpen: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
     FBrowseSources: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
+    FToggleCommits: Fn(&mut T, &mut Context<T>) + Copy + 'static,
+    FToggleEditorMenu: Fn(&mut T, &mut Context<T>) + Copy + 'static,
+    FSelectEditor: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
+    FOpenInEditor: Fn(std::path::PathBuf, String, &mut T, &mut Context<T>) + Copy + 'static,
 >(
     project: &WorkspaceProject,
     statuses: &[RepositoryStatus],
     selected: Option<(usize, usize)>,
     search_input: &Entity<InputState>,
     busy: bool,
+    commits_collapsed: bool,
+    selected_editor_id: &str,
+    editor_menu_open: bool,
     cx: &Context<T>,
     on_check: FCheck,
     on_update: FUpdate,
@@ -140,6 +294,10 @@ pub fn render_project_repository_status<
     on_select: FSelect,
     on_open: FOpen,
     on_browse_sources: FBrowseSources,
+    on_toggle_commits: FToggleCommits,
+    on_toggle_editor_menu: FToggleEditorMenu,
+    on_select_editor: FSelectEditor,
+    on_open_in_editor: FOpenInEditor,
 ) -> impl IntoElement {
     let all_repositories: Vec<_> = project
         .sources
@@ -353,6 +511,8 @@ pub fn render_project_repository_status<
             .and_then(|s| s.state.as_ref().ok())
             .is_some_and(|st| matches!(st.status, CloneStatus::Current));
 
+        let is_fetched = status.is_some_and(|s| s.fetched);
+
         let is_not_cloned = status
             .and_then(|s| s.state.as_ref().ok())
             .is_some_and(|st| st.status == CloneStatus::NotCloned);
@@ -361,7 +521,39 @@ pub fn render_project_repository_status<
             .and_then(|s| s.state.as_ref().ok())
             .is_some_and(|st| st.status == CloneStatus::Behind);
 
-        let status_badge = if is_current {
+        let is_error = status.is_some_and(|s| {
+            s.state.is_err()
+                || s.state
+                    .as_ref()
+                    .ok()
+                    .is_some_and(|st| st.status == CloneStatus::Error)
+        });
+
+        let status_badge = if is_not_cloned {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(cx.theme().secondary.opacity(0.15))
+                .text_color(cx.theme().muted_foreground)
+                .text_size(px(10.))
+                .font_bold()
+                .child("Not cloned")
+        } else if is_behind {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(cx.theme().warning.opacity(0.12))
+                .text_color(cx.theme().warning)
+                .text_size(px(10.))
+                .font_bold()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(download_icon().w(px(10.)).h(px(10.)))
+                .child("Update available")
+        } else if is_current && is_fetched {
             div()
                 .px_2()
                 .py_0p5()
@@ -374,27 +566,35 @@ pub fn render_project_repository_status<
                 .items_center()
                 .gap_1()
                 .child(check_icon().w(px(10.)).h(px(10.)))
+                .child("Up to date")
+        } else if is_current {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(cx.theme().primary.opacity(0.12))
+                .text_color(cx.theme().primary)
+                .text_size(px(10.))
+                .font_bold()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(check_icon().w(px(10.)).h(px(10.)))
                 .child("Code current")
-        } else if is_behind {
+        } else if is_error {
             div()
                 .px_2()
                 .py_0p5()
                 .rounded_full()
-                .bg(cx.theme().warning.opacity(0.12))
-                .text_color(cx.theme().warning)
+                .bg(cx.theme().danger.opacity(0.12))
+                .text_color(cx.theme().danger)
                 .text_size(px(10.))
                 .font_bold()
-                .child("Update available")
-        } else if is_not_cloned {
-            div()
-                .px_2()
-                .py_0p5()
-                .rounded_full()
-                .bg(cx.theme().secondary.opacity(0.15))
-                .text_color(cx.theme().muted_foreground)
-                .text_size(px(10.))
-                .font_bold()
-                .child("Not cloned")
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(alert_circle_icon().w(px(10.)).h(px(10.)))
+                .child("Error")
         } else {
             let (label, _, _) = status_text(status);
             div()
@@ -525,9 +725,15 @@ pub fn render_project_repository_status<
     }
 
     let rail = div()
-        .css_rail(cx.theme())
-        .flex_1()
+        .w(px(330.))
+        .flex_shrink_0()
+        .border_r_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().background)
+        .flex()
+        .flex_col()
         .min_h_0()
+        .h(px(640.))
         .child(rail_header)
         .child(rows);
 
@@ -561,7 +767,6 @@ pub fn render_project_repository_status<
         let browser_url = source
             .repository_browser_url(repo)
             .unwrap_or_else(|| repo.clone_url.clone());
-        let clone_cmd = format!("git clone {}", repo.clone_url);
 
         let app_title = known
             .as_ref()
@@ -579,57 +784,12 @@ pub fn render_project_repository_status<
                 || crate::components::app_icon::find_cached_repo_icon(&repo.name, Some(owner)),
             );
 
-        let mut meta_badges = div().flex().items_center().gap_2().pt_2().flex_wrap();
+        let mut meta_badges = div().flex().items_center().gap_2p5().pt_2().flex_wrap();
         if let Some(ref lang) = repo.primary_language {
             meta_badges = meta_badges.child(language_chip(lang, cx.theme()));
         }
-        meta_badges = meta_badges
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .px_2p5()
-                    .py_1()
-                    .rounded_full()
-                    .bg(if is_cloned {
-                        cx.theme().success.opacity(0.12)
-                    } else {
-                        cx.theme().warning.opacity(0.12)
-                    })
-                    .text_color(if is_cloned {
-                        cx.theme().success
-                    } else {
-                        cx.theme().warning
-                    })
-                    .child(check_icon().w(px(10.)).h(px(10.)))
-                    .child(div().text_size(px(11.)).font_bold().child(if is_cloned {
-                        "Code current"
-                    } else {
-                        "Not cloned"
-                    })),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .px_2p5()
-                    .py_1()
-                    .rounded_full()
-                    .bg(cx.theme().secondary.opacity(0.1))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(branch_icon().w(px(11.)).h(px(11.)))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .child(if repo.default_branch.is_empty() {
-                                "main".to_string()
-                            } else {
-                                repo.default_branch.clone()
-                            }),
-                    ),
-            );
+        meta_badges = meta_badges.child(visibility_chip(repo.is_private, cx.theme()));
+        meta_badges = meta_badges.child(branch_chip(&repo.default_branch, cx.theme()));
 
         // Hero Header matching reference
         let hero = div()
@@ -680,117 +840,230 @@ pub fn render_project_repository_status<
                     ),
             )
             .child(
+                Button::new("open-github-action")
+                    .icon(external_link_icon())
+                    .label("Open on GitHub")
+                    .outline()
+                    .on_click(cx.listener({
+                        let url = browser_url.clone();
+                        move |this, _, _, cx| on_open(url.clone(), this, cx)
+                    })),
+            );
+
+        // Horizontal directory row with installed IDE dropdown and Open button
+        let editors = available_editors();
+        let current_editor = editors
+            .iter()
+            .find(|e| e.id == selected_editor_id)
+            .or_else(|| editors.first())
+            .cloned()
+            .unwrap_or(ExternalEditor {
+                id: "finder",
+                name: "Finder",
+                app_name: "Finder",
+                icon_kind: EditorIconKind::Finder,
+            });
+
+        let mut menu_items = div().flex().flex_col().gap_0p5();
+        for editor in &editors {
+            let is_selected = editor.id == current_editor.id;
+            let ed_id = editor.id.to_string();
+            let mut item = div()
+                .id(ElementId::Name(
+                    format!("select-editor-{}", editor.id).into(),
+                ))
+                .flex()
+                .items_center()
+                .justify_between()
+                .px_2p5()
+                .py_1p5()
+                .rounded_md()
+                .cursor_pointer()
+                .bg(if is_selected {
+                    cx.theme().primary.opacity(0.12)
+                } else {
+                    cx.theme().background
+                })
+                .hover(|s| s.bg(cx.theme().secondary.opacity(0.2)))
+                .on_click(cx.listener({
+                    let ed_id = ed_id.clone();
+                    move |this, _, _, cx| {
+                        on_select_editor(ed_id.clone(), this, cx);
+                    }
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            editor_icon(editor.icon_kind)
+                                .w(px(14.))
+                                .h(px(14.))
+                                .text_color(if is_selected {
+                                    cx.theme().primary
+                                } else {
+                                    cx.theme().foreground
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .font_medium()
+                                .text_color(if is_selected {
+                                    cx.theme().primary
+                                } else {
+                                    cx.theme().foreground
+                                })
+                                .child(editor.name),
+                        ),
+                );
+
+            if is_selected {
+                item = item.child(
+                    check_icon()
+                        .w(px(13.))
+                        .h(px(13.))
+                        .text_color(cx.theme().primary),
+                );
+            }
+
+            menu_items = menu_items.child(item);
+        }
+
+        let mut selector_container = div().relative().child(
+            div()
+                .id("editor-select-trigger")
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .rounded_lg()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary.opacity(0.12))
+                .hover(|s| s.bg(cx.theme().secondary.opacity(0.25)))
+                .cursor_pointer()
+                .child(
+                    editor_icon(current_editor.icon_kind)
+                        .w(px(14.))
+                        .h(px(14.))
+                        .text_color(cx.theme().foreground),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .font_medium()
+                        .text_color(cx.theme().foreground)
+                        .child(current_editor.name),
+                )
+                .child(
+                    chevron_down_icon()
+                        .w(px(12.))
+                        .h(px(12.))
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    on_toggle_editor_menu(this, cx);
+                })),
+        );
+
+        if editor_menu_open {
+            selector_container = selector_container.child(
+                deferred(
+                    div()
+                        .child(
+                            div()
+                                .id("editor-menu-backdrop")
+                                .occlude()
+                                .absolute()
+                                .top(px(-1000.))
+                                .left(px(-2000.))
+                                .w(px(5000.))
+                                .h(px(5000.))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    on_toggle_editor_menu(this, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .occlude()
+                                .absolute()
+                                .top_full()
+                                .right_0()
+                                .mt_1p5()
+                                .w(px(220.))
+                                .rounded_xl()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().background)
+                                .shadow_lg()
+                                .p_1p5()
+                                .child(menu_items),
+                        ),
+                )
+                .priority(10),
+            );
+        }
+
+        let directory_row = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .py_2p5()
+            .px_1()
+            .border_t_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .gap_3()
+            .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2p5()
+                    .min_w_0()
                     .child(
-                        Button::new("open-github-action")
-                            .icon(external_link_icon())
-                            .label("Open on GitHub")
-                            .outline()
-                            .on_click(cx.listener({
-                                let url = browser_url.clone();
-                                move |this, _, _, cx| on_open(url.clone(), this, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("copy-clone-action")
-                            .icon(copy_icon())
-                            .label("Copy clone command")
-                            .outline()
-                            .on_click(cx.listener({
-                                let cmd = clone_cmd.clone();
-                                move |_this, _, _, _cx| {
-                                    release_desk_store::auth::copy_to_macos_clipboard(&cmd);
-                                }
-                            })),
-                    ),
-            );
-
-        // Stats Grid
-        let stats_row = div()
-            .flex()
-            .gap_3()
-            .flex_wrap()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(180.))
-                    .p_3p5()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().background)
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .font_bold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("VISIBILITY"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .font_bold()
-                            .child(if repo.is_private { "Private" } else { "Public" }),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(180.))
-                    .p_3p5()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().background)
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .font_bold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("DEFAULT BRANCH"),
-                    )
-                    .child(div().text_size(px(14.)).font_bold().child(
-                        if repo.default_branch.is_empty() {
-                            "main".to_string()
-                        } else {
-                            repo.default_branch.clone()
-                        },
-                    )),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(180.))
-                    .p_3p5()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().background)
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .font_bold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("LOCAL FOLDER"),
+                        folder_icon()
+                            .w(px(16.))
+                            .h(px(16.))
+                            .text_color(cx.theme().muted_foreground),
                     )
                     .child(
                         div()
                             .text_size(px(12.))
+                            .font_bold()
                             .text_color(cx.theme().muted_foreground)
+                            .child("Directory:"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_family(".AppleSystemUIFontMonospaced, Menlo, monospace")
+                            .text_color(cx.theme().foreground)
                             .truncate()
                             .child(target_path.display().to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_shrink_0()
+                    .child(selector_container)
+                    .child(
+                        Button::new("open-directory-in-app")
+                            .icon(external_link_icon())
+                            .label("Open")
+                            .primary()
+                            .on_click(cx.listener({
+                                let path = target_path.clone();
+                                let ed_id = current_editor.id.to_string();
+                                move |this, _, _, cx| {
+                                    on_open_in_editor(path.clone(), ed_id.clone(), this, cx);
+                                }
+                            })),
                     ),
             );
 
@@ -835,44 +1108,374 @@ pub fn render_project_repository_status<
                         })),
                 )
         } else {
+            let (status_title, status_desc, is_behind, is_error) = match status {
+                None => (
+                    "Not checked",
+                    "Local repository status has not been inspected yet.".to_string(),
+                    false,
+                    false,
+                ),
+                Some(st) => match &st.state {
+                    Err(err) => (
+                        "Update failed",
+                        format!("Error updating repository: {err}"),
+                        false,
+                        true,
+                    ),
+                    Ok(state) => match state.status {
+                        CloneStatus::NotCloned => (
+                            "Not cloned",
+                            "No local copy exists at the project destination.".to_string(),
+                            false,
+                            false,
+                        ),
+                        CloneStatus::Current if st.fetched => (
+                            "Up to date",
+                            "Git working tree is in sync with latest tracked upstream commits.".to_string(),
+                            false,
+                            false,
+                        ),
+                        CloneStatus::Current => (
+                            "Locally current",
+                            "Working tree is clean. Fetch origin to check if remote updates are available.".to_string(),
+                            false,
+                            false,
+                        ),
+                        CloneStatus::Behind => (
+                            "Update available",
+                            state.message.clone().unwrap_or_else(|| {
+                                "New upstream commits are available. Pull updates to bring your local repository up to date.".to_string()
+                            }),
+                            true,
+                            false,
+                        ),
+                        CloneStatus::Ahead => (
+                            "Local commits ahead",
+                            "The local branch has commits not present in upstream remote.".to_string(),
+                            false,
+                            false,
+                        ),
+                        CloneStatus::Diverged => (
+                            "Branches diverged",
+                            "Local and remote branches have diverged; manual resolution required in Git.".to_string(),
+                            false,
+                            false,
+                        ),
+                        CloneStatus::Dirty => (
+                            "Uncommitted changes",
+                            "Commit or stash local modifications before pulling updates.".to_string(),
+                            false,
+                            false,
+                        ),
+                        CloneStatus::Detached => (
+                            "Detached HEAD",
+                            "Check out the default branch before pulling updates.".to_string(),
+                            false,
+                            false,
+                        ),
+                        CloneStatus::OtherBranch => (
+                            "Different branch",
+                            "Switch to the default branch before pulling updates.".to_string(),
+                            false,
+                            false,
+                        ),
+                        CloneStatus::Error => (
+                            "Update error",
+                            state.message.clone().unwrap_or_else(|| {
+                                "Repository update failed or requires manual resolution in Git.".to_string()
+                            }),
+                            false,
+                            true,
+                        ),
+                    },
+                },
+            };
+
+            let card_bg = if is_error {
+                cx.theme().danger.opacity(0.06)
+            } else if is_behind {
+                cx.theme().primary.opacity(0.05)
+            } else {
+                cx.theme().background
+            };
+
+            let card_border = if is_error {
+                cx.theme().danger.opacity(0.35)
+            } else if is_behind {
+                cx.theme().primary.opacity(0.3)
+            } else {
+                cx.theme().border
+            };
+
+            let title_color = if is_error {
+                cx.theme().danger
+            } else if is_behind {
+                cx.theme().primary
+            } else {
+                cx.theme().foreground
+            };
+
+            let info_col = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .font_bold()
+                        .text_size(px(14.))
+                        .text_color(title_color)
+                        .child(status_title),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(if is_error {
+                            cx.theme().danger
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .child(status_desc),
+                );
+
+            let action_btn = if is_behind {
+                Button::new("git-update-selected")
+                    .icon(download_icon())
+                    .label(if busy {
+                        "Pulling updates…"
+                    } else {
+                        "Pull updates"
+                    })
+                    .primary()
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        on_update(source_index, repo_index, this, window, cx)
+                    }))
+            } else if is_error {
+                Button::new("git-update-selected")
+                    .icon(refresh_icon())
+                    .label(if busy { "Retrying…" } else { "Retry update" })
+                    .danger()
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        on_update(source_index, repo_index, this, window, cx)
+                    }))
+            } else {
+                Button::new("git-update-selected")
+                    .icon(refresh_icon())
+                    .label(if busy {
+                        "Checking…"
+                    } else {
+                        "Check for updates"
+                    })
+                    .outline()
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, window, cx| on_check(this, window, cx)))
+            };
+
             div()
                 .p_4()
                 .rounded_xl()
                 .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().background)
+                .border_color(card_border)
+                .bg(card_bg)
                 .flex()
                 .items_center()
                 .justify_between()
                 .gap_4()
+                .child(info_col)
+                .child(div().flex_shrink_0().child(action_btn))
+        };
+
+        // Commits Section (Collapsible with git commit table)
+        let commits_section = {
+            let commits = if is_cloned {
+                crate::repository_git::load_recent_commits(&target_path, 15)
+            } else {
+                Vec::new()
+            };
+
+            let header_el = div()
+                .id("commits-toggle-header")
+                .flex()
+                .items_center()
+                .justify_between()
+                .p_3p5()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    on_toggle_commits(this, cx);
+                }))
                 .child(
                     div()
                         .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .font_bold()
-                                .text_size(px(14.))
-                                .child("Local copy is current"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
+                        .items_center()
+                        .gap_2()
+                        .child(if commits_collapsed {
+                            chevron_right_icon()
+                                .w(px(14.))
+                                .h(px(14.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Git working tree is in sync with latest tracked upstream commits."),
+                        } else {
+                            chevron_down_icon()
+                                .w(px(14.))
+                                .h(px(14.))
+                                .text_color(cx.theme().muted_foreground)
+                        })
+                        .child(
+                            git_commit_icon()
+                                .w(px(15.))
+                                .h(px(15.))
+                                .text_color(cx.theme().primary),
+                        )
+                        .child(div().font_bold().text_size(px(14.)).child("Commits"))
+                        .child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(cx.theme().primary.opacity(0.1))
+                                .text_color(cx.theme().primary)
+                                .text_size(px(10.))
+                                .font_bold()
+                                .child(if is_cloned {
+                                    format!("{} commits", commits.len())
+                                } else {
+                                    "Not cloned".to_string()
+                                }),
                         ),
                 )
                 .child(
-                    Button::new("git-update-selected")
-                        .icon(refresh_icon())
-                        .label(if busy { "Updating…" } else { "Pull updates" })
-                        .primary()
-                        .disabled(busy)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            on_update(source_index, repo_index, this, window, cx)
-                        })),
-                )
+                    div()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(if commits_collapsed {
+                            "Click to expand"
+                        } else {
+                            "Click to collapse"
+                        }),
+                );
+
+            let mut container = div()
+                .rounded_xl()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background)
+                .overflow_hidden()
+                .child(header_el);
+
+            if !commits_collapsed {
+                let content = if !is_cloned {
+                    div()
+                        .p_6()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Repository is not cloned locally yet. Clone this repository to view commit history.")
+                } else if commits.is_empty() {
+                    div()
+                        .p_6()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No recent commits found.")
+                } else {
+                    let mut table = div()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col();
+
+                    // Table Header
+                    let table_header = div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_4()
+                        .py_2()
+                        .bg(cx.theme().muted.opacity(0.35))
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .text_size(px(10.))
+                        .font_bold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(div().w(px(80.)).child("COMMIT"))
+                        .child(div().flex_1().min_w_0().child("MESSAGE"))
+                        .child(div().w(px(140.)).child("AUTHOR"))
+                        .child(div().w(px(110.)).text_right().child("DATE"));
+
+                    table = table.child(table_header);
+
+                    for commit in commits {
+                        let row = div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .px_4()
+                            .py_2p5()
+                            .border_b_1()
+                            .border_color(cx.theme().border.opacity(0.5))
+                            .hover(|s| s.bg(cx.theme().muted.opacity(0.15)))
+                            .child(
+                                div().w(px(80.)).flex_shrink_0().child(
+                                    div()
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded(px(4.))
+                                        .bg(cx.theme().secondary.opacity(0.15))
+                                        .text_size(px(11.))
+                                        .font_family(
+                                            ".AppleSystemUIFontMonospaced, Menlo, monospace",
+                                        )
+                                        .text_color(cx.theme().primary)
+                                        .child(commit.short_hash),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(cx.theme().foreground)
+                                    .truncate()
+                                    .child(commit.message),
+                            )
+                            .child(
+                                div()
+                                    .w(px(140.))
+                                    .flex_shrink_0()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .truncate()
+                                    .child(commit.author_name),
+                            )
+                            .child(
+                                div()
+                                    .w(px(110.))
+                                    .flex_shrink_0()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .text_right()
+                                    .truncate()
+                                    .child(commit.date),
+                            );
+                        table = table.child(row);
+                    }
+                    table
+                };
+
+                container = container.child(content);
+            }
+
+            container
         };
 
         // Changelog / Scorecard Card
@@ -1046,16 +1649,19 @@ pub fn render_project_repository_status<
             .flex()
             .flex_col()
             .gap_5()
-            .h(px(680.))
+            .h(px(640.))
             .overflow_y_scrollbar()
             .child(hero)
-            .child(stats_row)
+            .child(directory_row)
             .child(git_card)
+            .child(commits_section)
             .child(changelog_card)
             .into_any_element()
     } else {
         div()
             .flex_1()
+            .min_w_0()
+            .h(px(640.))
             .p_8()
             .flex()
             .items_center()
@@ -1073,14 +1679,14 @@ pub fn render_project_repository_status<
         .flex()
         .flex_col()
         .flex_1()
-        .min_h_0()
+        .min_h(px(700.))
         .gap_4()
         .child(header)
         .child(
             div()
                 .flex()
                 .flex_1()
-                .min_h_0()
+                .min_h(px(640.))
                 .border_1()
                 .border_color(cx.theme().border)
                 .rounded_xl()
@@ -1146,5 +1752,17 @@ mod tests {
             status_text(Some(&status(CloneStatus::Behind, false))).0,
             "Behind last fetched version"
         );
+    }
+
+    #[test]
+    fn external_editor_detection_and_fallback() {
+        assert!(is_app_installed("Finder"));
+        assert!(is_app_installed("Terminal"));
+        assert!(!is_app_installed("DefinitelyNonExistentApp12345XYZ"));
+
+        let editors = available_editors();
+        assert!(!editors.is_empty());
+        assert!(editors.iter().any(|e| e.id == "finder"));
+        assert!(editors.iter().any(|e| e.id == "terminal"));
     }
 }

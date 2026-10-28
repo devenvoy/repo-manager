@@ -28,6 +28,16 @@ pub enum CloneStatus {
     Error,
 }
 
+/// A Git commit from the log.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitCommit {
+    pub hash: String,
+    pub short_hash: String,
+    pub author_name: String,
+    pub date: String,
+    pub message: String,
+}
+
 /// A snapshot of local and locally fetched remote revisions.
 ///
 /// `remote_revision` is the last fetched `origin/<default_branch>` revision;
@@ -535,6 +545,41 @@ impl GitClient {
             }
             _ => Ok(SyncOutcome::Skipped(state)),
         }
+    }
+
+    /// Read recent commits from a local clone.
+    pub fn recent_commits(&self, path: &Path, count: usize) -> Result<Vec<GitCommit>, GitError> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let count_arg = format!("-{}", count.clamp(1, 100));
+        let output = self.run(
+            Some(path),
+            "read commit log",
+            ["log", &count_arg, "--format=%H%x1f%h%x1f%an%x1f%cr%x1f%s"],
+        )?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        let out = stdout(&output);
+        let commits = out
+            .lines()
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.split('\x1f').collect();
+                if parts.len() >= 5 {
+                    Some(GitCommit {
+                        hash: parts[0].to_string(),
+                        short_hash: parts[1].to_string(),
+                        author_name: parts[2].to_string(),
+                        date: parts[3].to_string(),
+                        message: parts[4].to_string(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Ok(commits)
     }
 
     fn is_ancestor(&self, path: &Path, older: &str, newer: &str) -> Result<bool, GitError> {
@@ -1105,5 +1150,18 @@ mod tests {
             })
         ));
         assert_eq!(git(&fixture.clone, &["branch", "--show-current"]), "topic");
+    }
+
+    #[test]
+    fn recent_commits_returns_log_entries() {
+        let fixture = Fixture::new();
+        fixture.clone();
+        let commits = GitClient::new()
+            .recent_commits(&fixture.clone, 10)
+            .expect("recent commits");
+        assert!(!commits.is_empty());
+        assert_eq!(commits[0].message, "initial");
+        assert!(!commits[0].short_hash.is_empty());
+        assert!(!commits[0].hash.is_empty());
     }
 }

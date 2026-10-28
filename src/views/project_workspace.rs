@@ -186,7 +186,7 @@ pub fn render_project_workspace<
             .p_6()
             .child(top_header)
             .child(tabs)
-            .child(div().flex_1().min_h_0().child(body))
+            .child(div().flex().flex_col().flex_1().min_h_0().child(body))
             .into_any_element()
     }
 }

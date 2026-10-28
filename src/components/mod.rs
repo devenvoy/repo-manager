@@ -11,7 +11,9 @@ pub mod sidebar;
 pub mod ui_icons;
 
 pub use avatar::source_avatar;
-pub use badge::{PillVariant, branch_chip, language_chip, status_pill, version_pill};
+pub use badge::{
+    PillVariant, branch_chip, language_chip, status_pill, version_pill, visibility_chip,
+};
 pub use card::{property_row, section_header, summary_stat_card};
 pub use header::render_header;
 pub use sidebar::render_sidebar;

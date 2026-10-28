@@ -60,6 +60,9 @@ pub struct ReleaseDesk {
     pub(crate) selected_app_id: Option<String>,
     pub(crate) git_statuses: Vec<crate::repository_git::RepositoryStatus>,
     pub(crate) selected_repository: Option<(usize, usize)>,
+    pub(crate) commits_collapsed: bool,
+    pub(crate) selected_editor_id: String,
+    pub(crate) editor_menu_open: bool,
     pub(crate) git_busy: bool,
     pub(crate) workspace_revision: u64,
     pub(crate) release_state: crate::workspace_releases::ReleaseViewState,
@@ -158,6 +161,18 @@ impl ReleaseDesk {
         );
         let detected_system_credential =
             OsSecretStore::discover_system_git_credentials("github.com");
+        let selected_editor_id =
+            if views::project_repository_status::is_app_installed("Visual Studio Code") {
+                "vscode".to_string()
+            } else if views::project_repository_status::is_app_installed("Cursor") {
+                "cursor".to_string()
+            } else if views::project_repository_status::is_app_installed("Xcode") {
+                "xcode".to_string()
+            } else if views::project_repository_status::is_app_installed("Android Studio") {
+                "android-studio".to_string()
+            } else {
+                "finder".to_string()
+            };
         let app = Self {
             settings,
             projects,
@@ -185,6 +200,9 @@ impl ReleaseDesk {
             selected_app_id: None,
             git_statuses: Vec::new(),
             selected_repository: None,
+            commits_collapsed: false,
+            selected_editor_id,
+            editor_menu_open: false,
             git_busy: false,
             workspace_revision: 0,
             release_state: Default::default(),
@@ -589,6 +607,9 @@ impl Render for ReleaseDesk {
                                 self.selected_repository,
                                 &self.repo_search,
                                 self.git_busy,
+                                self.commits_collapsed,
+                                &self.selected_editor_id,
+                                self.editor_menu_open,
                                 cx,
                                 |this: &mut Self, window, cx| {
                                     this.check_repository_updates(None, false, window, cx)
@@ -609,11 +630,32 @@ impl Render for ReleaseDesk {
                                 },
                                 |source, repo, this: &mut Self, cx| {
                                     this.selected_repository = Some((source, repo));
+                                    this.editor_menu_open = false;
                                     cx.notify();
                                 },
                                 |url, this: &mut Self, cx| this.open_source_url(&url, cx),
                                 |this: &mut Self, _window, cx| {
                                     this.project_section = ProjectSection::Sources;
+                                    cx.notify();
+                                },
+                                |this: &mut Self, cx| {
+                                    this.commits_collapsed = !this.commits_collapsed;
+                                    cx.notify();
+                                },
+                                |this: &mut Self, cx| {
+                                    this.editor_menu_open = !this.editor_menu_open;
+                                    cx.notify();
+                                },
+                                |editor_id, this: &mut Self, cx| {
+                                    this.selected_editor_id = editor_id;
+                                    this.editor_menu_open = false;
+                                    cx.notify();
+                                },
+                                |path, editor_id, this: &mut Self, cx| {
+                                    this.editor_menu_open = false;
+                                    views::project_repository_status::open_path_in_editor(
+                                        &path, &editor_id,
+                                    );
                                     cx.notify();
                                 },
                             )

@@ -143,16 +143,16 @@ fn test_dynamic_repo_icon_discovery() {
 
     // Verify cache request for non-ArtCraft generic repo points to GitHub owner avatar
     let generic_req = repo_manager::components::app_icon::repo_icon_cache_request(
-        "PaliCAD",
-        Some("braydennilsen"),
+        "test-generic-app-xyz",
+        Some("genericowner"),
     );
     assert!(generic_req.is_some());
     let (gen_url, gen_path) = generic_req.unwrap();
-    assert_eq!(gen_url, "https://github.com/braydennilsen.png");
+    assert_eq!(gen_url, "https://github.com/genericowner.png");
     assert!(
         gen_path
             .to_string_lossy()
-            .contains("braydennilsen-palicad.png")
+            .contains("genericowner-test-generic-app-xyz.png")
     );
 }
 
