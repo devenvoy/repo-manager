@@ -55,10 +55,26 @@ pub fn discover_workspace(project_dir: &Path) -> Option<DiscoveredWorkspace> {
     if let Some(snapshot_file) = snapshot_candidate {
         if let Ok(content) = std::fs::read_to_string(&snapshot_file) {
             if let Ok(snapshot) = release_desk_core::parse_snapshot(&content) {
-                let org = if snapshot.org.trim().is_empty() {
-                    "storytold".to_string()
-                } else {
+                let org = if !snapshot.org.trim().is_empty() {
                     snapshot.org.trim().to_string()
+                } else {
+                    snapshot
+                        .repos
+                        .iter()
+                        .find_map(|r| {
+                            if let Some(pos) = r.url.find("github.com/") {
+                                let path = r.url[pos + 11..].trim_end_matches(".git");
+                                path.split_once('/').map(|(o, _)| o.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            project_dir
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "workspace".to_string())
+                        })
                 };
 
                 let avatar_url = Some(format!("https://github.com/{org}.png"));
@@ -72,13 +88,7 @@ pub fn discover_workspace(project_dir: &Path) -> Option<DiscoveredWorkspace> {
                         .filter(|d| !d.is_empty())
                         .or_else(|| known.as_ref().map(|k| k.description.clone()));
 
-                    let primary_language = r.primary_language.map(|l| l.name).or_else(|| {
-                        if known.is_some() {
-                            Some("Rust".to_string())
-                        } else {
-                            None
-                        }
-                    });
+                    let primary_language = r.primary_language.map(|l| l.name);
 
                     let default_branch = r
                         .default_branch_ref
@@ -112,13 +122,6 @@ pub fn discover_workspace(project_dir: &Path) -> Option<DiscoveredWorkspace> {
                         }
                     }
 
-                    if latest_version.is_none() {
-                        if let Some(ref k) = known {
-                            latest_version = Some("v0.10.0".to_string());
-                            release_notes = Some(k.changelog.join("\n"));
-                        }
-                    }
-
                     repos.push(DiscoveredRepoItem {
                         name: r.name,
                         full_name,
@@ -137,7 +140,7 @@ pub fn discover_workspace(project_dir: &Path) -> Option<DiscoveredWorkspace> {
                 if !repos.is_empty() {
                     return Some(DiscoveredWorkspace {
                         source_handle: org.clone(),
-                        display_name: Some(format!("{org} (ArtCraft)")),
+                        display_name: Some(org),
                         avatar_url,
                         provider: "github".to_string(),
                         bio: Some(format!(
@@ -241,11 +244,33 @@ pub fn discover_workspace(project_dir: &Path) -> Option<DiscoveredWorkspace> {
             .as_ref()
             .map(|k| k.description.clone())
             .or_else(|| Some("Imported local repository".to_string()));
-        let primary_language = if known.is_some() {
+
+        let primary_language = if dir.join("Cargo.toml").exists() {
             Some("Rust".to_string())
+        } else if dir.join("pubspec.yaml").exists() {
+            Some("Dart".to_string())
+        } else if dir.join("package.json").exists() {
+            Some("TypeScript".to_string())
+        } else if dir.join("pyproject.toml").exists() || dir.join("requirements.txt").exists() {
+            Some("Python".to_string())
+        } else if dir.join("go.mod").exists() {
+            Some("Go".to_string())
+        } else if dir.join("Package.swift").exists() {
+            Some("Swift".to_string())
         } else {
             None
         };
+
+        let mut latest_version = None;
+        let tags_dir = git_dir.join("refs").join("tags");
+        if let Ok(entries) = std::fs::read_dir(tags_dir) {
+            let mut tags: Vec<String> = entries
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect();
+            tags.sort();
+            latest_version = tags.pop();
+        }
 
         Some((
             DiscoveredRepoItem {
@@ -257,8 +282,8 @@ pub fn discover_workspace(project_dir: &Path) -> Option<DiscoveredWorkspace> {
                 clone_url,
                 is_private: false,
                 selected: true,
-                latest_version: Some("v0.10.0".to_string()),
-                release_notes: known.as_ref().map(|k| k.changelog.join("\n")),
+                latest_version,
+                release_notes: None,
                 cached_releases: Vec::new(),
             },
             owner_detected,

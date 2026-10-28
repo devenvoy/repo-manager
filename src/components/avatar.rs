@@ -1,6 +1,6 @@
 //! Modular avatar rendering component for user, organization, and repository profiles.
 
-use crate::components::app_icon::app_badge;
+use crate::components::app_icon::{app_badge, repo_icon};
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::Theme;
 use gpui_kit::{IntoElement, ParentElement as _, Styled as _, div, img, px};
@@ -53,7 +53,12 @@ pub fn source_avatar(
         .into_any_element()
 }
 
-/// Renders a repository badge icon (with application catalog artwork or gradient monogram).
-pub fn repo_avatar(name: &str, size: f32) -> impl IntoElement {
+/// Renders a repository badge icon (with real artwork if available, or procedural gradient monogram).
+pub fn repo_avatar(name: &str, size: f32, icon_path: Option<&Path>) -> impl IntoElement {
+    repo_icon(name, size, icon_path)
+}
+
+/// Backward compatible repo avatar fallback.
+pub fn repo_avatar_default(name: &str, size: f32) -> impl IntoElement {
     app_badge(name, size)
 }

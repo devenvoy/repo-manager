@@ -157,6 +157,19 @@ fn git_client(target: &RepositoryTarget) -> Result<GitClient, String> {
         let credential = GitCredentialContext::new(executable, reference.clone(), &target.url)
             .map_err(|error| error.to_string())?;
         client = client.with_credential(credential);
+    } else {
+        let host = if target.url.contains("gitlab") {
+            "gitlab.com"
+        } else if target.url.contains("bitbucket") {
+            "bitbucket.org"
+        } else {
+            "github.com"
+        };
+        if let Some((_, token)) =
+            release_desk_store::credentials::OsSecretStore::discover_system_git_credentials(host)
+        {
+            client = client.with_token(token);
+        }
     }
     Ok(client)
 }

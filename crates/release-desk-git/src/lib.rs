@@ -172,6 +172,7 @@ fn shell_quote(value: &str) -> String {
 pub struct GitClient {
     executable: std::ffi::OsString,
     credential: Option<GitCredentialContext>,
+    token: Option<String>,
 }
 
 impl Default for GitClient {
@@ -185,12 +186,19 @@ impl GitClient {
         Self {
             executable: "git".into(),
             credential: None,
+            token: None,
         }
     }
 
     /// Use a selected credential for this exact remote; no token is stored here.
     pub fn with_credential(mut self, credential: GitCredentialContext) -> Self {
         self.credential = Some(credential);
+        self
+    }
+
+    /// Supply an authentication token used for HTTPS Basic Authorization header (e.g. from `gh auth token`).
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
         self
     }
 
@@ -600,6 +608,12 @@ impl GitClient {
             ] {
                 command.env_remove(key);
             }
+        } else if let Some(token) = &self.token {
+            let b64 = to_base64(format!("x-access-token:{token}").as_bytes());
+            let header = format!("http.extraHeader=Authorization: Basic {b64}");
+            command
+                .args(["-c", "credential.interactive=never", "-c", &header])
+                .env("GIT_TERMINAL_PROMPT", "0");
         }
         command
             .args(args)
@@ -612,6 +626,29 @@ impl GitClient {
             .output()
             .map_err(|source| GitError::Io { operation, source })
     }
+}
+
+fn to_base64(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len() * 4 / 3 + 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = if chunk.len() > 1 { chunk[1] } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 fn validate_branch(branch: &str) -> Result<(), GitError> {

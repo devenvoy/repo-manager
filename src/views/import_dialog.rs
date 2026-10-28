@@ -3,7 +3,6 @@
 //! Allows users to inspect discovered sources, edit or confirm the detected handle,
 //! review avatar and provider details, and selectively choose repositories to import.
 
-use crate::components::app_icon::app_badge;
 use crate::components::avatar::source_avatar;
 use crate::components::badge::{branch_chip, checkbox, language_chip, version_pill};
 use crate::components::motion_button::Button;
@@ -287,6 +286,10 @@ pub fn render_import_dialog<T: 'static>(
                                     meta_row = meta_row.child(language_chip(lang, cx.theme()));
                                 }
 
+                                let repo_dir = state.project_dir.join(&repo.name);
+                                let icon_path = crate::components::app_icon::find_local_repo_icon(&repo_dir, &repo.name)
+                                    .or_else(|| crate::components::app_icon::find_cached_repo_icon(&repo.name, Some(&state.discovered.source_handle)));
+
                                 let item = div()
                                     .id(ElementId::Name(format!("pick-row-{idx}").into()))
                                     .px_3p5()
@@ -307,7 +310,7 @@ pub fn render_import_dialog<T: 'static>(
                                         on_toggle(idx, this, window, cx);
                                     }))
                                     .child(checkbox(is_selected, cx.theme()))
-                                    .child(app_badge(&repo.name, 30.))
+                                    .child(crate::components::app_icon::repo_icon(&repo.name, 30., icon_path.as_deref()))
                                     .child(
                                         div()
                                             .flex_1()

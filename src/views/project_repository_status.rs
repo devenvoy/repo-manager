@@ -1,13 +1,13 @@
 //! Repository master/detail browser matching the ArtCraft Release Desk design.
 
-use crate::components::app_icon::app_badge;
+use crate::components::app_icon::repo_icon;
 use crate::components::avatar::source_avatar;
 use crate::components::badge::{branch_chip, language_chip, version_pill};
 use crate::components::motion_button::Button;
 use crate::components::ui_icons::{
     branch_icon, check_icon, copy_icon, download_icon, external_link_icon, refresh_icon,
 };
-use crate::repository_git::RepositoryStatus;
+use crate::repository_git::{RepositoryStatus, repository_owner};
 use crate::styles::CssExt as _;
 use crate::workspace::WorkspaceProject;
 use gpui_kit::base::{Disableable as _, StyledExt as _};
@@ -408,7 +408,30 @@ pub fn render_project_repository_status<
                 .child(label)
         };
 
-        let version_tag = known.as_ref().map_or("v0.10.0", |_| "v0.10.0");
+        let repo_dir = crate::repository_git::resolve_target_path(
+            &project.directory,
+            project.disk_layout,
+            repository_owner(source, repo),
+            &repo.name,
+        );
+        let row_icon_path = crate::components::app_icon::find_local_repo_icon(
+            &repo_dir, &repo.name,
+        )
+        .or_else(|| {
+            crate::components::app_icon::find_cached_repo_icon(
+                &repo.name,
+                Some(repository_owner(source, repo)),
+            )
+        });
+
+        let snapshot_rels = release_desk_store::workspace_releases::load_snapshot_releases(
+            &project.directory,
+            &repo.name,
+        );
+        let version_tag = snapshot_rels
+            .as_ref()
+            .and_then(|r| r.first())
+            .map(|r| r.tag_name.clone());
 
         let row = div()
             .id(ElementId::Name(
@@ -444,7 +467,7 @@ pub fn render_project_repository_status<
                             .flex()
                             .items_center()
                             .gap_2p5()
-                            .child(app_badge(&repo.name, 36.))
+                            .child(repo_icon(&repo.name, 36., row_icon_path.as_deref()))
                             .child(
                                 div()
                                     .flex_1()
@@ -485,16 +508,18 @@ pub fn render_project_repository_status<
                                     .unwrap_or_else(|| "Local Git workspace component".into()),
                             ),
                     )
-                    .child(
-                        div()
+                    .child({
+                        let mut tags = div()
                             .flex()
                             .items_center()
                             .gap_1p5()
                             .flex_wrap()
-                            .child(status_badge)
-                            .child(version_pill(version_tag, cx.theme()))
-                            .child(branch_chip(&repo.default_branch, cx.theme())),
-                    ),
+                            .child(status_badge);
+                        if let Some(ref ver) = version_tag {
+                            tags = tags.child(version_pill(ver, cx.theme()));
+                        }
+                        tags.child(branch_chip(&repo.default_branch, cx.theme()))
+                    }),
             );
         rows = rows.child(row);
     }
@@ -549,6 +574,63 @@ pub fn render_project_repository_status<
             .or_else(|| known.as_ref().map(|k| k.description.clone()))
             .unwrap_or_else(|| "Local Git workspace component".into());
 
+        let detail_icon_path =
+            crate::components::app_icon::find_local_repo_icon(&target_path, &repo.name).or_else(
+                || crate::components::app_icon::find_cached_repo_icon(&repo.name, Some(owner)),
+            );
+
+        let mut meta_badges = div().flex().items_center().gap_2().pt_2().flex_wrap();
+        if let Some(ref lang) = repo.primary_language {
+            meta_badges = meta_badges.child(language_chip(lang, cx.theme()));
+        }
+        meta_badges = meta_badges
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px_2p5()
+                    .py_1()
+                    .rounded_full()
+                    .bg(if is_cloned {
+                        cx.theme().success.opacity(0.12)
+                    } else {
+                        cx.theme().warning.opacity(0.12)
+                    })
+                    .text_color(if is_cloned {
+                        cx.theme().success
+                    } else {
+                        cx.theme().warning
+                    })
+                    .child(check_icon().w(px(10.)).h(px(10.)))
+                    .child(div().text_size(px(11.)).font_bold().child(if is_cloned {
+                        "Code current"
+                    } else {
+                        "Not cloned"
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px_2p5()
+                    .py_1()
+                    .rounded_full()
+                    .bg(cx.theme().secondary.opacity(0.1))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(branch_icon().w(px(11.)).h(px(11.)))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .child(if repo.default_branch.is_empty() {
+                                "main".to_string()
+                            } else {
+                                repo.default_branch.clone()
+                            }),
+                    ),
+            );
+
         // Hero Header matching reference
         let hero = div()
             .flex()
@@ -561,7 +643,7 @@ pub fn render_project_repository_status<
                     .flex()
                     .items_start()
                     .gap_4()
-                    .child(app_badge(&repo.name, 60.))
+                    .child(repo_icon(&repo.name, 60., detail_icon_path.as_deref()))
                     .child(
                         div()
                             .flex()
@@ -594,64 +676,7 @@ pub fn render_project_repository_status<
                                     .text_color(cx.theme().muted_foreground)
                                     .child(app_desc),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .pt_2()
-                                    .flex_wrap()
-                                    .child(language_chip(
-                                        repo.primary_language.as_deref().unwrap_or("Rust"),
-                                        cx.theme(),
-                                    ))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1p5()
-                                            .px_2p5()
-                                            .py_1()
-                                            .rounded_full()
-                                            .bg(if is_cloned {
-                                                cx.theme().success.opacity(0.12)
-                                            } else {
-                                                cx.theme().warning.opacity(0.12)
-                                            })
-                                            .text_color(if is_cloned {
-                                                cx.theme().success
-                                            } else {
-                                                cx.theme().warning
-                                            })
-                                            .child(check_icon().w(px(10.)).h(px(10.)))
-                                            .child(div().text_size(px(11.)).font_bold().child(
-                                                if is_cloned {
-                                                    "Code current"
-                                                } else {
-                                                    "Not cloned"
-                                                },
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1p5()
-                                            .px_2p5()
-                                            .py_1()
-                                            .rounded_full()
-                                            .bg(cx.theme().secondary.opacity(0.1))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(branch_icon().w(px(11.)).h(px(11.)))
-                                            .child(div().text_size(px(11.)).child(
-                                                if repo.default_branch.is_empty() {
-                                                    "main".to_string()
-                                                } else {
-                                                    repo.default_branch.clone()
-                                                },
-                                            )),
-                                    ),
-                            ),
+                            .child(meta_badges),
                     ),
             )
             .child(
@@ -850,7 +875,7 @@ pub fn render_project_repository_status<
                 )
         };
 
-        // Changelog / Scorecard Card matching Reference screenshot
+        // Changelog / Scorecard Card
         let changelog_card = {
             let snapshot_releases = release_desk_store::workspace_releases::load_snapshot_releases(
                 &project.directory,
@@ -858,17 +883,15 @@ pub fn render_project_repository_status<
             );
             let latest_snapshot_release = snapshot_releases.as_ref().and_then(|r| r.first());
 
-            let version_label = latest_snapshot_release
-                .map(|r| r.tag_name.clone())
-                .unwrap_or_else(|| "v0.10.0".to_string());
+            if let Some(rel) = latest_snapshot_release {
+                let version_label = rel.tag_name.clone();
+                let published_date = rel
+                    .published_at
+                    .as_deref()
+                    .map(format_date_short)
+                    .unwrap_or_else(|| "Recent".to_string());
 
-            let published_date = latest_snapshot_release
-                .and_then(|r| r.published_at.as_deref())
-                .map(format_date_short)
-                .unwrap_or_else(|| "Oct 18, 2026".to_string());
-
-            let changelog_items = if let Some(rel) = latest_snapshot_release {
-                if let Some(desc) = &rel.description {
+                let changelog_items: Vec<String> = if let Some(desc) = &rel.description {
                     let items: Vec<String> = desc
                         .lines()
                         .map(|l| l.trim().trim_start_matches(['*', '-', ' ']).to_string())
@@ -880,123 +903,140 @@ pub fn render_project_repository_status<
                         items
                     }
                 } else {
-                    known.as_ref().map_or_else(
-                        || {
-                            vec![
-                                "Verified branch clean and all dependencies resolved.".to_string(),
-                                "Synchronized with origin remote head.".to_string(),
-                            ]
-                        },
-                        |k| k.changelog.clone(),
-                    )
+                    vec!["No release notes provided for this version.".to_string()]
+                };
+
+                let mut notes_list = div().flex().flex_col().gap_2();
+                for item in changelog_items {
+                    notes_list = notes_list.child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap_2p5()
+                            .child(
+                                div()
+                                    .w(px(5.))
+                                    .h(px(5.))
+                                    .mt(px(6.))
+                                    .rounded_full()
+                                    .bg(cx.theme().primary),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(item),
+                            ),
+                    );
                 }
-            } else {
-                known.as_ref().map_or_else(
-                    || {
-                        vec![
-                            "Verified branch clean and all dependencies resolved.".to_string(),
-                            "Synchronized with origin remote head.".to_string(),
-                        ]
-                    },
-                    |k| k.changelog.clone(),
-                )
-            };
 
-            let mut notes_list = div().flex().flex_col().gap_2();
-            for item in changelog_items {
-                notes_list = notes_list.child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_2p5()
-                        .child(
-                            div()
-                                .w(px(5.))
-                                .h(px(5.))
-                                .mt(px(6.))
-                                .rounded_full()
-                                .bg(cx.theme().primary),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(item),
-                        ),
+                let asset_count = rel.assets.len();
+                let header_title = format!(
+                    "{} {} · {} package{}",
+                    repo.name,
+                    version_label,
+                    asset_count,
+                    if asset_count == 1 { "" } else { "s" }
                 );
+
+                let mut assets_list = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(cx.theme().border);
+
+                for asset in &rel.assets {
+                    let formatted_size = match asset.size {
+                        Some(b) if b >= 1_000_000_000 => {
+                            format!("{:.1} GB", b as f64 / 1_000_000_000.0)
+                        }
+                        Some(b) if b >= 1_000_000 => format!("{} MB", b / (1024 * 1024)),
+                        Some(b) if b >= 1_000 => format!("{} KB", b / 1024),
+                        Some(b) => format!("{b} B"),
+                        None => "Unknown size".to_string(),
+                    };
+                    assets_list = assets_list.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(download_icon().w(px(14.)).h(px(14.)))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .child(format!("{} · {}", asset.name, formatted_size)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded_full()
+                                    .bg(cx.theme().primary.opacity(0.1))
+                                    .text_color(cx.theme().primary)
+                                    .text_size(px(11.))
+                                    .font_bold()
+                                    .child("Ready in shelf"),
+                            ),
+                    );
+                }
+
+                div()
+                    .p_5()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(div().font_bold().text_size(px(15.)).child(header_title))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(published_date),
+                            ),
+                    )
+                    .child(notes_list)
+                    .child(assets_list)
+            } else {
+                div()
+                    .p_5()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_bold()
+                            .text_size(px(14.))
+                            .child("No releases published yet"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Release notes and packages will appear here when published upstream or recorded in the snapshot."),
+                    )
             }
-
-            let asset_name = latest_snapshot_release
-                .and_then(|r| r.assets.first().map(|a| a.name.clone()))
-                .unwrap_or_else(|| format!("{}-0.10.0-aarch64.dmg", repo.name));
-
-            let size_label = latest_snapshot_release
-                .and_then(|r| r.assets.first().and_then(|a| a.size))
-                .map(|s| format!("{} MB", s / (1024 * 1024)))
-                .unwrap_or_else(|| {
-                    known
-                        .as_ref()
-                        .map_or("184 MB".to_string(), |k| k.size_estimate.clone())
-                });
-
-            div()
-                .p_5()
-                .rounded_xl()
-                .border_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().background)
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(div().font_bold().text_size(px(15.)).child(format!(
-                            "{version_label} {} {version_label} · 1 DMG",
-                            repo.name
-                        )))
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(published_date),
-                        ),
-                )
-                .child(notes_list)
-                .child(
-                    div()
-                        .pt_3()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(download_icon().w(px(14.)).h(px(14.)))
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .child(format!("{asset_name} · {size_label}")),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .px_2p5()
-                                .py_1()
-                                .rounded_full()
-                                .bg(cx.theme().primary.opacity(0.1))
-                                .text_color(cx.theme().primary)
-                                .text_size(px(11.))
-                                .font_bold()
-                                .child("Ready in shelf"),
-                        ),
-                )
         };
 
         div()

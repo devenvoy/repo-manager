@@ -208,17 +208,45 @@ impl ReleaseDesk {
             import_dialog: None,
         };
         app.apply_appearance(window, cx);
-        let avatar_requests: Vec<_> = app
+        let mut download_requests: Vec<(String, std::path::PathBuf)> = app
             .projects
             .iter()
             .flat_map(|project| &project.sources)
             .filter_map(WorkspaceSource::avatar_cache_request)
             .filter(|(_, path)| !path.is_file())
             .collect();
-        if !avatar_requests.is_empty() {
+
+        for project in &app.projects {
+            for source in &project.sources {
+                for repo in &source.repositories {
+                    let repo_dir = crate::repository_git::resolve_target_path(
+                        &project.directory,
+                        project.disk_layout,
+                        crate::repository_git::repository_owner(source, repo),
+                        &repo.name,
+                    );
+                    if crate::components::app_icon::find_local_repo_icon(&repo_dir, &repo.name)
+                        .is_none()
+                    {
+                        if let Some((url, path)) =
+                            crate::components::app_icon::repo_icon_cache_request(
+                                &repo.name,
+                                Some(crate::repository_git::repository_owner(source, repo)),
+                            )
+                        {
+                            if !path.is_file() {
+                                download_requests.push((url, path));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !download_requests.is_empty() {
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                for (url, path) in avatar_requests {
+                for (url, path) in download_requests {
                     let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path);
                 }
                 let _ = tx.send(());

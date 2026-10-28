@@ -58,64 +58,21 @@ pub fn fetch_releases(
 ) -> Result<Vec<WorkspaceRelease>, String> {
     match provider {
         "github" | "local" => {
-            let effective_owner = if owner == "local" || owner.is_empty() {
-                "storytold"
-            } else {
-                owner
-            };
+            if owner.is_empty() {
+                return Err(format!("Owner is missing for repository {name}."));
+            }
             let repo = RepositoryIdentity {
                 id: GitHubRepositoryId::from_u64(0),
-                owner: AccountLogin::new(effective_owner).map_err(|e| e.to_string())?,
+                owner: AccountLogin::new(owner).map_err(|e| e.to_string())?,
                 name: RepositoryName::new(name).map_err(|e| e.to_string())?,
             };
             match HttpGitHubGateway::new(token).fetch_releases(&repo) {
-                Ok(releases) if !releases.is_empty() => {
-                    Ok(releases.into_iter().map(WorkspaceRelease::from).collect())
-                }
+                Ok(releases) => Ok(releases.into_iter().map(WorkspaceRelease::from).collect()),
                 Err(e) => {
-                    if let Some(app) = release_desk_core::app_catalog::find_known_app(name) {
-                        let binary_clean =
-                            app.binary_name.trim_end_matches(".app").replace(' ', "");
-                        Ok(vec![WorkspaceRelease {
-                            tag_name: "v0.10.0".to_string(),
-                            description: Some(app.changelog.join("\n")),
-                            is_draft: false,
-                            is_prerelease: Some(false),
-                            published_at: Some("2026-10-18T12:00:00Z".to_string()),
-                            assets: vec![WorkspaceAsset {
-                                name: format!("{binary_clean}-0.10.0-aarch64.dmg"),
-                                download_url: format!(
-                                    "https://github.com/{effective_owner}/{name}/releases/download/v0.10.0/{binary_clean}-0.10.0-aarch64.dmg"
-                                ),
-                                size: Some(184 * 1024 * 1024),
-                            }],
-                        }])
-                    } else if provider == "local" {
+                    if provider == "local" {
                         Err(format!("No releases found for local repository {name}."))
                     } else {
                         Err(e.to_string())
-                    }
-                }
-                Ok(_) => {
-                    if let Some(app) = release_desk_core::app_catalog::find_known_app(name) {
-                        let binary_clean =
-                            app.binary_name.trim_end_matches(".app").replace(' ', "");
-                        Ok(vec![WorkspaceRelease {
-                            tag_name: "v0.10.0".to_string(),
-                            description: Some(app.changelog.join("\n")),
-                            is_draft: false,
-                            is_prerelease: Some(false),
-                            published_at: Some("2026-10-18T12:00:00Z".to_string()),
-                            assets: vec![WorkspaceAsset {
-                                name: format!("{binary_clean}-0.10.0-aarch64.dmg"),
-                                download_url: format!(
-                                    "https://github.com/{effective_owner}/{name}/releases/download/v0.10.0/{binary_clean}-0.10.0-aarch64.dmg"
-                                ),
-                                size: Some(184 * 1024 * 1024),
-                            }],
-                        }])
-                    } else {
-                        Ok(Vec::new())
                     }
                 }
             }
@@ -346,41 +303,86 @@ pub fn local_asset_state(
     let Ok(root) = project.canonicalize() else {
         return LocalAssetState::Unavailable;
     };
-    let Ok(owner) = storage_component(owner) else {
+    let Ok(owner_comp) = storage_component(owner) else {
         return LocalAssetState::Unavailable;
     };
-    let Ok(repo) = component(repo) else {
+    let Ok(repo_comp) = component(repo) else {
         return LocalAssetState::Unavailable;
     };
-    let Ok(tag) = storage_component(tag) else {
+    let Ok(tag_comp) = storage_component(tag) else {
         return LocalAssetState::Unavailable;
     };
-    let Ok(name) = component(name) else {
+    let Ok(name_comp) = component(name) else {
         return LocalAssetState::Unavailable;
     };
-    let path = root
-        .join(".release-desk")
-        .join("installers")
-        .join(owner)
-        .join(repo)
-        .join(tag)
-        .join(name);
-    let actual = match path.canonicalize() {
-        Ok(path) => path,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LocalAssetState::Missing,
-        Err(_) => return LocalAssetState::Unavailable,
-    };
-    if !actual.starts_with(&root) {
-        return LocalAssetState::Unavailable;
-    }
-    match std::fs::metadata(actual) {
-        Ok(metadata) if metadata.is_file() && size.is_none() => LocalAssetState::PresentSizeUnknown,
-        Ok(metadata) if metadata.is_file() && Some(metadata.len()) == size => {
-            LocalAssetState::SizeMatches
+
+    let candidates = [
+        root.join(".release-desk")
+            .join("installers")
+            .join(&owner_comp)
+            .join(repo_comp)
+            .join(&tag_comp)
+            .join(name_comp),
+        root.join("Release Dmgs").join(name_comp),
+        root.join("releases").join(name_comp),
+        root.join("installers").join(name_comp),
+        root.join(name_comp),
+    ];
+
+    let mut found_state = LocalAssetState::Missing;
+
+    for candidate in &candidates {
+        if let Ok(actual) = candidate.canonicalize() {
+            if actual.starts_with(&root) {
+                if let Ok(metadata) = std::fs::metadata(&actual) {
+                    if metadata.is_file() {
+                        if size.is_none() {
+                            return LocalAssetState::PresentSizeUnknown;
+                        } else if Some(metadata.len()) == size {
+                            return LocalAssetState::SizeMatches;
+                        } else {
+                            found_state = LocalAssetState::SizeDiffers;
+                        }
+                    }
+                }
+            }
         }
-        Ok(metadata) if metadata.is_file() => LocalAssetState::SizeDiffers,
-        _ => LocalAssetState::Unavailable,
     }
+
+    found_state
+}
+
+/// Inspect the project shelf for previous builds archived in `old/` subdirectories.
+pub fn local_archived_files(project: &Path, repo_name: &str) -> Vec<(String, u64)> {
+    let Ok(root) = project.canonicalize() else {
+        return Vec::new();
+    };
+    let old_dirs = [
+        root.join("Release Dmgs").join("old"),
+        root.join("releases").join("old"),
+        root.join(".release-desk").join("installers").join("old"),
+    ];
+
+    let mut results = Vec::new();
+    let lower_repo = repo_name.to_lowercase();
+
+    for dir in &old_dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    let lower_file = file_name.to_lowercase();
+                    if lower_file.contains(&lower_repo) {
+                        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        results.push((file_name, len));
+                    }
+                }
+            }
+        }
+    }
+
+    results
 }
 
 fn comparable_utc_timestamp(value: &str) -> bool {

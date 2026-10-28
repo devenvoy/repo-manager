@@ -1,6 +1,6 @@
 //! Release shelf backed by fetched provider data and ArtCraft application catalog.
 
-use crate::components::app_icon::app_badge;
+use crate::components::app_icon::repo_icon;
 use crate::components::motion_button::Button;
 use crate::components::ui_icons::{check_icon, download_icon, refresh_icon};
 use crate::styles::CssExt as _;
@@ -15,6 +15,57 @@ use release_desk_store::workspace_releases::{
     LocalAssetState, local_asset_state, newer_release_with_local_older,
 };
 use std::path::Path;
+
+fn package_kind(name: &str) -> &'static str {
+    let lower = name.to_lowercase();
+    if lower.ends_with(".dmg") {
+        "DMG"
+    } else if lower.ends_with(".pkg") {
+        "PKG"
+    } else if lower.ends_with(".exe") {
+        "EXE"
+    } else if lower.ends_with(".msi") {
+        "MSI"
+    } else if lower.ends_with(".appimage") {
+        "AppImage"
+    } else if lower.ends_with(".deb") {
+        "DEB"
+    } else if lower.ends_with(".rpm") {
+        "RPM"
+    } else if lower.ends_with(".apk") {
+        "APK"
+    } else if lower.ends_with(".aab") {
+        "AAB"
+    } else if lower.ends_with(".ipa") {
+        "IPA"
+    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        "Tarball"
+    } else if lower.ends_with(".tar.xz") {
+        "Tarball (xz)"
+    } else if lower.ends_with(".zip") {
+        "ZIP"
+    } else {
+        "Package"
+    }
+}
+
+fn is_supported_package(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".dmg")
+        || lower.ends_with(".pkg")
+        || lower.ends_with(".exe")
+        || lower.ends_with(".msi")
+        || lower.ends_with(".appimage")
+        || lower.ends_with(".deb")
+        || lower.ends_with(".rpm")
+        || lower.ends_with(".apk")
+        || lower.ends_with(".aab")
+        || lower.ends_with(".ipa")
+        || lower.ends_with(".tar.gz")
+        || lower.ends_with(".tgz")
+        || lower.ends_with(".tar.xz")
+        || lower.ends_with(".zip")
+}
 
 fn format_bytes(bytes: Option<u64>) -> String {
     match bytes {
@@ -192,6 +243,23 @@ pub fn render_live_releases<T: 'static>(
                     .map(|k| k.category_name.clone())
                     .unwrap_or_else(|| "Desktop App".to_string());
 
+                let repo_dir = crate::repository_git::resolve_target_path(
+                    project_directory,
+                    release_desk_core::project::DiskLayout::Flat,
+                    &repository.owner,
+                    &repository.repository,
+                );
+                let icon_path = crate::components::app_icon::find_local_repo_icon(
+                    &repo_dir,
+                    &repository.repository,
+                )
+                .or_else(|| {
+                    crate::components::app_icon::find_cached_repo_icon(
+                        &repository.repository,
+                        Some(&repository.owner),
+                    )
+                });
+
                 let releases = match &repository.result {
                     Ok(rels) => rels,
                     Err(err) => {
@@ -210,7 +278,11 @@ pub fn render_live_releases<T: 'static>(
                                         .flex()
                                         .items_center()
                                         .gap_3()
-                                        .child(app_badge(&repository.repository, 36.))
+                                        .child(repo_icon(
+                                            &repository.repository,
+                                            36.,
+                                            icon_path.as_deref(),
+                                        ))
                                         .child(
                                             div()
                                                 .font_bold()
@@ -243,13 +315,16 @@ pub fn render_live_releases<T: 'static>(
                 let active_releases: Vec<_> = releases.iter().filter(|r| !r.is_draft).collect();
                 let latest_release = active_releases.first().copied();
 
-                // Find candidate DMG asset or first asset
+                // Find candidate package asset
                 let target_asset = latest_release.and_then(|rel| {
                     rel.assets
                         .iter()
-                        .find(|a| a.name.ends_with(".dmg"))
+                        .find(|a| is_supported_package(&a.name))
                         .or_else(|| rel.assets.first())
                 });
+                let pkg_kind = target_asset
+                    .map(|a| package_kind(&a.name))
+                    .unwrap_or("Package");
 
                 // Compute local asset state
                 let local_state = match (latest_release, target_asset) {
@@ -311,7 +386,7 @@ pub fn render_live_releases<T: 'static>(
                         .text_color(cx.theme().primary)
                         .text_size(px(11.))
                         .font_bold()
-                        .child("DMG ready")
+                        .child(format!("{pkg_kind} ready"))
                 } else {
                     div()
                         .px_2p5()
@@ -321,7 +396,7 @@ pub fn render_live_releases<T: 'static>(
                         .text_color(cx.theme().muted_foreground)
                         .text_size(px(11.))
                         .font_bold()
-                        .child("No DMG")
+                        .child("No package")
                 };
 
                 let mut card_header_actions = div().flex().items_center().gap_2();
@@ -336,9 +411,9 @@ pub fn render_live_releases<T: 'static>(
                     let size = asset.size;
 
                     let btn_label = if is_up_to_date {
-                        "Re-add file"
+                        "Re-add file".to_string()
                     } else {
-                        "Download DMG"
+                        format!("Download {pkg_kind}")
                     };
 
                     card_header_actions = card_header_actions.child(
@@ -376,7 +451,11 @@ pub fn render_live_releases<T: 'static>(
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(app_badge(&repository.repository, 44.))
+                            .child(repo_icon(
+                                &repository.repository,
+                                44.,
+                                icon_path.as_deref(),
+                            ))
                             .child(
                                 div()
                                     .flex()
@@ -503,12 +582,32 @@ pub fn render_live_releases<T: 'static>(
                                     format!("{} · Ready in project", format_bytes(a.size))
                                 })
                             } else {
-                                "Click Download DMG to store locally".to_string()
+                                format!("Click Download {pkg_kind} to store locally")
                             }),
                     );
 
                 // Slot 3: Previous build in old/
-                let older_tag = newer_update.map(|(_, older)| older);
+                let archived_files = release_desk_store::workspace_releases::local_archived_files(
+                    project_directory,
+                    &repository.repository,
+                );
+                let (slot3_label, slot3_subtext) = if let Some((arch_name, arch_size)) = archived_files.first() {
+                    (
+                        format!("{arch_name} · {}", format_bytes(Some(*arch_size))),
+                        "Archived build preserved in old/ folder".to_string(),
+                    )
+                } else if let Some((_, older)) = newer_update {
+                    (
+                        format!("Archived {older}"),
+                        "Previous build preserved in old/ folder".to_string(),
+                    )
+                } else {
+                    (
+                        "None in shelf".to_string(),
+                        "Earlier versions are automatically kept in old/".to_string(),
+                    )
+                };
+
                 let slot3 = div()
                     .flex_1()
                     .min_w(px(200.))
@@ -527,19 +626,12 @@ pub fn render_live_releases<T: 'static>(
                             .text_color(cx.theme().muted_foreground)
                             .child("PREVIOUS BUILD (OLD/)"),
                     )
-                    .child(div().text_size(px(16.)).font_bold().child(
-                        older_tag
-                            .map_or("None in shelf".to_string(), |t| format!("Archived {t}")),
-                    ))
+                    .child(div().text_size(px(16.)).font_bold().child(slot3_label))
                     .child(
                         div()
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(if older_tag.is_some() {
-                                "Previous build preserved in old/ folder"
-                            } else {
-                                "Earlier versions are automatically kept in old/"
-                            }),
+                            .child(slot3_subtext),
                     );
 
                 let slots_row = div().flex().flex_wrap().gap_3().child(slot1).child(slot2).child(slot3);
@@ -549,12 +641,7 @@ pub fn render_live_releases<T: 'static>(
                     let text = rel
                         .description
                         .as_deref()
-                        .filter(|d| !d.trim().is_empty())
-                        .or_else(|| {
-                            known
-                                .as_ref()
-                                .and_then(|k| k.changelog.first().map(|s| s.as_str()))
-                        })?;
+                        .filter(|d| !d.trim().is_empty())?;
 
                     if text.is_empty() {
                         return None;

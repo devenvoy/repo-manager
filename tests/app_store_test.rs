@@ -113,3 +113,61 @@ fn test_app_store_3_state_actions_and_metrics() {
     let fc = items.iter().find(|i| i.metadata.id == "filmcraft").unwrap();
     assert_eq!(fc.state, AppActionState::Installable);
 }
+
+#[test]
+fn test_dynamic_repo_icon_discovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_dir = temp.path().join("PhotoCraft");
+    let icon_dir = repo_dir.join("assets").join("app-icon");
+    std::fs::create_dir_all(&icon_dir).unwrap();
+
+    let icon_file = icon_dir.join("photocraft-1024.png");
+    std::fs::write(&icon_file, b"fake png data").unwrap();
+
+    // Verify local icon discovery finds the 1024 png
+    let found = repo_manager::components::app_icon::find_local_repo_icon(&repo_dir, "photocraft");
+    assert_eq!(found, Some(icon_file));
+
+    // Verify cache request for ArtCraft apps points to WebP on getartcraft.com
+    let cache_req = repo_manager::components::app_icon::repo_icon_cache_request(
+        "photocraft",
+        Some("storytold"),
+    );
+    assert!(cache_req.is_some());
+    let (url, path) = cache_req.unwrap();
+    assert_eq!(
+        url,
+        "https://getartcraft.com/images/apps/photocraft/icon.webp"
+    );
+    assert!(path.to_string_lossy().contains("artcraft-photocraft.webp"));
+
+    // Verify cache request for non-ArtCraft generic repo points to GitHub owner avatar
+    let generic_req = repo_manager::components::app_icon::repo_icon_cache_request(
+        "PaliCAD",
+        Some("braydennilsen"),
+    );
+    assert!(generic_req.is_some());
+    let (gen_url, gen_path) = generic_req.unwrap();
+    assert_eq!(gen_url, "https://github.com/braydennilsen.png");
+    assert!(
+        gen_path
+            .to_string_lossy()
+            .contains("braydennilsen-palicad.png")
+    );
+}
+
+#[test]
+fn test_archived_files_discovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let old_dir = temp.path().join("Release Dmgs").join("old");
+    std::fs::create_dir_all(&old_dir).unwrap();
+
+    let old_dmg = old_dir.join("PhotoCraft-0.9.0-aarch64.dmg");
+    std::fs::write(&old_dmg, b"dummy old dmg bytes").unwrap();
+
+    let archived =
+        release_desk_store::workspace_releases::local_archived_files(temp.path(), "photocraft");
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].0, "PhotoCraft-0.9.0-aarch64.dmg");
+    assert_eq!(archived[0].1, 19);
+}

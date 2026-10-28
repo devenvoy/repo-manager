@@ -3,10 +3,11 @@
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::Icon;
 use gpui_kit::{
-    IntoElement, ParentElement as _, Styled as _, div, linear_color_stop, linear_gradient, px, rgb,
-    white,
+    IntoElement, ParentElement as _, Styled as _, div, img, linear_color_stop, linear_gradient, px,
+    rgb, white,
 };
 use release_desk_core::app_catalog::find_known_app;
+use std::path::{Path, PathBuf};
 
 pub fn app_icon(id: &str) -> Icon {
     let data: &[u8] = match id {
@@ -127,4 +128,187 @@ pub fn app_badge(name: &str, size_px: f32) -> impl IntoElement + 'static {
                 .child(icon_text),
         )
         .into_any_element()
+}
+
+/// Check if a repo name matches known ArtCraft application catalog names.
+pub fn is_artcraft_app(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(
+        lower.as_str(),
+        "photocraft"
+            | "vectorcraft"
+            | "filmcraft"
+            | "lightcraft"
+            | "pdfcraft"
+            | "effectcraft"
+            | "designcraft"
+            | "figcraft"
+            | "wordcraft"
+            | "soundcraft"
+            | "deckcraft"
+            | "cadcraft"
+            | "gridcraft"
+            | "artcraft"
+    )
+}
+
+/// Discovers an on-disk high-resolution icon from a cloned repository folder.
+pub fn find_local_repo_icon(repo_dir: &Path, repo_name: &str) -> Option<PathBuf> {
+    if !repo_dir.is_dir() {
+        return None;
+    }
+    let clean_name = repo_name.to_lowercase();
+    let candidates = [
+        format!("assets/app-icon/{repo_name}-1024.png"),
+        format!("assets/app-icon/{clean_name}-1024.png"),
+        format!("assets/app-icon/{repo_name}-macos-512.png"),
+        format!("assets/app-icon/{clean_name}-macos-512.png"),
+        format!("assets/app-icon/{repo_name}.png"),
+        format!("assets/app-icon/{clean_name}.png"),
+        "assets/app-icon/icon.png".to_string(),
+        "assets/icon.png".to_string(),
+        "assets/icons/icon.png".to_string(),
+        "assets/icons/512x512.png".to_string(),
+        "assets/logo.png".to_string(),
+        format!("assets/{repo_name}.png"),
+        format!("assets/{clean_name}.png"),
+        "resources/icon.png".to_string(),
+        "resources/app-icon.png".to_string(),
+        "static/icon.png".to_string(),
+        "public/icon.png".to_string(),
+        "web/icons/Icon-512.png".to_string(),
+        "AppIcon.png".to_string(),
+        "icon.png".to_string(),
+        "logo.png".to_string(),
+    ];
+
+    for rel in &candidates {
+        let candidate = repo_dir.join(rel);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    // Scan assets/app-icon for any png or webp
+    let app_icon_dir = repo_dir.join("assets").join("app-icon");
+    if let Ok(entries) = std::fs::read_dir(app_icon_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if ext.eq_ignore_ascii_case("png") || ext.eq_ignore_ascii_case("webp") {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Checks the local repo icon cache for an already downloaded icon.
+pub fn find_cached_repo_icon(repo_name: &str, owner: Option<&str>) -> Option<PathBuf> {
+    let base_dir = crate::settings::settings_path()
+        .ok()?
+        .parent()?
+        .join("repo-icons");
+    if !base_dir.is_dir() {
+        return None;
+    }
+    let safe = |part: &str| {
+        part.chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+            .to_lowercase()
+    };
+    let clean_name = safe(repo_name);
+    let mut candidates = vec![
+        base_dir.join(format!("artcraft-{clean_name}.webp")),
+        base_dir.join(format!("artcraft-{clean_name}.png")),
+        base_dir.join(format!("{clean_name}.png")),
+        base_dir.join(format!("{clean_name}.webp")),
+    ];
+    if let Some(o) = owner {
+        let clean_owner = safe(o);
+        candidates.push(base_dir.join(format!("{clean_owner}-{clean_name}.png")));
+        candidates.push(base_dir.join(format!("{clean_owner}.png")));
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Formulates a cache request to fetch an icon from remote CDN or GitHub.
+pub fn repo_icon_cache_request(repo_name: &str, owner: Option<&str>) -> Option<(String, PathBuf)> {
+    let base_dir = crate::settings::settings_path()
+        .ok()?
+        .parent()?
+        .join("repo-icons");
+    let safe = |part: &str| {
+        part.chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+            .to_lowercase()
+    };
+    let clean_name = safe(repo_name);
+
+    if find_known_app(repo_name).is_some() || is_artcraft_app(repo_name) {
+        let target = base_dir.join(format!("artcraft-{clean_name}.webp"));
+        if !target.is_file() {
+            return Some((
+                format!("https://getartcraft.com/images/apps/{clean_name}/icon.webp"),
+                target,
+            ));
+        }
+    }
+
+    if let Some(o) = owner {
+        if !o.is_empty() && o != "local" {
+            let clean_owner = safe(o);
+            let target = base_dir.join(format!("{clean_owner}-{clean_name}.png"));
+            if !target.is_file() {
+                return Some((format!("https://github.com/{o}.png"), target));
+            }
+        }
+    }
+
+    None
+}
+
+/// Renders a real image repository icon if available on disk or cached,
+/// otherwise falls back to a clean gradient monogram badge.
+pub fn repo_icon(name: &str, size_px: f32, icon_path: Option<&Path>) -> impl IntoElement + 'static {
+    let radius = (size_px * 0.28).round();
+
+    if let Some(path) = icon_path {
+        if path.is_file() {
+            return div()
+                .w(px(size_px))
+                .h(px(size_px))
+                .rounded(px(radius))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .shadow_sm()
+                .child(
+                    img(path.to_path_buf())
+                        .w(px(size_px))
+                        .h(px(size_px))
+                        .rounded(px(radius)),
+                )
+                .into_any_element();
+        }
+    }
+
+    app_badge(name, size_px).into_any_element()
 }
