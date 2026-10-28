@@ -1,9 +1,10 @@
 //! Reusable badge, pill, and tag components.
 
+use crate::colors::rgb;
 use crate::components::ui_icons::{branch_icon, check_icon, globe_icon, lock_icon};
 use crate::styles::CssExt as _;
 use gpui_kit::component::Theme;
-use gpui_kit::{IntoElement, ParentElement as _, Styled as _, div, px, rgb};
+use gpui_kit::{IntoElement, ParentElement as _, Styled as _, div, px};
 
 /// Pill visual variant.
 #[derive(Clone, Copy, Debug, PartialEq)]

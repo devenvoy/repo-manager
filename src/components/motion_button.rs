@@ -1,5 +1,6 @@
 //! Shared button surface with directional light, cursor tracking, and spring press motion.
 
+use crate::colors::rgb;
 use gpui_kit::base::{Disableable, StyledExt as _};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Icon;
@@ -132,9 +133,9 @@ impl RenderOnce for Button {
         } else if is_ghost || self.is_outline {
             cx.theme().foreground
         } else if is_dark {
-            gpui_kit::rgb(0xF8FAFC).into()
+            rgb(0xF8FAFC).into()
         } else {
-            gpui_kit::rgb(0x0F172A).into()
+            rgb(0x0F172A).into()
         };
 
         let (top_bg, bottom_bg, border_color, shadows, spotlight_color) = if is_ghost {
@@ -152,14 +153,14 @@ impl RenderOnce for Button {
             )
         } else if is_primary {
             let (t, b) = if hovered {
-                (gpui_kit::rgb(0x4087F8), gpui_kit::rgb(0x2154DD))
+                (rgb(0x4087F8), rgb(0x2154DD))
             } else {
-                (gpui_kit::rgb(0x3B82F6), gpui_kit::rgb(0x1D4ED8))
+                (rgb(0x3B82F6), rgb(0x1D4ED8))
             };
-            let border = gpui_kit::rgb(0x1D4ED8).opacity(0.85);
+            let border = rgb(0x1D4ED8).opacity(0.85);
             let s = vec![
                 BoxShadow {
-                    color: gpui_kit::rgb(0x2563EB)
+                    color: rgb(0x2563EB)
                         .opacity(if hovered { 0.46 } else { 0.38 })
                         .into(),
                     offset: point(px(0.), px(4.)),
@@ -198,14 +199,14 @@ impl RenderOnce for Button {
             )
         } else if is_danger {
             let (t, b) = if hovered {
-                (gpui_kit::rgb(0xF24E4E), gpui_kit::rgb(0xBD2020))
+                (rgb(0xF24E4E), rgb(0xBD2020))
             } else {
-                (gpui_kit::rgb(0xEF4444), gpui_kit::rgb(0xB91C1C))
+                (rgb(0xEF4444), rgb(0xB91C1C))
             };
-            let border = gpui_kit::rgb(0xB91C1C).opacity(0.85);
+            let border = rgb(0xB91C1C).opacity(0.85);
             let s = vec![
                 BoxShadow {
-                    color: gpui_kit::rgb(0xEF4444)
+                    color: rgb(0xEF4444)
                         .opacity(if hovered { 0.45 } else { 0.38 })
                         .into(),
                     offset: point(px(0.), px(4.)),
@@ -264,9 +265,9 @@ impl RenderOnce for Button {
             )
         } else if is_dark {
             let (t, b) = if hovered {
-                (gpui_kit::rgb(0x2C324A), gpui_kit::rgb(0x1A1D2D))
+                (rgb(0x2C324A), rgb(0x1A1D2D))
             } else {
-                (gpui_kit::rgb(0x282D42), gpui_kit::rgb(0x181A28))
+                (rgb(0x282D42), rgb(0x181A28))
             };
             let border = gpui_kit::white().opacity(if hovered { 0.16 } else { 0.12 });
             let s = vec![
@@ -308,9 +309,9 @@ impl RenderOnce for Button {
             )
         } else {
             let (t, b) = if hovered {
-                (gpui_kit::rgb(0xFFFFFF), gpui_kit::rgb(0xEDF0F5))
+                (rgb(0xFFFFFF), rgb(0xEDF0F5))
             } else {
-                (gpui_kit::rgb(0xFFFFFF), gpui_kit::rgb(0xF2F4F7))
+                (rgb(0xFFFFFF), rgb(0xF2F4F7))
             };
             let border = gpui_kit::black().opacity(0.12);
             let s = vec![
@@ -448,9 +449,9 @@ impl RenderOnce for Button {
                         .py_1()
                         .rounded_md()
                         .bg(if is_dark {
-                            gpui_kit::rgb(0x1E293B)
+                            rgb(0x1E293B)
                         } else {
-                            gpui_kit::rgb(0x0F172A)
+                            rgb(0x0F172A)
                         })
                         .text_color(gpui_kit::white())
                         .text_size(px(11.))

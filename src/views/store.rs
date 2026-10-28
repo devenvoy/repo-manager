@@ -1,5 +1,6 @@
 //! App Store grid and full detail page for the desktop design preview.
 
+use crate::colors::hsla;
 use crate::components::app_icon::app_icon;
 use crate::components::motion_button::Button;
 use crate::components::ui_icons::{layers_icon, store_icon};
@@ -82,7 +83,7 @@ pub fn render_store<
                         .p_6()
                         .rounded_2xl()
                         .bg(cx.theme().primary)
-                        .text_color(gpui_kit::hsla(0., 0., 1., 1.))
+                        .text_color(hsla(0., 0., 1., 1.))
                         .flex()
                         .items_center()
                         .justify_between()
@@ -97,7 +98,7 @@ pub fn render_store<
                                     div()
                                         .text_size(px(10.))
                                         .font_bold()
-                                        .text_color(gpui_kit::hsla(232. / 360., 0.8, 0.9, 1.))
+                                        .text_color(hsla(232. / 360., 0.8, 0.9, 1.))
                                         .child("LOCAL APPLICATION ECOSYSTEM"),
                                 )
                                 .child(
@@ -109,7 +110,7 @@ pub fn render_store<
                                 .child(
                                     div()
                                         .text_size(px(12.))
-                                        .text_color(gpui_kit::hsla(232. / 360., 0.6, 0.9, 0.9))
+                                        .text_color(hsla(232. / 360., 0.6, 0.9, 0.9))
                                         .child("Automatic installation and update notifications are not available yet."),
                                 ),
                         )
@@ -118,7 +119,7 @@ pub fn render_store<
                                 .w(px(60.))
                                 .h(px(60.))
                                 .rounded_2xl()
-                                .bg(gpui_kit::hsla(0., 0., 1., 0.15))
+                                .bg(hsla(0., 0., 1., 0.15))
                                 .flex()
                                 .items_center()
                                 .justify_center()

@@ -1,5 +1,6 @@
 //! Release Desk main application state, shell orchestration, and layout rendering.
 
+use crate::colors::hsla;
 use crate::components::{render_header, render_sidebar};
 use crate::settings::{self, Appearance, Settings, StartView};
 use crate::state::WorkspaceTab;
@@ -365,38 +366,38 @@ impl ReleaseDesk {
         let is_dark = mode.is_dark();
         Theme::update(cx, |theme| {
             if is_dark {
-                theme.background = gpui_kit::hsla(216.0 / 360.0, 0.23, 0.086, 1.0);
-                theme.secondary = gpui_kit::hsla(219.0 / 360.0, 0.21, 0.13, 1.0);
-                theme.border = gpui_kit::hsla(218.0 / 360.0, 0.20, 0.22, 1.0);
-                theme.primary = gpui_kit::hsla(232.0 / 360.0, 1.0, 0.78, 1.0);
-                theme.primary_foreground = gpui_kit::hsla(225.0 / 360.0, 0.32, 0.09, 1.0);
-                theme.foreground = gpui_kit::hsla(215.0 / 360.0, 0.22, 0.93, 1.0);
-                theme.muted_foreground = gpui_kit::hsla(216.0 / 360.0, 0.17, 0.65, 1.0);
-                theme.muted = gpui_kit::hsla(229.0 / 360.0, 0.35, 0.21, 1.0);
-                theme.success = gpui_kit::hsla(150.0 / 360.0, 0.58, 0.60, 1.0);
-                theme.warning = gpui_kit::hsla(38.0 / 360.0, 0.86, 0.62, 1.0);
-                theme.danger = gpui_kit::hsla(5.0 / 360.0, 1.0, 0.75, 1.0);
+                theme.background = hsla(216.0 / 360.0, 0.23, 0.086, 1.0);
+                theme.secondary = hsla(219.0 / 360.0, 0.21, 0.13, 1.0);
+                theme.border = hsla(218.0 / 360.0, 0.20, 0.22, 1.0);
+                theme.primary = hsla(232.0 / 360.0, 1.0, 0.78, 1.0);
+                theme.primary_foreground = hsla(225.0 / 360.0, 0.32, 0.09, 1.0);
+                theme.foreground = hsla(215.0 / 360.0, 0.22, 0.93, 1.0);
+                theme.muted_foreground = hsla(216.0 / 360.0, 0.17, 0.65, 1.0);
+                theme.muted = hsla(229.0 / 360.0, 0.35, 0.21, 1.0);
+                theme.success = hsla(150.0 / 360.0, 0.58, 0.60, 1.0);
+                theme.warning = hsla(38.0 / 360.0, 0.86, 0.62, 1.0);
+                theme.danger = hsla(5.0 / 360.0, 1.0, 0.75, 1.0);
             } else {
-                theme.background = gpui_kit::hsla(216.0 / 360.0, 0.23, 0.96, 1.0);
-                theme.secondary = gpui_kit::hsla(0.0, 0.0, 1.0, 1.0);
-                theme.border = gpui_kit::hsla(218.0 / 360.0, 0.20, 0.87, 1.0);
-                theme.primary = gpui_kit::hsla(232.0 / 360.0, 0.72, 0.52, 1.0);
-                theme.primary_foreground = gpui_kit::hsla(0.0, 0.0, 1.0, 1.0);
-                theme.foreground = gpui_kit::hsla(218.0 / 360.0, 0.28, 0.12, 1.0);
-                theme.muted_foreground = gpui_kit::hsla(216.0 / 360.0, 0.14, 0.40, 1.0);
-                theme.muted = gpui_kit::hsla(232.0 / 360.0, 0.73, 0.94, 1.0);
-                theme.success = gpui_kit::hsla(151.0 / 360.0, 0.68, 0.28, 1.0);
-                theme.warning = gpui_kit::hsla(35.0 / 360.0, 1.0, 0.30, 1.0);
-                theme.danger = gpui_kit::hsla(5.0 / 360.0, 0.71, 0.40, 1.0);
+                theme.background = hsla(216.0 / 360.0, 0.23, 0.96, 1.0);
+                theme.secondary = hsla(0.0, 0.0, 1.0, 1.0);
+                theme.border = hsla(218.0 / 360.0, 0.20, 0.87, 1.0);
+                theme.primary = hsla(232.0 / 360.0, 0.72, 0.52, 1.0);
+                theme.primary_foreground = hsla(0.0, 0.0, 1.0, 1.0);
+                theme.foreground = hsla(218.0 / 360.0, 0.28, 0.12, 1.0);
+                theme.muted_foreground = hsla(216.0 / 360.0, 0.14, 0.40, 1.0);
+                theme.muted = hsla(232.0 / 360.0, 0.73, 0.94, 1.0);
+                theme.success = hsla(151.0 / 360.0, 0.68, 0.28, 1.0);
+                theme.warning = hsla(35.0 / 360.0, 1.0, 0.30, 1.0);
+                theme.danger = hsla(5.0 / 360.0, 0.71, 0.40, 1.0);
             }
             theme.button = theme.secondary;
             theme.button_foreground = theme.foreground;
             theme.button_primary = theme.primary;
             theme.button_primary_foreground = theme.primary_foreground;
             theme.button_primary_hover =
-                gpui_kit::hsla(232.0 / 360.0, 0.90, if is_dark { 0.83 } else { 0.47 }, 1.0);
+                hsla(232.0 / 360.0, 0.90, if is_dark { 0.83 } else { 0.47 }, 1.0);
             theme.button_primary_active =
-                gpui_kit::hsla(232.0 / 360.0, 0.90, if is_dark { 0.70 } else { 0.40 }, 1.0);
+                hsla(232.0 / 360.0, 0.90, if is_dark { 0.70 } else { 0.40 }, 1.0);
             theme.tokens.button_primary = theme.button_primary.into();
             theme.tokens.button_primary_hover = theme.button_primary_hover.into();
             theme.tokens.button_primary_active = theme.button_primary_active.into();

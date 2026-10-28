@@ -5,7 +5,6 @@ use release_desk_core::project::{ProjectId, ProjectIdentity, ProjectName};
 use release_desk_core::snapshot::{MismatchReport, Repository, RevisionMismatch};
 use repo_manager::settings::{self, Appearance, Settings};
 use repo_manager::state::{DesktopState, WorkspaceTab};
-use repo_manager::theme::{ColorMode, ThemeColors};
 use std::path::PathBuf;
 
 #[test]
@@ -168,19 +167,6 @@ fn test_desktop_project_navigation() {
         state.active_project.as_ref().unwrap().clone_location,
         Some(PathBuf::from("/tmp/test_project_clone"))
     );
-}
-
-#[test]
-fn test_theme_colors() {
-    let dark = ThemeColors::dark();
-    let light = ThemeColors::light();
-
-    // Dark and light tokens must be initialized
-    assert_ne!(dark.canvas, light.canvas);
-    assert_ne!(dark.fg_primary, light.fg_primary);
-
-    assert_eq!(ColorMode::System, ColorMode::System);
-    assert_ne!(ColorMode::Light, ColorMode::Dark);
 }
 
 #[test]

@@ -1,10 +1,11 @@
 //! Fictional app icons and rich procedural app badges for Release Desk.
 
+use crate::colors::rgb;
 use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::Icon;
 use gpui_kit::{
     IntoElement, ParentElement as _, Styled as _, div, img, linear_color_stop, linear_gradient, px,
-    rgb, white,
+    white,
 };
 use release_desk_core::app_catalog::find_known_app;
 use std::path::{Path, PathBuf};

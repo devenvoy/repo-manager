@@ -15,6 +15,7 @@ members = [
 ]
 
 [dependencies]
+bigcolor = "1.2.1"
 gpui-kit = "0.7"
 release-desk-application = { path = "crates/release-desk-application" }
 release-desk-core = { path = "crates/release-desk-core" }

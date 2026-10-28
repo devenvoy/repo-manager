@@ -4,10 +4,11 @@
 //! `.css_modal()`, and `.css_page_scroll()`) directly on any `Styled` element,
 //! matching modern utility-first CSS frameworks like Tailwind CSS.
 
+use crate::colors::rgb;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::Theme;
 use gpui_kit::component::scroll::{Scrollable, ScrollableElement};
-use gpui_kit::{Styled, px, rgb};
+use gpui_kit::{Styled, px};
 
 /// Extension trait providing modular, reusable CSS styling classes.
 pub trait CssExt: Styled + StyledExt + ScrollableElement + Sized {
