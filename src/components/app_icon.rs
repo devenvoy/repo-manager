@@ -76,16 +76,32 @@ fn app_initials(name: &str) -> String {
 
 /// Render an eye-catching, modern application icon badge with dynamic gradients and typography.
 pub fn app_badge(name: &str, size_px: f32) -> impl IntoElement + 'static {
+    let clean_id = name.to_lowercase().replace(' ', "-");
+    let radius = (size_px * 0.28).round();
+
+    if matches!(
+        clean_id.as_str(),
+        "prism" | "quill" | "atlas" | "orbit" | "relay"
+    ) {
+        return div()
+            .w(px(size_px))
+            .h(px(size_px))
+            .rounded(px(radius))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .shadow_sm()
+            .child(app_icon(&clean_id).w(px(size_px)).h(px(size_px)))
+            .into_any_element();
+    }
+
     let known = find_known_app(name);
     let (icon_text, (col_start, col_end)) = if let Some(app) = &known {
         (app.icon_text.clone(), app_palette(&app.id))
     } else {
-        let clean_id = name.to_lowercase().replace(' ', "-");
         (app_initials(name), app_palette(&clean_id))
     };
 
     let font_size = (size_px * 0.42).round();
-    let radius = (size_px * 0.28).round();
 
     div()
         .w(px(size_px))
@@ -110,4 +126,5 @@ pub fn app_badge(name: &str, size_px: f32) -> impl IntoElement + 'static {
                 .text_color(white())
                 .child(icon_text),
         )
+        .into_any_element()
 }

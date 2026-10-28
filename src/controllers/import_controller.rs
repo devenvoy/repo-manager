@@ -33,13 +33,27 @@ impl ReleaseDesk {
             return;
         }
 
-        self.import_dialog = Some(views::import_dialog::ImportDialogState::new(
+        let state = views::import_dialog::ImportDialogState::new(
             project.id,
             project.directory,
             discovered,
             window,
             cx,
-        ));
+        );
+
+        // Pre-cache avatar proactively in background so it displays immediately in the dialog
+        if let Some(ref url) = state.discovered.avatar_url {
+            if let Some(ref path) = state.avatar_path {
+                let url_clone = url.clone();
+                let path_clone = path.clone();
+                std::thread::spawn(move || {
+                    let _ =
+                        release_desk_store::source_fetcher::cache_avatar(&url_clone, &path_clone);
+                });
+            }
+        }
+
+        self.import_dialog = Some(state);
         cx.notify();
     }
 

@@ -5,9 +5,9 @@
 
 use crate::components::app_icon::app_badge;
 use crate::components::avatar::source_avatar;
-use crate::components::badge::{branch_chip, language_chip, version_pill};
+use crate::components::badge::{branch_chip, checkbox, language_chip, version_pill};
 use crate::components::motion_button::Button;
-use crate::components::ui_icons::check_icon;
+use crate::components::provider_icon::provider_icon;
 use crate::modules::importer::DiscoveredWorkspace;
 use crate::styles::CssExt as _;
 use gpui_kit::base::{Disableable as _, StyledExt as _};
@@ -16,7 +16,8 @@ use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Styled as _, Window, div, px,
+    AppContext as _, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use std::path::PathBuf;
 
@@ -27,6 +28,7 @@ pub struct ImportDialogState {
     pub discovered: DiscoveredWorkspace,
     pub handle_input: Entity<InputState>,
     pub selected_indices: Vec<bool>,
+    pub avatar_path: Option<PathBuf>,
 }
 
 impl ImportDialogState {
@@ -43,12 +45,35 @@ impl ImportDialogState {
         handle_input.update(cx, |input, cx| {
             input.set_value(discovered.source_handle.clone(), window, cx);
         });
+
+        let avatar_path = crate::settings::settings_path().ok().and_then(|p| {
+            p.parent().map(|dir| {
+                let safe = |part: &str| {
+                    part.chars()
+                        .map(|ch| {
+                            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                                ch
+                            } else {
+                                '_'
+                            }
+                        })
+                        .collect::<String>()
+                };
+                dir.join("avatars").join(format!(
+                    "{}-{}.png",
+                    safe(&discovered.provider),
+                    safe(&discovered.source_handle)
+                ))
+            })
+        });
+
         Self {
             project_id,
             project_dir,
             discovered,
             handle_input,
             selected_indices: vec![true; repo_count],
+            avatar_path,
         }
     }
 
@@ -148,7 +173,12 @@ pub fn render_import_dialog<T: 'static>(
                         .flex()
                         .items_center()
                         .gap_4()
-                        .child(source_avatar(&state.discovered.source_handle, None, 52., cx.theme()))
+                        .child(source_avatar(
+                            &state.discovered.source_handle,
+                            state.avatar_path.as_deref(),
+                            52.,
+                            cx.theme(),
+                        ))
                         .child(
                             div()
                                 .flex_1()
@@ -177,6 +207,10 @@ pub fn render_import_dialog<T: 'static>(
                                                 .border_color(cx.theme().border)
                                                 .text_size(px(9.))
                                                 .font_bold()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(provider_icon(crate::workspace::ProviderChoice::GitHub).w(px(12.)).h(px(12.)))
                                                 .child("GitHub"),
                                         ),
                                 )
@@ -210,91 +244,98 @@ pub fn render_import_dialog<T: 'static>(
                                 })),
                         ),
                 )
-                // Repositories Scrollable List
-                .child({
-                    let mut list = div()
+                // Repositories Scrollable List Container (.repo-pick style)
+                .child(
+                    div()
+                        .mx_5()
+                        .my_1()
                         .flex_1()
                         .min_h_0()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().background)
                         .overflow_y_scrollbar()
-                        .px_5()
-                        .py_2()
-                        .flex()
-                        .flex_col()
-                        .gap_2();
+                        .child({
+                            let mut list = div().flex().flex_col();
 
-                    for (idx, repo) in state.discovered.repositories.iter().enumerate() {
-                        let is_selected = state.selected_indices.get(idx).copied().unwrap_or(false);
-                        let name_clone = repo.name.clone();
+                            for (idx, repo) in state.discovered.repositories.iter().enumerate() {
+                                let is_selected = state.selected_indices.get(idx).copied().unwrap_or(false);
+                                let name_clone = repo.name.clone();
 
-                        let item = div()
-                            .css_row_item(cx.theme(), is_selected)
-                            .flex()
-                            .items_center()
-                            .gap_3p5()
-                            .child(
-                                if is_selected {
-                                    Button::new(format!("check-repo-{idx}"))
-                                        .icon(check_icon())
-                                        .primary()
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            on_toggle(idx, this, window, cx);
-                                        }))
-                                } else {
-                                    Button::new(format!("check-repo-{idx}"))
-                                        .label("  ")
-                                        .outline()
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            on_toggle(idx, this, window, cx);
-                                        }))
-                                },
-                            )
-                            .child(app_badge(&name_clone, 32.))
-                            .child(
-                                div()
-                                    .flex_1()
+                                let mut title_row = div().flex().items_center().gap_2().child(
+                                    div()
+                                        .font_bold()
+                                        .text_size(px(13.))
+                                        .truncate()
+                                        .child(name_clone),
+                                );
+                                if repo.is_private {
+                                    title_row = title_row.child(
+                                        div()
+                                            .css_chip(cx.theme())
+                                            .child("Private"),
+                                    );
+                                }
+
+                                let mut meta_row = div().flex().items_center().gap_1p5();
+                                if let Some(ref ver) = repo.latest_version {
+                                    meta_row = meta_row.child(version_pill(ver, cx.theme()));
+                                }
+                                meta_row = meta_row.child(branch_chip(&repo.default_branch, cx.theme()));
+                                if let Some(ref lang) = repo.primary_language {
+                                    meta_row = meta_row.child(language_chip(lang, cx.theme()));
+                                }
+
+                                let item = div()
+                                    .id(ElementId::Name(format!("pick-row-{idx}").into()))
+                                    .px_3p5()
+                                    .py_2p5()
+                                    .border_b_1()
+                                    .border_color(cx.theme().border.opacity(0.5))
+                                    .bg(if is_selected {
+                                        cx.theme().primary.opacity(0.04)
+                                    } else {
+                                        cx.theme().background
+                                    })
+                                    .hover(|s| s.bg(cx.theme().muted.opacity(0.25)))
+                                    .cursor_pointer()
                                     .flex()
-                                    .flex_col()
-                                    .gap_1()
+                                    .items_center()
+                                    .gap_3()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        on_toggle(idx, this, window, cx);
+                                    }))
+                                    .child(checkbox(is_selected, cx.theme()))
+                                    .child(app_badge(&repo.name, 30.))
                                     .child(
                                         div()
+                                            .flex_1()
+                                            .min_w_0()
                                             .flex()
-                                            .items_center()
-                                            .gap_2()
+                                            .flex_col()
+                                            .gap_0p5()
+                                            .child(title_row)
                                             .child(
                                                 div()
-                                                    .font_bold()
-                                                    .text_size(px(13.))
-                                                    .child(name_clone.clone()),
-                                            )
-                                            .child(version_pill(
-                                                repo.latest_version.as_deref().unwrap_or("v0.10.0"),
-                                                cx.theme(),
-                                            ))
-                                            .child(branch_chip(&repo.default_branch, cx.theme()))
-                                            .child(if let Some(ref lang) = repo.primary_language {
-                                                language_chip(lang, cx.theme()).into_any_element()
-                                            } else {
-                                                div().into_any_element()
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .line_clamp(1)
-                                            .child(
-                                                repo.description
-                                                    .clone()
-                                                    .unwrap_or_else(|| "Application repository".to_string()),
+                                                    .text_size(px(11.))
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .line_clamp(1)
+                                                    .child(
+                                                        repo.description
+                                                            .clone()
+                                                            .unwrap_or_else(|| "Application repository".to_string()),
+                                                    ),
                                             ),
-                                    ),
-                            );
+                                    )
+                                    .child(meta_row);
 
-                        list = list.child(item);
-                    }
+                                list = list.child(item);
+                            }
 
-                    list
-                })
+                            list
+                        }),
+                )
                 // Dialog Footer Action Bar
                 .child(
                     div()
@@ -331,7 +372,6 @@ pub fn render_import_dialog<T: 'static>(
                                         .disabled(selected_count == 0)
                                         .on_click(cx.listener({
                                             move |this, _, window, cx| {
-                                                // Handle is retrieved from input in main
                                                 on_confirm(String::new(), this, window, cx);
                                             }
                                         })),

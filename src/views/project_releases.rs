@@ -416,108 +416,95 @@ pub fn render_live_releases<T: 'static>(
                     )
                     .child(card_header_actions);
 
-                // Slot 1: Newest on GitHub
+                // Slot 1: Newest Upstream
                 let slot1 = div()
                     .flex_1()
                     .min_w(px(200.))
-                    .rounded_lg()
+                    .rounded_xl()
                     .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary.opacity(0.04))
-                    .overflow_hidden()
+                    .border_color(cx.theme().primary.opacity(0.35))
+                    .bg(cx.theme().primary.opacity(0.05))
+                    .p_4()
                     .flex()
-                    .items_stretch()
-                    .child(div().w(px(3.5)).flex_shrink_0().bg(cx.theme().primary))
+                    .flex_col()
+                    .gap_1()
                     .child(
                         div()
-                            .p_3p5()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .font_bold()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("NEWEST ON GITHUB"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(16.))
-                                    .font_bold()
-                                    .child(
-                                        latest_release
-                                            .map(|r| r.tag_name.clone())
-                                            .unwrap_or_else(|| "None".to_string()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(
-                                        target_asset.map_or("No package assets".to_string(), |a| {
-                                            format!("{} · {}", a.name, format_bytes(a.size))
-                                        }),
-                                    ),
-                            ),
-                    );
-
-                // Slot 2: On the shelf
-                let slot2 = div()
-                    .flex_1()
-                    .min_w(px(200.))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary.opacity(0.04))
-                    .overflow_hidden()
-                    .flex()
-                    .items_stretch()
-                    .child(
-                        div()
-                            .w(px(3.5))
-                            .flex_shrink_0()
-                            .bg(if is_up_to_date {
-                                cx.theme().success
-                            } else {
-                                cx.theme().primary.opacity(0.4)
-                            }),
+                            .text_size(px(10.))
+                            .font_bold()
+                            .text_color(cx.theme().primary)
+                            .child("NEWEST UPSTREAM"),
                     )
                     .child(
                         div()
-                            .p_3p5()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
+                            .text_size(px(16.))
+                            .font_bold()
                             .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .font_bold()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("ON THE SHELF"),
-                            )
-                            .child(div().text_size(px(15.)).font_bold().child(if is_up_to_date {
-                                target_asset
-                                    .map(|a| a.name.clone())
-                                    .unwrap_or_else(|| "Downloaded".to_string())
-                            } else {
-                                "Not downloaded".to_string()
-                            }))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(if is_up_to_date {
-                                        target_asset.map_or("Ready to install".to_string(), |a| {
-                                            format!("{} · Ready in project", format_bytes(a.size))
-                                        })
-                                    } else {
-                                        "Click Download DMG to store locally".to_string()
-                                    }),
+                                latest_release
+                                    .map(|r| r.tag_name.clone())
+                                    .unwrap_or_else(|| "None".to_string()),
                             ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                target_asset.map_or("No package assets".to_string(), |a| {
+                                    format!("{} · {}", a.name, format_bytes(a.size))
+                                }),
+                            ),
+                    );
+
+                // Slot 2: Selected Asset
+                let slot2 = div()
+                    .flex_1()
+                    .min_w(px(200.))
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(if is_up_to_date {
+                        cx.theme().success.opacity(0.4)
+                    } else {
+                        cx.theme().border
+                    })
+                    .bg(if is_up_to_date {
+                        cx.theme().success.opacity(0.05)
+                    } else {
+                        cx.theme().secondary.opacity(0.04)
+                    })
+                    .p_4()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .font_bold()
+                            .text_color(if is_up_to_date {
+                                cx.theme().success
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child("SELECTED ASSET"),
+                    )
+                    .child(div().text_size(px(16.)).font_bold().child(if is_up_to_date {
+                        target_asset
+                            .map(|a| a.name.clone())
+                            .unwrap_or_else(|| "Downloaded".to_string())
+                    } else {
+                        "Not downloaded".to_string()
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if is_up_to_date {
+                                target_asset.map_or("Ready to install".to_string(), |a| {
+                                    format!("{} · Ready in project", format_bytes(a.size))
+                                })
+                            } else {
+                                "Click Download DMG to store locally".to_string()
+                            }),
                     );
 
                 // Slot 3: Previous build in old/
@@ -525,47 +512,34 @@ pub fn render_live_releases<T: 'static>(
                 let slot3 = div()
                     .flex_1()
                     .min_w(px(200.))
-                    .rounded_lg()
+                    .rounded_xl()
                     .border_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().secondary.opacity(0.04))
-                    .overflow_hidden()
+                    .p_4()
                     .flex()
-                    .items_stretch()
+                    .flex_col()
+                    .gap_1()
                     .child(
                         div()
-                            .w(px(3.5))
-                            .flex_shrink_0()
-                            .bg(cx.theme().muted_foreground.opacity(0.3)),
+                            .text_size(px(10.))
+                            .font_bold()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("PREVIOUS BUILD (OLD/)"),
                     )
+                    .child(div().text_size(px(16.)).font_bold().child(
+                        older_tag
+                            .map_or("None in shelf".to_string(), |t| format!("Archived {t}")),
+                    ))
                     .child(
                         div()
-                            .p_3p5()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .font_bold()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("PREVIOUS BUILD IN OLD/"),
-                            )
-                            .child(div().text_size(px(15.)).font_bold().child(
-                                older_tag
-                                    .map_or("None in shelf".to_string(), |t| format!("Archived {t}")),
-                            ))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(if older_tag.is_some() {
-                                        "Previous build preserved in old/ folder"
-                                    } else {
-                                        "Earlier versions are automatically kept in old/"
-                                    }),
-                            ),
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(if older_tag.is_some() {
+                                "Previous build preserved in old/ folder"
+                            } else {
+                                "Earlier versions are automatically kept in old/"
+                            }),
                     );
 
                 let slots_row = div().flex().flex_wrap().gap_3().child(slot1).child(slot2).child(slot3);

@@ -110,7 +110,6 @@ pub trait CssExt: Styled + StyledExt + ScrollableElement + Sized {
             .flex()
             .flex_col()
             .gap_5()
-            .h(px(640.))
             .overflow_y_scrollbar()
     }
 

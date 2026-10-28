@@ -501,7 +501,8 @@ pub fn render_project_repository_status<
 
     let rail = div()
         .css_rail(cx.theme())
-        .h(px(680.))
+        .flex_1()
+        .min_h_0()
         .child(rail_header)
         .child(rows);
 
@@ -1031,17 +1032,20 @@ pub fn render_project_repository_status<
     div()
         .flex()
         .flex_col()
-        .gap_5()
+        .flex_1()
+        .min_h_0()
+        .gap_4()
         .child(header)
         .child(
             div()
                 .flex()
+                .flex_1()
+                .min_h_0()
                 .border_1()
                 .border_color(cx.theme().border)
                 .rounded_xl()
                 .overflow_hidden()
                 .bg(cx.theme().background)
-                .h(px(680.))
                 .child(rail)
                 .child(detail_panel),
         )

@@ -74,3 +74,33 @@ pub fn language_chip(language: &str, theme: &Theme) -> impl IntoElement {
         .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(dot_color))
         .child(language.to_string())
 }
+
+/// Compact 18x18 native-style checkbox matching the HTML design preview.
+pub fn checkbox(checked: bool, theme: &Theme) -> impl IntoElement {
+    let mut box_el = div()
+        .w(px(18.))
+        .h(px(18.))
+        .rounded(px(4.))
+        .border_1()
+        .border_color(if checked { theme.primary } else { theme.border })
+        .bg(if checked {
+            theme.primary
+        } else {
+            theme.background
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0();
+
+    if checked {
+        box_el = box_el.child(
+            check_icon()
+                .w(px(12.))
+                .h(px(12.))
+                .text_color(theme.primary_foreground),
+        );
+    }
+
+    box_el
+}

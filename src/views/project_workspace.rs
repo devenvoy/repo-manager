@@ -120,64 +120,75 @@ pub fn render_project_workspace<
             .into_any_element(),
     };
 
-    div()
-        .css_page_scroll()
+    let top_header = div()
+        .flex()
+        .items_center()
+        .justify_between()
         .child(
             div()
                 .flex()
                 .items_center()
-                .justify_between()
+                .gap_3()
+                .child(provider_icon(project.provider))
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(provider_icon(project.provider))
+                        .flex_col()
+                        .gap_1()
                         .child(
                             div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(27.))
-                                        .font_bold()
-                                        .child(project.name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(format!(
-                                            "{} · {}",
-                                            project.provider.label(),
-                                            project.directory.display()
-                                        )),
-                                ),
+                                .text_size(px(27.))
+                                .font_bold()
+                                .child(project.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!(
+                                    "{} · {}",
+                                    project.provider.label(),
+                                    project.directory.display()
+                                )),
                         ),
-                )
-                .child(
-                    Button::new("back-to-projects")
-                        .label("← All projects")
-                        .ghost()
-                        .on_click(cx.listener(move |this, _, _, cx| on_back(this, cx))),
                 ),
         )
-        .child(tabs)
         .child(
-            if matches!(section, ProjectSection::Overview | ProjectSection::Settings) {
+            Button::new("back-to-projects")
+                .label("← All projects")
+                .ghost()
+                .on_click(cx.listener(move |this, _, _, cx| on_back(this, cx))),
+        );
+
+    if matches!(section, ProjectSection::Overview | ProjectSection::Settings) {
+        div()
+            .css_page_scroll()
+            .child(top_header)
+            .child(tabs)
+            .child(
                 div()
                     .p_6()
                     .rounded_xl()
                     .border_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().background)
-                    .child(body)
-                    .into_any_element()
-            } else {
-                div().flex_1().min_h_0().child(body).into_any_element()
-            },
-        )
+                    .child(body),
+            )
+            .into_any_element()
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .size_full()
+            .gap_5()
+            .p_6()
+            .child(top_header)
+            .child(tabs)
+            .child(div().flex_1().min_h_0().child(body))
+            .into_any_element()
+    }
 }
 
 fn empty_section<T: 'static>(title: &str, message: &str, cx: &Context<T>) -> impl IntoElement {
