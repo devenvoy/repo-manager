@@ -10,7 +10,7 @@ use gpui_kit::{
     Styled as _, Window, div, linear_color_stop, linear_gradient, point, px,
 };
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 struct VisualState {
@@ -20,6 +20,7 @@ struct VisualState {
     anchor_x: Option<f32>,
     anchor_y: Option<f32>,
     presses: u64,
+    last_click: Option<Instant>,
 }
 
 type ButtonClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -34,6 +35,7 @@ pub struct Button {
     variant: ButtonVariant,
     is_outline: bool,
     disabled: bool,
+    debounce: Duration,
     on_click: Option<ButtonClickHandler>,
 }
 
@@ -48,6 +50,7 @@ impl Button {
             variant: ButtonVariant::Default,
             is_outline: false,
             disabled: false,
+            debounce: Duration::from_millis(300),
             on_click: None,
         }
     }
@@ -74,6 +77,16 @@ impl Button {
 
     pub fn loading(mut self, loading: bool) -> Self {
         self.loading = loading;
+        self
+    }
+
+    pub fn debounce(mut self, duration: Duration) -> Self {
+        self.debounce = duration;
+        self
+    }
+
+    pub fn debounce_ms(mut self, millis: u64) -> Self {
+        self.debounce = Duration::from_millis(millis);
         self
     }
 
@@ -344,6 +357,7 @@ impl RenderOnce for Button {
 
         let surface_id: SharedString = format!("btn-surf-{:?}", self.id).into();
         let click_handler = self.on_click.clone();
+        let debounce = self.debounce;
 
         let mut surface = div()
             .id(ElementId::Name(surface_id))
@@ -489,10 +503,27 @@ impl RenderOnce for Button {
                     if disabled {
                         return;
                     }
-                    visual.update(cx, |state, cx| {
+
+                    let now = Instant::now();
+                    let should_fire = visual.update(cx, |state, cx| {
+                        if !debounce.is_zero() {
+                            if let Some(last) = state.last_click {
+                                if now.duration_since(last) < debounce {
+                                    return false;
+                                }
+                            }
+                        }
+                        state.last_click = Some(now);
                         state.presses = state.presses.wrapping_add(1);
                         cx.notify();
+                        true
                     });
+
+                    if !should_fire {
+                        return;
+                    }
+
+                    cx.stop_propagation();
                     if let Some(handler) = &click_handler {
                         handler(event, window, cx);
                     }
@@ -519,5 +550,51 @@ impl RenderOnce for Button {
         } else {
             surface.into_any_element()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_button_debounce_default_and_custom() {
+        let btn = Button::new("test-btn");
+        assert_eq!(btn.debounce, Duration::from_millis(300));
+
+        let btn_custom = btn.debounce(Duration::from_millis(150));
+        assert_eq!(btn_custom.debounce, Duration::from_millis(150));
+
+        let btn_ms = Button::new("test-ms").debounce_ms(500);
+        assert_eq!(btn_ms.debounce, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_debounce_click_filter() {
+        let mut state = VisualState::default();
+        let debounce = Duration::from_millis(300);
+
+        // First click succeeds
+        let t0 = Instant::now();
+        state.last_click = Some(t0);
+        state.presses += 1;
+
+        // Immediate duplicate click (10ms later) should be dropped
+        let t1 = t0 + Duration::from_millis(10);
+        let should_fire = if let Some(last) = state.last_click {
+            t1.duration_since(last) >= debounce
+        } else {
+            true
+        };
+        assert!(!should_fire, "Immediate duplicate click must be debounced");
+
+        // Click after 350ms should succeed
+        let t2 = t0 + Duration::from_millis(350);
+        let should_fire = if let Some(last) = state.last_click {
+            t2.duration_since(last) >= debounce
+        } else {
+            true
+        };
+        assert!(should_fire, "Click after debounce window must be allowed");
     }
 }
