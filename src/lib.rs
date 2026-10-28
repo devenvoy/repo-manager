@@ -5,6 +5,7 @@ pub mod colors;
 pub mod components;
 pub mod controllers;
 pub mod git_credential_helper;
+pub mod icon_catalog;
 pub mod modules;
 pub mod repository_git;
 pub mod settings;

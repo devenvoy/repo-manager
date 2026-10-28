@@ -2,6 +2,7 @@
 
 use crate::colors::rgb;
 use crate::components::icons::{branch_icon, check_icon, globe_icon, lock_icon};
+use crate::icon_catalog::{Language, LanguageColor, language_icon_for_name};
 use crate::styles::CssExt as _;
 use gpui_kit::component::Theme;
 use gpui_kit::{IntoElement, ParentElement as _, Styled as _, div, px};
@@ -74,23 +75,16 @@ pub fn visibility_chip(is_private: bool, theme: &Theme) -> impl IntoElement {
 
 /// Language indicator chip with syntax color dot.
 pub fn language_chip(language: &str, theme: &Theme) -> impl IntoElement {
-    let dot_color = match language.to_lowercase().as_str() {
-        "rust" => rgb(0xDEA584),
-        "dart" => rgb(0x00B4AB),
-        "python" => rgb(0x3572A5),
-        "typescript" | "ts" => rgb(0x3178C6),
-        "javascript" | "js" => rgb(0xF7DF1E),
-        "swift" => rgb(0xF05138),
-        "kotlin" => rgb(0xA97BFF),
-        "go" => rgb(0x00ADD8),
-        _ => rgb(0x8B949E),
-    };
+    let dot_color = rgb(Language::from_name(language)
+        .map_or(LanguageColor::Unknown, Language::color)
+        .rgb());
 
     div()
         .css_chip(theme)
         .flex()
         .items_center()
         .gap_2()
+        .child(language_icon_for_name(language).w(px(14.)).h(px(14.)))
         .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(dot_color))
         .child(language.to_string())
 }
