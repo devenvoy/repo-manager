@@ -60,70 +60,102 @@ pub(crate) fn profile_image<T: 'static>(
     source: &WorkspaceSource,
     cx: &Context<T>,
 ) -> gpui_kit::AnyElement {
-    if let Some((_, path)) = source
-        .avatar_cache_request()
-        .filter(|(_, path)| path.is_file())
-    {
-        img(path)
-            .w(px(52.))
-            .h(px(52.))
-            .rounded_full()
-            .border_2()
-            .border_color(cx.theme().border)
-            .into_any_element()
-    } else {
-        let initial = source
-            .display_name
-            .as_deref()
-            .or(Some(&source.handle))
-            .and_then(|name| name.chars().find(|c| c.is_alphanumeric()))
-            .unwrap_or('?')
-            .to_uppercase()
-            .to_string();
-
-        let choice = provider_choice(&source.provider);
-        div()
-            .relative()
-            .w(px(52.))
-            .h(px(52.))
-            .child(
-                div()
-                    .w(px(52.))
-                    .h(px(52.))
-                    .rounded_full()
-                    .bg(cx.theme().primary.opacity(0.85))
-                    .border_2()
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(20.))
-                    .font_bold()
-                    .text_color(gpui_kit::white())
-                    .child(initial),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom(px(-2.))
-                    .right(px(-2.))
-                    .w(px(20.))
-                    .h(px(20.))
-                    .rounded_full()
-                    .bg(cx.theme().background)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        crate::components::provider_icon::provider_icon(choice)
+    if let Some((url, path)) = source.avatar_cache_request() {
+        if path.is_file() {
+            return div()
+                .relative()
+                .w(px(52.))
+                .h(px(52.))
+                .child(
+                    img(path)
+                        .w(px(52.))
+                        .h(px(52.))
+                        .rounded_full()
+                        .border_2()
+                        .border_color(cx.theme().border),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(-2.))
+                        .right(px(-2.))
+                        .w(px(20.))
+                        .h(px(20.))
+                        .rounded_full()
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            crate::components::provider_icon::provider_icon(provider_choice(
+                                &source.provider,
+                            ))
                             .w(px(12.))
                             .h(px(12.)),
-                    ),
-            )
-            .into_any_element()
+                        ),
+                )
+                .into_any_element();
+        } else {
+            let path_clone = path.clone();
+            std::thread::spawn(move || {
+                let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path_clone);
+            });
+        }
     }
+
+    let initial = source
+        .display_name
+        .as_deref()
+        .or(Some(&source.handle))
+        .and_then(|name| name.chars().find(|c| c.is_alphanumeric()))
+        .unwrap_or('?')
+        .to_uppercase()
+        .to_string();
+
+    let choice = provider_choice(&source.provider);
+    div()
+        .relative()
+        .w(px(52.))
+        .h(px(52.))
+        .child(
+            div()
+                .w(px(52.))
+                .h(px(52.))
+                .rounded_full()
+                .bg(cx.theme().primary.opacity(0.85))
+                .border_2()
+                .border_color(cx.theme().border)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(20.))
+                .font_bold()
+                .text_color(gpui_kit::white())
+                .child(initial),
+        )
+        .child(
+            div()
+                .absolute()
+                .bottom(px(-2.))
+                .right(px(-2.))
+                .w(px(20.))
+                .h(px(20.))
+                .rounded_full()
+                .bg(cx.theme().background)
+                .border_1()
+                .border_color(cx.theme().border)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    crate::components::provider_icon::provider_icon(choice)
+                        .w(px(12.))
+                        .h(px(12.)),
+                ),
+        )
+        .into_any_element()
 }
 
 /// The Sources tab shows people; repository choices live in a separate dialog.
@@ -154,11 +186,7 @@ pub fn render_project_sources<
     on_dialog: FDialog,
     on_open: FOpen,
 ) -> impl IntoElement {
-    let mut people = div()
-        .grid()
-        .grid_cols(if sources.len() > 1 { 2 } else { 1 })
-        .gap_4()
-        .w_full();
+    let mut people = div().flex().flex_wrap().gap_4().items_start();
     for (source_index, source) in sources.iter().enumerate() {
         let selected = source.repositories.iter().filter(|r| r.selected).count();
         let profile_url = match source.provider.as_str() {
@@ -236,12 +264,12 @@ pub fn render_project_sources<
             .unwrap_or("Connected Git profile.");
         people = people.child(
             div()
-                .w_full()
+                .w(px(350.))
                 .p_5()
                 .rounded_xl()
                 .border_1()
                 .border_color(cx.theme().border)
-                .bg(cx.theme().secondary)
+                .bg(cx.theme().secondary.opacity(0.45))
                 .flex()
                 .flex_col()
                 .gap_4()
@@ -393,16 +421,16 @@ pub fn render_project_sources<
                     let mut card = div()
                         .p_4()
                         .rounded_lg()
-                        .border_1()
+                        .border_2()
                         .border_color(if selected {
                             cx.theme().primary
                         } else {
-                            cx.theme().border
+                            cx.theme().border.opacity(0.6)
                         })
                         .bg(if selected {
                             cx.theme().primary.opacity(0.12)
                         } else {
-                            cx.theme().background
+                            cx.theme().secondary.opacity(0.35)
                         });
                     if selected {
                         card = card.border_l_4().border_color(cx.theme().primary);
@@ -419,14 +447,42 @@ pub fn render_project_sources<
                                     .gap_3()
                                     .child(header)
                                     .child(
-                                        gpui_kit::component::checkbox::Checkbox::new(format!(
-                                            "pick-repo-{source_index}-{repo_index}"
-                                        ))
-                                        .checked(selected)
-                                        .accessibility_label(format!("Select {}", repo.full_name))
-                                        .on_change(cx.listener(move |this, _, _, cx| {
-                                            on_toggle(source_index, repo_index, this, cx)
-                                        })),
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_3()
+                                            .child(if selected {
+                                                div()
+                                                    .px_2()
+                                                    .py_0p5()
+                                                    .rounded_full()
+                                                    .bg(cx.theme().primary.opacity(0.2))
+                                                    .text_color(cx.theme().primary)
+                                                    .text_size(px(11.))
+                                                    .font_bold()
+                                                    .child("✓ Selected")
+                                                    .into_any_element()
+                                            } else {
+                                                div()
+                                                    .px_2()
+                                                    .py_0p5()
+                                                    .rounded_full()
+                                                    .bg(cx.theme().secondary.opacity(0.4))
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .text_size(px(11.))
+                                                    .child("Unselected")
+                                                    .into_any_element()
+                                            })
+                                            .child(
+                                                gpui_kit::component::checkbox::Checkbox::new(
+                                                    format!("pick-repo-{source_index}-{repo_index}"),
+                                                )
+                                                .checked(selected)
+                                                .accessibility_label(format!("Select {}", repo.full_name))
+                                                .on_change(cx.listener(move |this, _, _, cx| {
+                                                    on_toggle(source_index, repo_index, this, cx)
+                                                })),
+                                            ),
                                     ),
                             )
                             .child(
@@ -460,6 +516,9 @@ pub fn render_project_sources<
                         .pt_4()
                         .border_t_1()
                         .border_color(cx.theme().border)
+                        .bg(cx.theme().secondary.opacity(0.3))
+                        .p_4()
+                        .rounded_lg()
                         .flex()
                         .items_center()
                         .justify_between()
@@ -467,26 +526,33 @@ pub fn render_project_sources<
                         .child(
                             div()
                                 .flex()
-                                .flex_col()
-                                .gap_1()
+                                .items_center()
+                                .gap_3()
+                                .child(crate::components::ui_icons::folder_icon())
                                 .child(
                                     div()
-                                        .font_bold()
-                                        .text_size(px(13.))
-                                        .child(if actionable_count > 0 {
-                                            format!("{total_selected} selected · {actionable_count} ready to clone")
-                                        } else {
-                                            format!("{total_selected} selected · all cloned")
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(format!(
-                                            "Clone destination: {}",
-                                            project_directory.display()
-                                        )),
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .font_bold()
+                                                .text_size(px(13.))
+                                                .child(if actionable_count > 0 {
+                                                    format!("{total_selected} selected · {actionable_count} ready to clone")
+                                                } else {
+                                                    format!("{total_selected} selected · all cloned")
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!(
+                                                    "Clone destination: {}",
+                                                    project_directory.display()
+                                                )),
+                                        ),
                                 ),
                         )
                         .child(
@@ -498,7 +564,7 @@ pub fn render_project_sources<
                                 })),
                         )
                         .with_animation(
-                            "reveal-clone-review",
+                            format!("reveal-clone-review-{source_index}-{total_selected}"),
                             Animation::new(Duration::from_millis(260)),
                             |this, progress| {
                                 this.opacity(progress).top(px((1.0 - progress) * 8.0))

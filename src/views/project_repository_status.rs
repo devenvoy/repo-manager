@@ -7,7 +7,11 @@ use gpui_kit::base::{Disableable as _, StyledExt};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, Window, div, px};
+use gpui_kit::{
+    Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Window, div, linear_color_stop, linear_gradient,
+    px,
+};
 use release_desk_git::CloneStatus;
 
 fn language_color(lang: &str) -> gpui_kit::Hsla {
@@ -257,7 +261,14 @@ pub fn render_project_repository_status<
         let owner = crate::repository_git::repository_owner(source, repo);
         let color = status_color(status, cx);
         let row = div()
+            .id(ElementId::Name(
+                format!("repo-row-{source_index}-{repo_index}").into(),
+            ))
             .flex()
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                on_select(source_index, repo_index, this, cx);
+            }))
             .border_b_1()
             .border_color(cx.theme().border)
             .bg(if is_active {
@@ -354,7 +365,13 @@ pub fn render_project_repository_status<
         &repo.default_branch
     };
     let provider = crate::workspace::ProviderChoice::from_source_provider(&source.provider);
-    let browser_url = source.repository_browser_url(repo);
+    let browser_url = source.repository_browser_url(repo).or_else(|| {
+        Some(format!(
+            "https://github.com/{}/{}",
+            crate::repository_git::repository_owner(source, repo),
+            repo.name
+        ))
+    });
     let clone_path = project.disk_layout.compute_clone_path(
         &project.directory,
         crate::repository_git::repository_owner(source, repo),
@@ -370,53 +387,116 @@ pub fn render_project_repository_status<
             "Not cloned locally"
         });
 
-    let repo_avatar = if let Some((_, path)) = source
-        .avatar_cache_request()
-        .filter(|(_, path)| path.is_file())
-    {
-        div()
-            .relative()
-            .child(
-                gpui_kit::img(path)
-                    .w(px(56.))
-                    .h(px(56.))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(cx.theme().border),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom(px(-3.))
-                    .right(px(-3.))
-                    .p_1()
-                    .rounded_md()
-                    .bg(cx.theme().background)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        crate::components::provider_icon::provider_icon(provider)
-                            .w(px(14.))
-                            .h(px(14.)),
-                    ),
-            )
-            .into_any_element()
+    let repo_avatar = if let Some((url, path)) = source.avatar_cache_request() {
+        if path.is_file() {
+            div()
+                .relative()
+                .child(
+                    gpui_kit::img(path)
+                        .w(px(56.))
+                        .h(px(56.))
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(cx.theme().border),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(-3.))
+                        .right(px(-3.))
+                        .p_1()
+                        .rounded_md()
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            crate::components::provider_icon::provider_icon(provider)
+                                .w(px(14.))
+                                .h(px(14.)),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            let path_clone = path.clone();
+            std::thread::spawn(move || {
+                let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path_clone);
+            });
+            div()
+                .relative()
+                .w(px(56.))
+                .h(px(56.))
+                .rounded_xl()
+                .bg(linear_gradient(
+                    135.,
+                    linear_color_stop(cx.theme().primary, 0.),
+                    linear_color_stop(cx.theme().primary.opacity(0.6), 1.),
+                ))
+                .border_1()
+                .border_color(cx.theme().border)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_size(px(22.))
+                        .font_bold()
+                        .text_color(gpui_kit::white())
+                        .child(
+                            repo.name
+                                .chars()
+                                .next()
+                                .unwrap_or('R')
+                                .to_uppercase()
+                                .to_string(),
+                        ),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(-3.))
+                        .right(px(-3.))
+                        .p_1()
+                        .rounded_md()
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            crate::components::provider_icon::provider_icon(provider)
+                                .w(px(12.))
+                                .h(px(12.)),
+                        ),
+                )
+                .into_any_element()
+        }
     } else {
         div()
             .relative()
             .w(px(56.))
             .h(px(56.))
             .rounded_xl()
-            .bg(cx.theme().primary.opacity(0.12))
+            .bg(linear_gradient(
+                135.,
+                linear_color_stop(cx.theme().primary, 0.),
+                linear_color_stop(cx.theme().primary.opacity(0.6), 1.),
+            ))
             .border_1()
-            .border_color(cx.theme().primary.opacity(0.35))
+            .border_color(cx.theme().border)
             .flex()
             .items_center()
             .justify_center()
             .child(
-                crate::components::provider_icon::provider_icon(provider)
-                    .w(px(28.))
-                    .h(px(28.)),
+                div()
+                    .text_size(px(22.))
+                    .font_bold()
+                    .text_color(gpui_kit::white())
+                    .child(
+                        repo.name
+                            .chars()
+                            .next()
+                            .unwrap_or('R')
+                            .to_uppercase()
+                            .to_string(),
+                    ),
             )
             .into_any_element()
     };
@@ -507,6 +587,22 @@ pub fn render_project_repository_status<
                 .px_3()
                 .py_1()
                 .rounded_full()
+                .bg(cx.theme().secondary)
+                .child(branch_icon())
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .child(format!("Local branch: {checked_out_branch}")),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_3()
+                .py_1()
+                .rounded_full()
                 .bg(status_color.opacity(0.15))
                 .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(status_color))
                 .child(
@@ -515,6 +611,23 @@ pub fn render_project_repository_status<
                         .text_color(status_color)
                         .font_medium()
                         .child(label),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_3()
+                .py_1()
+                .rounded_full()
+                .bg(cx.theme().secondary)
+                .child(crate::components::ui_icons::folder_icon())
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(clone_path.display().to_string()),
                 ),
         );
     if repo.is_fork {
@@ -747,9 +860,8 @@ pub fn render_project_repository_status<
                         .child(
                             Button::new("open-repository-provider")
                                 .icon(crate::components::provider_icon::provider_icon(provider))
-                                .label(format!("Open in {}", provider.label()))
-                                .outline()
-                                .disabled(browser_url.is_none())
+                                .label(format!("Open on {}", provider.label()))
+                                .primary()
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if let Some(url) = &browser_url {
                                         on_open(url.clone(), this, cx);

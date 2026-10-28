@@ -1517,7 +1517,7 @@ impl ReleaseDesk {
 
     fn open_source_url(&mut self, url: &str, cx: &mut Context<Self>) {
         let safe = url::Url::parse(url).is_ok_and(|parsed| {
-            parsed.scheme() == "https"
+            (parsed.scheme() == "https" || parsed.scheme() == "http")
                 && parsed.host_str().is_some()
                 && parsed.username().is_empty()
                 && parsed.password().is_none()
@@ -1527,6 +1527,7 @@ impl ReleaseDesk {
             cx.notify();
             return;
         }
+        self.message = format!("Opening {url} in browser…");
         cx.open_url(url);
         #[cfg(target_os = "macos")]
         {
@@ -1542,6 +1543,7 @@ impl ReleaseDesk {
                 .args(["/C", "start", "", url])
                 .spawn();
         }
+        cx.notify();
     }
 
     fn toggle_source_repo(

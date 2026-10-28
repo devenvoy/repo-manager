@@ -65,8 +65,18 @@ fn default_provider() -> String {
 impl WorkspaceSource {
     /// Browsable HTTPS page corresponding to a provider clone URL.
     pub fn repository_browser_url(&self, repo: &SourceRepository) -> Option<String> {
+        if repo.clone_url.starts_with("git@") {
+            if let Some((host, path)) = repo
+                .clone_url
+                .strip_prefix("git@")
+                .and_then(|s| s.split_once(':'))
+            {
+                let clean_path = path.trim_end_matches(".git");
+                return Some(format!("https://{host}/{clean_path}"));
+            }
+        }
         if let Ok(mut url) = url::Url::parse(&repo.clone_url) {
-            if url.scheme() == "https" && url.host_str().is_some() {
+            if (url.scheme() == "https" || url.scheme() == "http") && url.host_str().is_some() {
                 let _ = url.set_username("");
                 let _ = url.set_password(None);
                 let clean_path = url.path().trim_end_matches(".git").to_string();
@@ -86,7 +96,13 @@ impl WorkspaceSource {
             "gitlab" => Some(format!("https://gitlab.com/{target}")),
             "bitbucket" => Some(format!("https://bitbucket.org/{target}")),
             "codeberg" => Some(format!("https://codeberg.org/{target}")),
-            _ => None,
+            "azuredevops" | "azure" => Some(format!("https://dev.azure.com/{target}")),
+            "gitea" => Some(format!("https://gitea.com/{target}")),
+            "forgejo" => Some(format!("https://codeberg.org/{target}")),
+            "aws" | "awscodecommit" => Some(format!(
+                "https://console.aws.amazon.com/codesuite/codecommit/repositories/{target}"
+            )),
+            _ => Some(format!("https://github.com/{target}")),
         }
     }
 
@@ -98,10 +114,9 @@ impl WorkspaceSource {
             }
         }
         match self.provider.to_lowercase().as_str() {
-            "github" if !self.handle.is_empty() => Some(format!(
-                "https://avatars.githubusercontent.com/{}",
-                self.handle
-            )),
+            "github" if !self.handle.is_empty() => {
+                Some(format!("https://github.com/{}.png", self.handle))
+            }
             "gitlab" if !self.handle.is_empty() => {
                 Some(format!("https://gitlab.com/{}.png", self.handle))
             }
