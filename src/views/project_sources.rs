@@ -1,8 +1,8 @@
 //! Source profiles and repository selection dialogs.
 
+use crate::components::icons::{branch_icon, fork_icon, plus_icon, star_icon, trash_icon};
 use crate::components::motion_button::Button;
 use crate::components::toggle_button;
-use crate::components::ui_icons::{branch_icon, fork_icon, plus_icon, star_icon, trash_icon};
 use crate::workspace_sources::{RepositoryListMode, SourceRepository, WorkspaceSource};
 use gpui_kit::base::{Disableable as _, StyledExt};
 use gpui_kit::component::ActiveTheme as _;
@@ -558,7 +558,7 @@ pub fn render_project_sources<
                                 .flex()
                                 .items_center()
                                 .gap_3()
-                                .child(crate::components::ui_icons::folder_icon())
+                                .child(crate::components::icons::folder_icon())
                                 .child(
                                     div()
                                         .flex()

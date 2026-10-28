@@ -2,8 +2,8 @@
 
 use crate::colors::hsla;
 use crate::components::app_icon::app_icon;
+use crate::components::icons::{layers_icon, store_icon};
 use crate::components::motion_button::Button;
-use crate::components::ui_icons::{layers_icon, store_icon};
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::ButtonVariants as _;

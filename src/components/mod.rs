@@ -5,10 +5,10 @@ pub mod avatar;
 pub mod badge;
 pub mod card;
 pub mod header;
+pub mod icons;
 pub mod motion_button;
 pub mod provider_icon;
 pub mod sidebar;
-pub mod ui_icons;
 
 pub use avatar::source_avatar;
 pub use badge::{

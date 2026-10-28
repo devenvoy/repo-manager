@@ -1,8 +1,8 @@
 //! Release shelf backed by fetched provider data and ArtCraft application catalog.
 
 use crate::components::app_icon::repo_icon;
+use crate::components::icons::{check_icon, download_icon, refresh_icon};
 use crate::components::motion_button::Button;
-use crate::components::ui_icons::{check_icon, download_icon, refresh_icon};
 use crate::styles::CssExt as _;
 use crate::workspace_releases::ReleaseViewState;
 use gpui_kit::base::{Disableable as _, StyledExt};

@@ -106,7 +106,7 @@ pub fn render_project_workspace<
                     )
                     .child(
                         Button::new("settings-import-local-repos")
-                            .icon(crate::components::ui_icons::repository_icon())
+                            .icon(crate::components::icons::repository_icon())
                             .label("Scan project folder for repos")
                             .outline()
                             .on_click(cx.listener(move |this, _, window, cx| {

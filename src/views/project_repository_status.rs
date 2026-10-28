@@ -3,12 +3,12 @@
 use crate::components::app_icon::repo_icon;
 use crate::components::avatar::source_avatar;
 use crate::components::badge::{branch_chip, language_chip, version_pill, visibility_chip};
-use crate::components::motion_button::Button;
-use crate::components::ui_icons::{
-    alert_circle_icon, android_icon, check_icon, chevron_down_icon, chevron_right_icon, code_icon,
-    download_icon, external_link_icon, folder_icon, git_commit_icon, hammer_icon, refresh_icon,
-    terminal_icon,
+use crate::components::icons::{
+    UiIcon, alert_circle_icon, android_icon, check_icon, chevron_down_icon, chevron_right_icon,
+    code_icon, download_icon, external_link_icon, folder_icon, git_commit_icon, hammer_icon,
+    refresh_icon, terminal_icon,
 };
+use crate::components::motion_button::Button;
 use crate::repository_git::{RepositoryStatus, repository_owner};
 use crate::styles::CssExt as _;
 use crate::workspace::WorkspaceProject;
@@ -159,7 +159,7 @@ pub fn open_path_in_editor(path: &std::path::Path, editor_id: &str) {
     }
 }
 
-fn editor_icon(kind: EditorIconKind) -> gpui_kit::component::Icon {
+fn editor_icon(kind: EditorIconKind) -> UiIcon {
     match kind {
         EditorIconKind::VsCode | EditorIconKind::Cursor | EditorIconKind::Zed => code_icon(),
         EditorIconKind::Xcode => hammer_icon(),

@@ -1,8 +1,8 @@
 //! Desktop application settings panel matching the modern design prototype.
 
+use crate::components::icons::shield_icon;
 use crate::components::motion_button::Button;
 use crate::components::toggle_button;
-use crate::components::ui_icons::shield_icon;
 use crate::settings::{Appearance, HubViewMode, Settings, StartView};
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;

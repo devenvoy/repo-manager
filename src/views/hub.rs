@@ -1,8 +1,8 @@
 //! Project hub: the starting point for all independent workspaces.
 
+use crate::components::icons::folder_icon;
 use crate::components::motion_button::Button;
 use crate::components::provider_icon::provider_icon;
-use crate::components::ui_icons::folder_icon;
 use crate::workspace::WorkspaceProject;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;

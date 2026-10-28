@@ -3,7 +3,6 @@
 use crate::colors::rgb;
 use gpui_kit::base::{Disableable, StyledExt as _};
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::Icon;
 use gpui_kit::component::button::{ButtonVariant, ButtonVariants};
 use gpui_kit::{
     Animation, AnimationExt as _, App, BoxShadow, ClickEvent, ElementId, InteractiveElement as _,
@@ -30,7 +29,7 @@ type ButtonClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 pub struct Button {
     id: ElementId,
     label: Option<SharedString>,
-    icon: Option<Icon>,
+    icon: Option<gpui_kit::AnyElement>,
     tooltip: Option<SharedString>,
     loading: bool,
     variant: ButtonVariant,
@@ -61,8 +60,8 @@ impl Button {
         self
     }
 
-    pub fn icon(mut self, icon: Icon) -> Self {
-        self.icon = Some(icon);
+    pub fn icon(mut self, icon: impl IntoElement) -> Self {
+        self.icon = Some(icon.into_any_element());
         self
     }
 
