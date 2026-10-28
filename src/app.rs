@@ -10,7 +10,9 @@ use crate::workspace::{
     find_saved_accounts_for_provider,
 };
 use crate::workspace_sources::WorkspaceSource;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::input::InputState;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window,
@@ -60,7 +62,20 @@ pub struct ReleaseDesk {
     pub(crate) store_items: Vec<AppStoreItem>,
     pub(crate) selected_app_id: Option<String>,
     pub(crate) git_statuses: Vec<crate::repository_git::RepositoryStatus>,
+    pub(crate) git_check_completed: usize,
+    pub(crate) git_check_total: usize,
+    pub(crate) git_activity: Option<crate::controllers::git_controller::GitActivity>,
+    pub(crate) git_pending: std::collections::HashSet<(usize, usize)>,
+    pub(crate) repository_presentations: std::collections::HashMap<
+        (usize, usize),
+        views::project_repository_status::RepositoryPresentation,
+    >,
     pub(crate) selected_repository: Option<(usize, usize)>,
+    pub(crate) languages_expanded: std::collections::HashSet<(usize, usize)>,
+    pub(crate) language_breakdowns: std::collections::HashMap<
+        (usize, usize),
+        views::project_repository_status::LanguageBreakdownState,
+    >,
     pub(crate) commits_collapsed: bool,
     pub(crate) selected_editor_id: String,
     pub(crate) editor_menu_open: bool,
@@ -68,7 +83,10 @@ pub struct ReleaseDesk {
     pub(crate) workspace_revision: u64,
     pub(crate) release_state: crate::workspace_releases::ReleaseViewState,
     pub(crate) release_busy: bool,
+    pub(crate) release_type_busy: bool,
+    pub(crate) release_type_menu_open: bool,
     pub(crate) message: String,
+    last_notified_message: String,
     pub(crate) nav_history: Vec<NavLocation>,
     pub(crate) nav_index: usize,
     pub(crate) secret_store: Arc<OsSecretStore>,
@@ -198,7 +216,14 @@ impl ReleaseDesk {
             store_items: Vec::new(),
             selected_app_id: None,
             git_statuses: Vec::new(),
+            git_check_completed: 0,
+            git_check_total: 0,
+            git_activity: None,
+            git_pending: Default::default(),
+            repository_presentations: Default::default(),
             selected_repository: None,
+            languages_expanded: Default::default(),
+            language_breakdowns: Default::default(),
             commits_collapsed: false,
             selected_editor_id,
             editor_menu_open: false,
@@ -206,7 +231,10 @@ impl ReleaseDesk {
             workspace_revision: 0,
             release_state: Default::default(),
             release_busy: false,
+            release_type_busy: false,
+            release_type_menu_open: false,
             message,
+            last_notified_message: String::new(),
             nav_history: vec![initial_loc],
             nav_index: 0,
             secret_store,
@@ -293,20 +321,32 @@ impl ReleaseDesk {
         }
         self.nav_history.push(loc.clone());
         self.nav_index = self.nav_history.len() - 1;
-        self.apply_nav_location(loc);
+        self.apply_nav_location(loc, cx);
         cx.notify();
     }
 
-    pub(crate) fn apply_nav_location(&mut self, loc: NavLocation) {
+    pub(crate) fn apply_nav_location(&mut self, loc: NavLocation, cx: &mut Context<Self>) {
         let next_project = match &loc {
             NavLocation::Project(id, _) => Some(*id),
             _ => None,
         };
-        if next_project != self.selected_project_id {
+        let project_changed = next_project != self.selected_project_id;
+        if project_changed {
             self.workspace_revision = self.workspace_revision.wrapping_add(1);
             self.git_statuses.clear();
+            self.git_check_completed = 0;
+            self.git_check_total = 0;
+            self.git_activity = None;
+            self.git_pending.clear();
+            self.git_busy = false;
+            self.repository_presentations.clear();
             self.selected_repository = None;
+            self.languages_expanded.clear();
+            self.language_breakdowns.clear();
             self.release_state = Default::default();
+            self.release_busy = false;
+            self.release_type_busy = false;
+            self.release_type_menu_open = false;
             self.source_dialog = views::project_sources::SourceDialog::Closed;
         }
         match loc {
@@ -334,13 +374,30 @@ impl ReleaseDesk {
                 self.setup_active = false;
             }
         }
+        if project_changed {
+            if let Some(project_id) = self.selected_project_id {
+                self.prefetch_project_data(project_id, cx);
+            }
+        }
+    }
+
+    pub(crate) fn prefetch_project_data(&mut self, project_id: u128, cx: &mut Context<Self>) {
+        if self.selected_project_id != Some(project_id) {
+            return;
+        }
+        if !self.git_busy {
+            self.check_repository_updates(None, true, cx);
+        }
+        if !self.release_busy {
+            self.refresh_releases(cx);
+        }
     }
 
     pub(crate) fn go_back(&mut self, cx: &mut Context<Self>) {
         if self.nav_index > 0 {
             self.nav_index -= 1;
             let loc = self.nav_history[self.nav_index].clone();
-            self.apply_nav_location(loc);
+            self.apply_nav_location(loc, cx);
             cx.notify();
         }
     }
@@ -349,7 +406,7 @@ impl ReleaseDesk {
         if self.nav_index + 1 < self.nav_history.len() {
             self.nav_index += 1;
             let loc = self.nav_history[self.nav_index].clone();
-            self.apply_nav_location(loc);
+            self.apply_nav_location(loc, cx);
             cx.notify();
         }
     }
@@ -417,7 +474,31 @@ impl ReleaseDesk {
 }
 
 impl Render for ReleaseDesk {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.message != self.last_notified_message {
+            self.last_notified_message.clone_from(&self.message);
+            let message = self.message.trim();
+            if !message.is_empty()
+                && !message.ends_with('…')
+                && !message.ends_with("...")
+                && message != "Local repository inspection finished."
+            {
+                let lower = message.to_ascii_lowercase();
+                let notification = if lower.contains("failed")
+                    || lower.contains("error")
+                    || lower.starts_with("cannot ")
+                    || lower.starts_with("could not ")
+                {
+                    Notification::error(message.to_string())
+                } else {
+                    Notification::info(message.to_string())
+                };
+                cx.spawn_in(window, async move |_, cx| {
+                    let _ = cx.update(|window, cx| window.push_notification(notification, cx));
+                })
+                .detach();
+            }
+        }
         let (location_title, project_name) = match self.tab {
             WorkspaceTab::AppStore => {
                 if let Some(id) = &self.selected_app_id {
@@ -603,24 +684,27 @@ impl Render for ReleaseDesk {
                             views::render_project_repository_status(
                                 project,
                                 &self.git_statuses,
+                                &self.repository_presentations,
                                 self.selected_repository,
                                 &self.repo_search,
                                 self.git_busy,
+                                self.git_check_completed,
+                                self.git_check_total,
+                                self.git_activity,
+                                &self.git_pending,
                                 self.commits_collapsed,
+                                &self.languages_expanded,
+                                &self.language_breakdowns,
                                 &self.selected_editor_id,
                                 self.editor_menu_open,
                                 cx,
-                                |this: &mut Self, window, cx| {
-                                    this.check_repository_updates(None, false, window, cx)
+                                |this: &mut Self, _window, cx| {
+                                    this.check_repository_updates(None, false, cx)
                                 },
-                                |source, repo, this: &mut Self, window, cx| {
-                                    this.check_repository_updates(
-                                        Some((source, repo)),
-                                        false,
-                                        window,
-                                        cx,
-                                    )
+                                |source, repo, this: &mut Self, _window, cx| {
+                                    this.check_repository_updates(Some((source, repo)), false, cx)
                                 },
+                                |this: &mut Self, _window, cx| this.pull_all_updates(cx),
                                 |source, repo, this: &mut Self, window, cx| {
                                     this.clone_single_repository(source, repo, window, cx)
                                 },
@@ -640,6 +724,9 @@ impl Render for ReleaseDesk {
                                 |this: &mut Self, cx| {
                                     this.commits_collapsed = !this.commits_collapsed;
                                     cx.notify();
+                                },
+                                |source, repo, this: &mut Self, window, cx| {
+                                    this.toggle_repository_languages(source, repo, window, cx)
                                 },
                                 |this: &mut Self, cx| {
                                     this.editor_menu_open = !this.editor_menu_open;
@@ -663,10 +750,20 @@ impl Render for ReleaseDesk {
                         ProjectSection::Releases => Some(
                             views::render_live_releases(
                                 &self.release_state,
-                                &project.directory,
-                                self.release_busy,
+                                views::ReleaseShelfControls {
+                                    busy: self.release_busy || self.release_type_busy,
+                                    extension: &self.settings.installer_extension,
+                                    type_menu_open: self.release_type_menu_open,
+                                },
                                 cx,
-                                |this: &mut Self, window, cx| this.refresh_releases(window, cx),
+                                |this: &mut Self, _window, cx| this.refresh_releases(cx),
+                                |this: &mut Self, cx| {
+                                    this.release_type_menu_open = !this.release_type_menu_open;
+                                    cx.notify();
+                                },
+                                |extension, this: &mut Self, cx| {
+                                    this.select_release_type(extension, cx)
+                                },
                                 |provider,
                                  owner,
                                  repo,
@@ -692,21 +789,11 @@ impl Render for ReleaseDesk {
                         self.delete_confirm,
                         section_content,
                         cx,
-                        |section, this: &mut Self, window, cx| {
+                        |section, this: &mut Self, _window, cx| {
                             this.project_section = section;
                             this.delete_confirm = false;
-                            if section == ProjectSection::Repositories
-                                && this.git_statuses.is_empty()
-                            {
-                                this.check_repository_updates(None, true, window, cx);
-                            }
-                            if section == ProjectSection::Releases
-                                && matches!(
-                                    this.release_state,
-                                    crate::workspace_releases::ReleaseViewState::NotLoaded
-                                )
-                            {
-                                this.refresh_releases(window, cx);
+                            if section != ProjectSection::Releases {
+                                this.release_type_menu_open = false;
                             }
                             cx.notify();
                         },
@@ -769,7 +856,6 @@ impl Render for ReleaseDesk {
                         self.nav_index + 1 < self.nav_history.len(),
                         location_title,
                         project_name,
-                        &self.message,
                         cx,
                         |this: &mut Self, cx| this.go_back(cx),
                         |this: &mut Self, cx| this.go_forward(cx),

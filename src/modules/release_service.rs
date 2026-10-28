@@ -60,23 +60,25 @@ pub fn fetch_project_releases(
         }
     }
 
-    jobs.into_iter()
-        .map(|(provider, owner, name, repo_token)| {
+    crate::modules::parallel::map_bounded(
+        &jobs,
+        crate::modules::parallel::IO_WORKERS,
+        |(provider, owner, name, repo_token)| {
             let result = fetch_releases_with_project(
-                &provider,
-                &owner,
-                &name,
-                repo_token,
+                provider,
+                owner,
+                name,
+                repo_token.clone(),
                 Some(&project.directory),
             );
             RepositoryReleases {
-                provider,
-                owner,
-                repository: name,
+                provider: provider.clone(),
+                owner: owner.clone(),
+                repository: name.clone(),
                 result,
             }
-        })
-        .collect()
+        },
+    )
 }
 
 /// Download a release asset to the project's releases directory.

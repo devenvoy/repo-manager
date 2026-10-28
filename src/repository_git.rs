@@ -31,6 +31,15 @@ pub struct RepositoryStatus {
     pub fetched: bool,
 }
 
+/// Only a fresh remote check showing a clean, behind branch is eligible for a batch pull.
+pub fn can_pull(status: &RepositoryStatus) -> bool {
+    status.fetched
+        && status
+            .state
+            .as_ref()
+            .is_ok_and(|state| state.status == CloneStatus::Behind)
+}
+
 fn safe_component(value: &str) -> bool {
     let mut components = Path::new(value).components();
     !value.contains('\\')
@@ -203,7 +212,7 @@ pub fn inspect(target: &RepositoryTarget) -> RepositoryStatus {
         source_index: target.source_index,
         repo_index: target.repo_index,
         state: validate_target_path(&target.project_root, &target.path).and_then(|()| {
-            git_client(target)?
+            GitClient::new()
                 .inspect(&target.path, &target.branch)
                 .map_err(|e| e.to_string())
         }),
@@ -245,6 +254,14 @@ pub fn update(target: &RepositoryTarget) -> Result<SyncOutcome, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Pull an existing checkout without creating a missing repository.
+pub fn pull_existing(target: &RepositoryTarget) -> Result<SyncOutcome, String> {
+    validate_target_path(&target.project_root, &target.path)?;
+    git_client(target)?
+        .sync_existing(&target.url, &target.path, &target.branch)
+        .map_err(|error| error.to_string())
+}
+
 /// Read recent commits from a local repository clone.
 pub fn load_recent_commits(target_path: &Path, count: usize) -> Vec<GitCommit> {
     GitClient::new()
@@ -254,7 +271,33 @@ pub fn load_recent_commits(target_path: &Path, count: usize) -> Vec<GitCommit> {
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_component, safe_namespace};
+    use super::{RepositoryStatus, can_pull, safe_component, safe_namespace};
+    use release_desk_git::{CloneState, CloneStatus};
+
+    #[test]
+    fn batch_pull_requires_fresh_behind_status() {
+        for (state, fetched, expected) in [
+            (CloneStatus::Behind, true, true),
+            (CloneStatus::Behind, false, false),
+            (CloneStatus::Current, true, false),
+            (CloneStatus::Dirty, true, false),
+        ] {
+            let status = RepositoryStatus {
+                source_index: 0,
+                repo_index: 0,
+                state: Ok(CloneState {
+                    status: state,
+                    branch: None,
+                    local_revision: None,
+                    remote_revision: None,
+                    message: None,
+                }),
+                fetched,
+            };
+            assert_eq!(can_pull(&status), expected);
+        }
+    }
+
     #[test]
     fn rejects_path_traversal() {
         for invalid in ["", ".", "..", "../outside", "/tmp", "a/b"] {

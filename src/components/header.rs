@@ -1,4 +1,4 @@
-//! Workspace topbar header with clickable breadcrumbs, back/forward history navigation, and status.
+//! Workspace topbar header with clickable breadcrumbs and back/forward history navigation.
 
 use crate::components::icons::{arrow_left_icon, arrow_right_icon};
 use crate::components::motion_button::Button;
@@ -22,7 +22,6 @@ pub fn render_header<
     can_go_forward: bool,
     location_title: &str,
     project_name: Option<&str>,
-    status: &str,
     cx: &Context<T>,
     on_back: FBack,
     on_forward: FForward,
@@ -123,12 +122,5 @@ pub fn render_header<
                         .child(fwd_btn),
                 )
                 .child(crumbs),
-        )
-        // Right side: Status message
-        .child(
-            div()
-                .text_size(px(11.))
-                .text_color(cx.theme().muted_foreground)
-                .child(status.to_string()),
         )
 }

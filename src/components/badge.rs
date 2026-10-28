@@ -73,19 +73,19 @@ pub fn visibility_chip(is_private: bool, theme: &Theme) -> impl IntoElement {
         .child(if is_private { "Private" } else { "Public" }.to_string())
 }
 
-/// Language indicator chip with syntax color dot.
+/// Language chip with a subtle tint from its syntax color.
 pub fn language_chip(language: &str, theme: &Theme) -> impl IntoElement {
-    let dot_color = rgb(Language::from_name(language)
+    let language_color = rgb(Language::from_name(language)
         .map_or(LanguageColor::Unknown, Language::color)
         .rgb());
 
     div()
         .css_chip(theme)
+        .bg(language_color.opacity(0.10))
         .flex()
         .items_center()
         .gap_2()
         .child(language_icon_for_name(language).w(px(14.)).h(px(14.)))
-        .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(dot_color))
         .child(language.to_string())
 }
 

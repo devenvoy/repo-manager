@@ -22,45 +22,63 @@ pub fn run_status_check(
     previous_statuses: &[RepositoryStatus],
 ) -> Result<(Vec<RepositoryStatus>, Option<String>), String> {
     let resolved_targets = targets(project)?;
-    let mut update_message = None;
 
-    let statuses = resolved_targets
-        .iter()
-        .map(|target| match mode {
-            InspectMode::PullTarget(si, ri)
-                if si == target.source_index && ri == target.repo_index =>
-            {
-                let outcome_msg = match update(target) {
-                    Ok(outcome) => match outcome {
-                        SyncOutcome::FastForwarded { .. } => {
-                            format!("{}: updated successfully (fast-forwarded)", target.name)
-                        }
-                        SyncOutcome::AlreadyCurrent => {
-                            format!("{}: already up to date", target.name)
-                        }
-                        SyncOutcome::Skipped(state) => {
-                            format!("{}: skipped ({:?})", target.name, state.status)
-                        }
-                        SyncOutcome::Cloned { .. } => {
-                            format!("{}: cloned successfully", target.name)
-                        }
-                    },
-                    Err(err) => format!("{}: failed to update ({err})", target.name),
-                };
-                update_message = Some(outcome_msg);
-                check_for_updates(target)
-            }
-            InspectMode::LocalOnly => inspect(target),
-            InspectMode::CheckRemoteUpdates => check_for_updates(target),
-            InspectMode::PullTarget(_, _) => previous_statuses
-                .iter()
-                .find(|s| {
-                    s.source_index == target.source_index && s.repo_index == target.repo_index
-                })
-                .cloned()
-                .unwrap_or_else(|| inspect(target)),
-        })
-        .collect();
+    let results = crate::modules::parallel::map_bounded(
+        &resolved_targets,
+        crate::modules::parallel::IO_WORKERS,
+        |target| {
+            let update_message = match mode {
+                InspectMode::PullTarget(si, ri)
+                    if si == target.source_index && ri == target.repo_index =>
+                {
+                    Some(match update(target) {
+                        Ok(outcome) => match outcome {
+                            SyncOutcome::FastForwarded { .. } => {
+                                format!("{}: updated successfully (fast-forwarded)", target.name)
+                            }
+                            SyncOutcome::AlreadyCurrent => {
+                                format!("{}: already up to date", target.name)
+                            }
+                            SyncOutcome::Skipped(state) => {
+                                format!("{}: skipped ({:?})", target.name, state.status)
+                            }
+                            SyncOutcome::Cloned { .. } => {
+                                format!("{}: cloned successfully", target.name)
+                            }
+                        },
+                        Err(err) => format!("{}: failed to update ({err})", target.name),
+                    })
+                }
+                _ => None,
+            };
+            let status = match mode {
+                InspectMode::PullTarget(si, ri)
+                    if si == target.source_index && ri == target.repo_index =>
+                {
+                    check_for_updates(target)
+                }
+                InspectMode::LocalOnly => inspect(target),
+                InspectMode::CheckRemoteUpdates => check_for_updates(target),
+                InspectMode::PullTarget(_, _) => previous_statuses
+                    .iter()
+                    .find(|s| {
+                        s.source_index == target.source_index && s.repo_index == target.repo_index
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| inspect(target)),
+            };
+            (status, update_message)
+        },
+    );
+
+    let mut statuses = Vec::with_capacity(results.len());
+    let mut update_message = None;
+    for (status, message) in results {
+        statuses.push(status);
+        if update_message.is_none() {
+            update_message = message;
+        }
+    }
 
     Ok((statuses, update_message))
 }

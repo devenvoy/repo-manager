@@ -1,7 +1,7 @@
 //! Release shelf backed by fetched provider data and ArtCraft application catalog.
 
 use crate::components::app_icon::repo_icon;
-use crate::components::icons::{check_icon, download_icon, refresh_icon};
+use crate::components::icons::{check_icon, chevron_down_icon, download_icon, refresh_icon};
 use crate::components::motion_button::Button;
 use crate::styles::CssExt as _;
 use crate::workspace_releases::ReleaseViewState;
@@ -9,62 +9,54 @@ use gpui_kit::base::{Disableable as _, StyledExt};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, Window, div, px};
+use gpui_kit::{
+    Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
+    StatefulInteractiveElement as _, Styled as _, Window, deferred, div, px,
+};
 use release_desk_core::app_catalog::find_known_app;
 use release_desk_store::workspace_releases::{
-    LocalAssetState, local_asset_state, newer_release_with_local_older,
+    LocalAssetState, RELEASE_ASSET_TYPES, ReleaseAssetType, release_asset_type,
+    release_asset_type_for_extension,
 };
-use std::path::Path;
 
-fn package_kind(name: &str) -> &'static str {
-    let lower = name.to_lowercase();
-    if lower.ends_with(".dmg") {
-        "DMG"
-    } else if lower.ends_with(".pkg") {
-        "PKG"
-    } else if lower.ends_with(".exe") {
-        "EXE"
-    } else if lower.ends_with(".msi") {
-        "MSI"
-    } else if lower.ends_with(".appimage") {
-        "AppImage"
-    } else if lower.ends_with(".deb") {
-        "DEB"
-    } else if lower.ends_with(".rpm") {
-        "RPM"
-    } else if lower.ends_with(".apk") {
-        "APK"
-    } else if lower.ends_with(".aab") {
-        "AAB"
-    } else if lower.ends_with(".ipa") {
-        "IPA"
-    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
-        "Tarball"
-    } else if lower.ends_with(".tar.xz") {
-        "Tarball (xz)"
-    } else if lower.ends_with(".zip") {
-        "ZIP"
-    } else {
-        "Package"
+fn available_release_types(
+    state: &ReleaseViewState,
+    selected: &str,
+) -> Vec<&'static ReleaseAssetType> {
+    let mut available = Vec::new();
+    if let Some(repositories) = state.repositories() {
+        for repository in repositories {
+            let Ok(releases) = &repository.result else {
+                continue;
+            };
+            for release in releases {
+                for asset in &release.assets {
+                    if let Some(kind) = release_asset_type(&asset.name) {
+                        if !available.iter().any(|existing: &&ReleaseAssetType| {
+                            existing.extension == kind.extension
+                        }) {
+                            available.push(kind);
+                        }
+                    }
+                }
+            }
+        }
     }
-}
-
-fn is_supported_package(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower.ends_with(".dmg")
-        || lower.ends_with(".pkg")
-        || lower.ends_with(".exe")
-        || lower.ends_with(".msi")
-        || lower.ends_with(".appimage")
-        || lower.ends_with(".deb")
-        || lower.ends_with(".rpm")
-        || lower.ends_with(".apk")
-        || lower.ends_with(".aab")
-        || lower.ends_with(".ipa")
-        || lower.ends_with(".tar.gz")
-        || lower.ends_with(".tgz")
-        || lower.ends_with(".tar.xz")
-        || lower.ends_with(".zip")
+    if let Some(kind) = release_asset_type_for_extension(selected) {
+        if !available
+            .iter()
+            .any(|existing: &&ReleaseAssetType| existing.extension == kind.extension)
+        {
+            available.push(kind);
+        }
+    }
+    available.sort_by_key(|kind| {
+        RELEASE_ASSET_TYPES
+            .iter()
+            .position(|candidate| candidate.extension == kind.extension)
+            .unwrap_or(usize::MAX)
+    });
+    available
 }
 
 fn format_bytes(bytes: Option<u64>) -> String {
@@ -107,13 +99,21 @@ fn format_date(raw: Option<&str>) -> String {
     }
 }
 
-/// Render release shelf matching the ArtCraft Release Desk layout.
+#[derive(Clone, Copy)]
+pub struct ReleaseShelfControls<'a> {
+    pub busy: bool,
+    pub extension: &'a str,
+    pub type_menu_open: bool,
+}
+
+/// Render the release shelf matching the ArtCraft Release Desk layout.
 pub fn render_live_releases<T: 'static>(
     state: &ReleaseViewState,
-    project_directory: &Path,
-    busy: bool,
+    controls: ReleaseShelfControls<'_>,
     cx: &Context<T>,
     on_refresh: impl Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
+    on_toggle_type_menu: impl Fn(&mut T, &mut Context<T>) + Copy + 'static,
+    on_select_type: impl Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
     on_download: impl Fn(
         String,
         String,
@@ -128,6 +128,146 @@ pub fn render_live_releases<T: 'static>(
     ) + Copy
     + 'static,
 ) -> impl IntoElement {
+    let ReleaseShelfControls {
+        busy,
+        extension,
+        type_menu_open,
+    } = controls;
+    let available_types = available_release_types(state, extension);
+    let selected_type = release_asset_type_for_extension(extension);
+    let selected_label = selected_type
+        .map(|kind| kind.label.to_string())
+        .unwrap_or_else(|| extension.to_ascii_uppercase());
+
+    let mut type_menu_items = div().flex().flex_col().gap_0p5();
+    for kind in &available_types {
+        let is_selected = kind.extension == extension;
+        let kind_label = kind.label.to_string();
+        let kind_extension = kind.extension.to_string();
+        let mut item = div()
+            .id(ElementId::Name(
+                format!("release-type-{}", kind.extension).into(),
+            ))
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_2p5()
+            .py_1p5()
+            .rounded_md()
+            .cursor_pointer()
+            .bg(if is_selected {
+                cx.theme().primary.opacity(0.12)
+            } else {
+                cx.theme().background
+            })
+            .hover(|style| style.bg(cx.theme().secondary.opacity(0.2)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                on_select_type(kind_extension.clone(), this, cx);
+            }))
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .font_medium()
+                    .text_color(if is_selected {
+                        cx.theme().primary
+                    } else {
+                        cx.theme().foreground
+                    })
+                    .child(kind_label),
+            );
+        if is_selected {
+            item = item.child(
+                check_icon()
+                    .w(px(13.))
+                    .h(px(13.))
+                    .text_color(cx.theme().primary),
+            );
+        }
+        type_menu_items = type_menu_items.child(item);
+    }
+
+    let mut type_selector = div()
+        .relative()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(10.))
+                .font_bold()
+                .text_color(cx.theme().muted_foreground)
+                .child("FILE TYPE"),
+        )
+        .child(
+            div()
+                .id("release-type-trigger")
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .rounded_lg()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary.opacity(0.12))
+                .hover(|style| style.bg(cx.theme().secondary.opacity(0.25)))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .text_size(px(12.5))
+                        .font_medium()
+                        .text_color(cx.theme().foreground)
+                        .child(selected_label.clone()),
+                )
+                .child(
+                    chevron_down_icon()
+                        .w(px(12.))
+                        .h(px(12.))
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    on_toggle_type_menu(this, cx);
+                })),
+        );
+
+    if type_menu_open && !available_types.is_empty() {
+        type_selector = type_selector.child(
+            deferred(
+                div()
+                    .child(
+                        div()
+                            .id("release-type-backdrop")
+                            .occlude()
+                            .absolute()
+                            .top(px(-1000.))
+                            .left(px(-2000.))
+                            .w(px(5000.))
+                            .h(px(5000.))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                on_toggle_type_menu(this, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .occlude()
+                            .absolute()
+                            .top_full()
+                            .right_0()
+                            .mt_1p5()
+                            .w(px(180.))
+                            .rounded_xl()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().background)
+                            .shadow_lg()
+                            .p_1p5()
+                            .child(type_menu_items),
+                    ),
+            )
+            .priority(10),
+        );
+    }
+
     let mut body = div()
         .flex()
         .flex_col()
@@ -154,17 +294,24 @@ pub fn render_live_releases<T: 'static>(
                         )),
                 )
                 .child(
-                    Button::new("refresh-releases")
-                        .icon(refresh_icon())
-                        .label(if busy || matches!(state, ReleaseViewState::Loading) {
-                            "Fetching…"
-                        } else {
-                            "Refresh releases"
-                        })
-                        .outline()
-                        .disabled(busy || matches!(state, ReleaseViewState::Loading))
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| on_refresh(this, window, cx)),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(type_selector)
+                        .child(
+                            Button::new("refresh-releases")
+                                .icon(refresh_icon())
+                                .label(if busy || matches!(state, ReleaseViewState::Loading) {
+                                    "Fetching…"
+                                } else {
+                                    "Refresh releases"
+                                })
+                                .outline()
+                                .disabled(busy || matches!(state, ReleaseViewState::Loading))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_refresh(this, window, cx)
+                                })),
                         ),
                 ),
         );
@@ -185,7 +332,7 @@ pub fn render_live_releases<T: 'static>(
                             .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
                             .text_center()
-                            .child("Click Refresh releases above to fetch upstream versions and DMGs for your repositories."),
+                            .child("Click Refresh releases above to fetch upstream versions and files for your repositories."),
                     )
                     .child(
                         Button::new("shelf-initial-refresh")
@@ -205,11 +352,11 @@ pub fn render_live_releases<T: 'static>(
                         div()
                             .text_size(px(14.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("Fetching release catalog and verifying local DMGs…"),
+                            .child("Fetching release catalog and verifying local files…"),
                     ),
             )
         }
-        ReleaseViewState::Loaded(repositories) if repositories.is_empty() => {
+        ReleaseViewState::Loaded { repositories, .. } if repositories.is_empty() => {
             body = body.child(
                 div()
                     .css_empty_state(cx.theme())
@@ -229,10 +376,32 @@ pub fn render_live_releases<T: 'static>(
                     ),
             )
         }
-        ReleaseViewState::Loaded(repositories) => {
+        ReleaseViewState::Loaded {
+            repositories,
+            presentations,
+            extension: loaded_extension,
+        } => {
             let mut list = div().flex().flex_col().gap_4();
+            let mut matched_any = false;
 
-            for (repo_index, repository) in repositories.iter().enumerate() {
+            if loaded_extension != extension || presentations.len() != repositories.len() {
+                body = body.child(
+                    div()
+                        .css_empty_state(cx.theme())
+                        .child(refresh_icon().w(px(18.)).h(px(18.)))
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("Preparing {selected_label} shelf…")),
+                        ),
+                );
+                return body;
+            }
+
+            for ((repo_index, repository), presentation) in
+                repositories.iter().enumerate().zip(presentations)
+            {
                 let known = find_known_app(&repository.repository);
                 let display_title = known
                     .as_ref()
@@ -243,27 +412,10 @@ pub fn render_live_releases<T: 'static>(
                     .map(|k| k.category_name.clone())
                     .unwrap_or_else(|| "Desktop App".to_string());
 
-                let repo_dir = crate::repository_git::resolve_target_path(
-                    project_directory,
-                    release_desk_core::project::DiskLayout::Flat,
-                    &repository.owner,
-                    &repository.repository,
-                );
-                let icon_path = crate::components::app_icon::find_local_repo_icon(
-                    &repo_dir,
-                    &repository.repository,
-                )
-                .or_else(|| {
-                    crate::components::app_icon::find_cached_repo_icon(
-                        &repository.repository,
-                        Some(&repository.owner),
-                    )
-                });
+                let icon_path = presentation.icon_path.as_deref();
 
-                let releases = match &repository.result {
-                    Ok(rels) => rels,
-                    Err(err) => {
-                        list = list.child(
+                if let Err(err) = &repository.result {
+                    list = list.child(
                             div()
                                 .p_5()
                                 .rounded_xl()
@@ -281,7 +433,7 @@ pub fn render_live_releases<T: 'static>(
                                         .child(repo_icon(
                                             &repository.repository,
                                             36.,
-                                            icon_path.as_deref(),
+                                            icon_path,
                                         ))
                                         .child(
                                             div()
@@ -307,51 +459,23 @@ pub fn render_live_releases<T: 'static>(
                                         .text_color(cx.theme().danger)
                                         .child(format!("Could not check releases: {err}")),
                                 ),
-                        );
-                        continue;
-                    }
-                };
+                    );
+                    continue;
+                }
 
-                let active_releases: Vec<_> = releases.iter().filter(|r| !r.is_draft).collect();
-                let latest_release = active_releases.first().copied();
+                let latest_tag = presentation.latest_tag.as_deref();
+                let latest_published_at = presentation.published_at.as_deref();
+                let target_asset = presentation.asset.as_ref();
+                let pkg_kind = presentation.pkg_kind.as_str();
+                matched_any |= target_asset.is_some();
 
-                // Find candidate package asset
-                let target_asset = latest_release.and_then(|rel| {
-                    rel.assets
-                        .iter()
-                        .find(|a| is_supported_package(&a.name))
-                        .or_else(|| rel.assets.first())
-                });
-                let pkg_kind = target_asset
-                    .map(|a| package_kind(&a.name))
-                    .unwrap_or("Package");
-
-                // Compute local asset state
-                let local_state = match (latest_release, target_asset) {
-                    (Some(rel), Some(asset)) => local_asset_state(
-                        project_directory,
-                        &repository.owner,
-                        &repository.repository,
-                        &rel.tag_name,
-                        &asset.name,
-                        asset.size,
-                    ),
-                    _ => LocalAssetState::Missing,
-                };
-
+                let local_state = presentation.local_state;
                 let is_up_to_date = matches!(
                     local_state,
                     LocalAssetState::SizeMatches | LocalAssetState::PresentSizeUnknown
                 );
 
-                let newer_update = latest_release.and_then(|_| {
-                    newer_release_with_local_older(
-                        project_directory,
-                        &repository.owner,
-                        &repository.repository,
-                        releases,
-                    )
-                });
+                let newer_update = presentation.newer_update.as_ref();
 
                 let status_chip = if is_up_to_date {
                     div()
@@ -396,16 +520,16 @@ pub fn render_live_releases<T: 'static>(
                         .text_color(cx.theme().muted_foreground)
                         .text_size(px(11.))
                         .font_bold()
-                        .child("No package")
+                        .child(format!("No {pkg_kind}"))
                 };
 
                 let mut card_header_actions = div().flex().items_center().gap_2();
 
-                if let (Some(rel), Some(asset)) = (latest_release, target_asset) {
+                if let (Some(tag), Some(asset)) = (latest_tag, target_asset) {
                     let provider = repository.provider.clone();
                     let owner = repository.owner.clone();
                     let repo = repository.repository.clone();
-                    let tag = rel.tag_name.clone();
+                    let tag = tag.to_string();
                     let name = asset.name.clone();
                     let url = asset.download_url.clone();
                     let size = asset.size;
@@ -454,7 +578,7 @@ pub fn render_live_releases<T: 'static>(
                             .child(repo_icon(
                                 &repository.repository,
                                 44.,
-                                icon_path.as_deref(),
+                                icon_path,
                             ))
                             .child(
                                 div()
@@ -474,8 +598,7 @@ pub fn render_live_releases<T: 'static>(
                                                 "{} · published {}",
                                                 repository.owner,
                                                 format_date(
-                                                    latest_release
-                                                        .and_then(|r| r.published_at.as_deref())
+                                                    latest_published_at
                                                 )
                                             )),
                                     ),
@@ -519,8 +642,8 @@ pub fn render_live_releases<T: 'static>(
                             .text_size(px(16.))
                             .font_bold()
                             .child(
-                                latest_release
-                                    .map(|r| r.tag_name.clone())
+                                latest_tag
+                                    .map(str::to_string)
                                     .unwrap_or_else(|| "None".to_string()),
                             ),
                     )
@@ -529,7 +652,7 @@ pub fn render_live_releases<T: 'static>(
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
                             .child(
-                                target_asset.map_or("No package assets".to_string(), |a| {
+                                target_asset.map_or(format!("No {pkg_kind} assets"), |a| {
                                     format!("{} · {}", a.name, format_bytes(a.size))
                                 }),
                             ),
@@ -587,24 +710,21 @@ pub fn render_live_releases<T: 'static>(
                     );
 
                 // Slot 3: Previous build in old/
-                let archived_files = release_desk_store::workspace_releases::local_archived_files(
-                    project_directory,
-                    &repository.repository,
-                );
-                let (slot3_label, slot3_subtext) = if let Some((arch_name, arch_size)) = archived_files.first() {
+                let shelf_folder = selected_type.map_or("Release Dmgs", |kind| kind.folder);
+                let (slot3_label, slot3_subtext) = if let Some((arch_name, arch_size)) = presentation.archived_file.as_ref() {
                     (
                         format!("{arch_name} · {}", format_bytes(Some(*arch_size))),
-                        "Archived build preserved in old/ folder".to_string(),
+                        format!("Archived build preserved in {shelf_folder}/old"),
                     )
                 } else if let Some((_, older)) = newer_update {
                     (
                         format!("Archived {older}"),
-                        "Previous build preserved in old/ folder".to_string(),
+                        format!("Previous build preserved in {shelf_folder}/old"),
                     )
                 } else {
                     (
                         "None in shelf".to_string(),
-                        "Earlier versions are automatically kept in old/".to_string(),
+                        format!("Earlier versions are kept in {shelf_folder}/old"),
                     )
                 };
 
@@ -646,6 +766,26 @@ pub fn render_live_releases<T: 'static>(
                     .child(slots_row);
 
                 list = list.child(card);
+            }
+
+            if !matched_any {
+                list = list.child(
+                    div()
+                        .css_empty_state(cx.theme())
+                        .child(
+                            div()
+                                .font_bold()
+                                .text_size(px(16.))
+                                .child(format!("No {selected_label} releases found")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().muted_foreground)
+                                .text_center()
+                                .child("Choose another file type above or refresh the release catalog."),
+                        ),
+                );
             }
 
             body = body.child(list);

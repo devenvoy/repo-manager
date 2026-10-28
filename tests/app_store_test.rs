@@ -165,8 +165,11 @@ fn test_archived_files_discovery() {
     let old_dmg = old_dir.join("PhotoCraft-0.9.0-aarch64.dmg");
     std::fs::write(&old_dmg, b"dummy old dmg bytes").unwrap();
 
-    let archived =
-        release_desk_store::workspace_releases::local_archived_files(temp.path(), "photocraft");
+    let archived = release_desk_store::workspace_releases::local_archived_files(
+        temp.path(),
+        "photocraft",
+        "dmg",
+    );
     assert_eq!(archived.len(), 1);
     assert_eq!(archived[0].0, "PhotoCraft-0.9.0-aarch64.dmg");
     assert_eq!(archived[0].1, 19);

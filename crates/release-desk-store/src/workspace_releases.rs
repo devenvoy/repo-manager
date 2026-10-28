@@ -49,6 +49,110 @@ impl From<Release> for WorkspaceRelease {
     }
 }
 
+/// Supported downloadable release formats and the shelf folder used for each.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleaseAssetType {
+    pub extension: &'static str,
+    pub label: &'static str,
+    pub folder: &'static str,
+}
+
+pub const RELEASE_ASSET_TYPES: &[ReleaseAssetType] = &[
+    ReleaseAssetType {
+        extension: "dmg",
+        label: "DMG",
+        folder: "Release Dmgs",
+    },
+    ReleaseAssetType {
+        extension: "pkg",
+        label: "PKG",
+        folder: "Release Pkgs",
+    },
+    ReleaseAssetType {
+        extension: "zip",
+        label: "ZIP",
+        folder: "Release Zips",
+    },
+    ReleaseAssetType {
+        extension: "exe",
+        label: "EXE",
+        folder: "Release Exes",
+    },
+    ReleaseAssetType {
+        extension: "msi",
+        label: "MSI",
+        folder: "Release Msis",
+    },
+    ReleaseAssetType {
+        extension: "appimage",
+        label: "AppImage",
+        folder: "Release AppImages",
+    },
+    ReleaseAssetType {
+        extension: "deb",
+        label: "DEB",
+        folder: "Release Debs",
+    },
+    ReleaseAssetType {
+        extension: "rpm",
+        label: "RPM",
+        folder: "Release Rpms",
+    },
+    ReleaseAssetType {
+        extension: "apk",
+        label: "APK",
+        folder: "Release Apks",
+    },
+    ReleaseAssetType {
+        extension: "aab",
+        label: "AAB",
+        folder: "Release Aabs",
+    },
+    ReleaseAssetType {
+        extension: "ipa",
+        label: "IPA",
+        folder: "Release Ipas",
+    },
+    ReleaseAssetType {
+        extension: "tar.gz",
+        label: "TAR.GZ",
+        folder: "Release Tarballs",
+    },
+    ReleaseAssetType {
+        extension: "tgz",
+        label: "TGZ",
+        folder: "Release Tarballs",
+    },
+    ReleaseAssetType {
+        extension: "tar.xz",
+        label: "TAR.XZ",
+        folder: "Release Tarballs",
+    },
+    ReleaseAssetType {
+        extension: "tar.bz2",
+        label: "TAR.BZ2",
+        folder: "Release Tarballs",
+    },
+];
+
+/// Detect a supported release format from an asset file name.
+pub fn release_asset_type(name: &str) -> Option<&'static ReleaseAssetType> {
+    let lower = name.to_ascii_lowercase();
+    RELEASE_ASSET_TYPES
+        .iter()
+        .find(|kind| lower.ends_with(&format!(".{}", kind.extension)))
+}
+
+pub fn release_asset_type_for_extension(extension: &str) -> Option<&'static ReleaseAssetType> {
+    let extension = extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    RELEASE_ASSET_TYPES
+        .iter()
+        .find(|kind| kind.extension == extension)
+}
+
 /// Fetch release history. Unsupported providers return an error, not an empty list.
 pub fn fetch_releases(
     provider: &str,
@@ -316,18 +420,21 @@ pub fn local_asset_state(
         return LocalAssetState::Unavailable;
     };
 
-    let candidates = [
+    let mut candidates = Vec::new();
+    if let Some(kind) = release_asset_type(name) {
+        candidates.push(root.join(kind.folder).join(name_comp));
+    }
+    candidates.extend([
         root.join(".release-desk")
             .join("installers")
             .join(&owner_comp)
             .join(repo_comp)
             .join(&tag_comp)
             .join(name_comp),
-        root.join("Release Dmgs").join(name_comp),
         root.join("releases").join(name_comp),
         root.join("installers").join(name_comp),
         root.join(name_comp),
-    ];
+    ]);
 
     let mut found_state = LocalAssetState::Missing;
 
@@ -352,16 +459,24 @@ pub fn local_asset_state(
     found_state
 }
 
-/// Inspect the project shelf for previous builds archived in `old/` subdirectories.
-pub fn local_archived_files(project: &Path, repo_name: &str) -> Vec<(String, u64)> {
+/// Inspect the selected shelf and legacy locations for previous builds in `old/`.
+pub fn local_archived_files(
+    project: &Path,
+    repo_name: &str,
+    extension: &str,
+) -> Vec<(String, u64)> {
     let Ok(root) = project.canonicalize() else {
         return Vec::new();
     };
-    let old_dirs = [
-        root.join("Release Dmgs").join("old"),
-        root.join("releases").join("old"),
-        root.join(".release-desk").join("installers").join("old"),
-    ];
+    let selected = release_asset_type_for_extension(extension);
+    let mut old_dirs = Vec::new();
+    if let Some(kind) = selected {
+        old_dirs.push(root.join(kind.folder).join("old"));
+    }
+    old_dirs.push(root.join("releases").join("old"));
+    old_dirs.push(root.join(".release-desk").join("installers").join("old"));
+    old_dirs.sort();
+    old_dirs.dedup();
 
     let mut results = Vec::new();
     let lower_repo = repo_name.to_lowercase();
@@ -373,7 +488,11 @@ pub fn local_archived_files(project: &Path, repo_name: &str) -> Vec<(String, u64
                 if path.is_file() {
                     let file_name = entry.file_name().to_string_lossy().to_string();
                     let lower_file = file_name.to_lowercase();
-                    if lower_file.contains(&lower_repo) {
+                    let same_shelf = selected.is_none_or(|selected| {
+                        release_asset_type(&file_name)
+                            .is_some_and(|kind| kind.folder == selected.folder)
+                    });
+                    if same_shelf && lower_file.contains(&lower_repo) {
                         let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
                         results.push((file_name, len));
                     }
@@ -837,16 +956,41 @@ fn save_asset(
         .map_err(|e| format!("Cannot access project folder: {e}"))?;
     let owner = storage_component(owner)?;
     let tag = storage_component(tag)?;
-    let components = [
-        ".release-desk",
-        "installers",
-        owner.as_str(),
-        component(repo)?,
-        tag.as_str(),
-    ];
-    component(name)?;
-    let mut folder = root.clone();
-    for part in components {
+    let repo_component = component(repo)?;
+    let name_component = component(name)?;
+    let asset_type = release_asset_type(name);
+
+    let folder = match asset_type {
+        Some(kind) => ensure_project_dir(&root, &[kind.folder])?,
+        None => ensure_project_dir(
+            &root,
+            &[".release-desk", "installers", &owner, repo_component, &tag],
+        )?,
+    };
+    let destination = folder.join(name_component);
+    let mut temp = tempfile::NamedTempFile::new_in(&folder)
+        .map_err(|e| format!("Cannot create temporary download: {e}"))?;
+    copy_verified(input, &mut temp, expected_size)?;
+    temp.flush()
+        .map_err(|e| format!("Cannot flush download: {e}"))?;
+
+    let mut archived = Vec::new();
+    if let Some(kind) = asset_type {
+        archived = rotate_previous_build(&root, &folder, kind, repo, tag.as_str(), name_component)?;
+    }
+
+    temp.persist(&destination)
+        .map_err(|e| format!("Cannot save download: {}", e.error))?;
+
+    if let Some(kind) = asset_type {
+        write_shelf_manifest(&root, kind, repo, tag.as_str(), name_component, &archived)?;
+    }
+    Ok(destination)
+}
+
+fn ensure_project_dir(root: &Path, parts: &[&str]) -> Result<PathBuf, String> {
+    let mut folder = root.to_path_buf();
+    for part in parts {
         let next = folder.join(part);
         if !next.exists() {
             std::fs::create_dir(&next)
@@ -855,23 +999,204 @@ fn save_asset(
         folder = next
             .canonicalize()
             .map_err(|e| format!("Cannot access download folder: {e}"))?;
-        if !folder.starts_with(&root) {
+        if !folder.starts_with(root) {
             return Err("Download folder resolves outside the project.".into());
         }
     }
-    let destination = folder.join(component(name)?);
-    let mut temp = tempfile::NamedTempFile::new_in(&folder)
-        .map_err(|e| format!("Cannot create temporary download: {e}"))?;
-    copy_verified(input, &mut temp, expected_size)?;
+    Ok(folder)
+}
+
+#[derive(Debug, Default)]
+struct ShelfManifest {
+    tag: Option<String>,
+    current: Vec<String>,
+    old: Vec<String>,
+}
+
+fn read_shelf_manifest(path: &Path) -> ShelfManifest {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return ShelfManifest::default();
+    };
+    let mut manifest = ShelfManifest::default();
+    for line in text.lines() {
+        let mut fields = line.split('\t');
+        match fields.next().unwrap_or_default() {
+            "TAG" => {
+                manifest.tag = fields
+                    .next()
+                    .map(str::to_string)
+                    .filter(|value| !value.is_empty());
+            }
+            "CUR" => {
+                let _id = fields.next();
+                if let Some(name) = fields.next() {
+                    manifest.current.push(name.to_string());
+                }
+            }
+            "OLD" => {
+                if let Some(name) = fields.next() {
+                    manifest.old.push(name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    manifest
+}
+
+fn rotate_previous_build(
+    root: &Path,
+    folder: &Path,
+    kind: &ReleaseAssetType,
+    repo: &str,
+    tag: &str,
+    new_name: &str,
+) -> Result<Vec<String>, String> {
+    let old_dir = ensure_project_dir(root, &[kind.folder, "old"])?;
+    let state_dir = ensure_project_dir(root, &[kind.folder, ".state"])?;
+    let manifest_path = state_dir.join(format!("{}.manifest", component(repo)?));
+    let manifest = read_shelf_manifest(&manifest_path);
+
+    let tag_changed = manifest.tag.as_deref() != Some(tag);
+    let mut old_names = manifest.old;
+    if tag_changed {
+        for old in &old_names {
+            if let Ok(old) = component(old) {
+                let _ = std::fs::remove_file(old_dir.join(old));
+            }
+        }
+        old_names.clear();
+    }
+
+    let current = if manifest.current.is_empty() && manifest.tag.is_none() {
+        repo_shelf_files(folder, repo)
+    } else {
+        manifest.current
+    };
+
+    for current_name in current {
+        if !tag_changed && current_name == new_name {
+            continue;
+        }
+        let Ok(current_component) = component(&current_name) else {
+            continue;
+        };
+        let source = folder.join(current_component);
+        if source.is_file() {
+            move_shelf_file(&source, &old_dir, current_component)?;
+            if !old_names.iter().any(|name| name == &current_name) {
+                old_names.push(current_name);
+            }
+        }
+    }
+    Ok(old_names)
+}
+
+fn move_shelf_file(source: &Path, old_dir: &Path, name: &str) -> Result<(), String> {
+    let destination = old_dir.join(name);
+    if destination.exists() {
+        std::fs::remove_file(&destination)
+            .map_err(|e| format!("Cannot replace previous build in old/: {e}"))?;
+    }
+    std::fs::rename(source, &destination)
+        .map_err(|e| format!("Cannot archive previous build in old/: {e}"))
+}
+
+fn write_shelf_manifest(
+    root: &Path,
+    kind: &ReleaseAssetType,
+    repo: &str,
+    tag: &str,
+    name: &str,
+    old: &[String],
+) -> Result<(), String> {
+    let state_dir = ensure_project_dir(root, &[kind.folder, ".state"])?;
+    let manifest_path = state_dir.join(format!("{}.manifest", component(repo)?));
+    let mut text = format!("TAG\t{tag}\nSIG\t{tag}\nCUR\t{tag}\t{name}\n");
+    for name in old {
+        text.push_str(&format!("OLD\t{name}\n"));
+    }
+    let mut temp = tempfile::NamedTempFile::new_in(&state_dir)
+        .map_err(|e| format!("Cannot create temporary manifest: {e}"))?;
+    temp.write_all(text.as_bytes())
+        .map_err(|e| format!("Cannot write shelf manifest: {e}"))?;
     temp.flush()
-        .map_err(|e| format!("Cannot flush download: {e}"))?;
-    temp.persist_noclobber(&destination).map_err(|e| {
-        format!(
-            "Cannot save download (the file may already exist): {}",
-            e.error
+        .map_err(|e| format!("Cannot flush shelf manifest: {e}"))?;
+    temp.persist(&manifest_path)
+        .map_err(|e| format!("Cannot save shelf manifest: {}", e.error))?;
+    Ok(())
+}
+
+fn repo_shelf_files(folder: &Path, repo: &str) -> Vec<String> {
+    let repo_tokens = name_tokens(repo);
+    if repo_tokens.is_empty() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            file_belongs_to_repo(&name, &repo_tokens).then_some(name)
+        })
+        .collect()
+}
+
+fn name_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn file_belongs_to_repo(file_name: &str, repo_tokens: &[String]) -> bool {
+    let file_tokens = name_tokens(file_name);
+    if file_tokens.len() < repo_tokens.len() || file_tokens[..repo_tokens.len()] != *repo_tokens {
+        return false;
+    }
+    let Some(next) = file_tokens.get(repo_tokens.len()) else {
+        return true;
+    };
+    next.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        || (next.starts_with('v') && next.chars().nth(1).is_some_and(|ch| ch.is_ascii_digit()))
+        || matches!(
+            next.as_str(),
+            "dmg"
+                | "pkg"
+                | "zip"
+                | "exe"
+                | "msi"
+                | "appimage"
+                | "deb"
+                | "rpm"
+                | "apk"
+                | "aab"
+                | "ipa"
+                | "tar"
+                | "tgz"
+                | "universal"
+                | "macos"
+                | "osx"
+                | "darwin"
+                | "linux"
+                | "windows"
+                | "win"
+                | "arm64"
+                | "aarch64"
+                | "x64"
+                | "x86"
+                | "amd64"
+                | "intel"
+                | "silicon"
+                | "setup"
+                | "installer"
+                | "release"
+                | "portable"
         )
-    })?;
-    Ok(destination)
 }
 
 fn copy_verified(
@@ -1192,12 +1517,22 @@ mod tests {
             "owner",
             "repo",
             "v1",
-            "file.zip",
-            "https://example.com/file.zip",
+            "file.bin",
+            "https://example.com/file.bin",
             Some(0),
         );
         assert!(result.is_err());
         assert!(!outside.path().join("installers").exists());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn type_shelf_rejects_symlink_outside_project() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("Release Dmgs")).unwrap();
+        let result = ensure_project_dir(&root.path().canonicalize().unwrap(), &["Release Dmgs"]);
+        assert!(result.is_err());
     }
     #[test]
     fn local_state_reports_size_without_claiming_identity() {
@@ -1216,6 +1551,104 @@ mod tests {
         assert_eq!(
             local_asset_state(root.path(), "o", "r", "v1", "missing", Some(3)),
             LocalAssetState::Missing
+        );
+    }
+
+    #[test]
+    fn downloads_into_type_shelf_and_rotates_previous_build() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let shelf = canonical.join("Release Dmgs");
+        let old = shelf.join("old");
+
+        let first = save_asset(
+            root.path(),
+            "owner",
+            "photocraft",
+            "v1",
+            "photocraft-1.0.dmg",
+            Some(3),
+            &mut &b"one"[..],
+        )
+        .unwrap();
+        assert_eq!(first, shelf.join("photocraft-1.0.dmg"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+
+        let second = save_asset(
+            root.path(),
+            "owner",
+            "photocraft",
+            "v2",
+            "photocraft-2.0.dmg",
+            Some(3),
+            &mut &b"two"[..],
+        )
+        .unwrap();
+        assert_eq!(second, shelf.join("photocraft-2.0.dmg"));
+        assert_eq!(std::fs::read(&second).unwrap(), b"two");
+        assert_eq!(
+            std::fs::read(old.join("photocraft-1.0.dmg")).unwrap(),
+            b"one"
+        );
+
+        save_asset(
+            root.path(),
+            "owner",
+            "photocraft",
+            "v2",
+            "photocraft-2.0.dmg",
+            Some(3),
+            &mut &b"new"[..],
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&second).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(old.join("photocraft-1.0.dmg")).unwrap(),
+            b"one"
+        );
+
+        let third = save_asset(
+            root.path(),
+            "owner",
+            "photocraft",
+            "v3",
+            "photocraft-3.0.dmg",
+            Some(3),
+            &mut &b"tri"[..],
+        )
+        .unwrap();
+        assert_eq!(third, shelf.join("photocraft-3.0.dmg"));
+        assert_eq!(
+            std::fs::read(old.join("photocraft-2.0.dmg")).unwrap(),
+            b"new"
+        );
+        assert!(!old.join("photocraft-1.0.dmg").exists());
+    }
+
+    #[test]
+    fn downloads_zip_into_its_own_shelf() {
+        let root = tempfile::tempdir().unwrap();
+        let path = save_asset(
+            root.path(),
+            "owner",
+            "repo",
+            "v1",
+            "build.zip",
+            Some(3),
+            &mut &b"zip"[..],
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            root.path()
+                .canonicalize()
+                .unwrap()
+                .join("Release Zips/build.zip")
+        );
+        assert!(!root.path().join("Release Dmgs").exists());
+        assert_eq!(
+            local_archived_files(root.path(), "repo", "zip"),
+            Vec::<(String, u64)>::new()
         );
     }
 }

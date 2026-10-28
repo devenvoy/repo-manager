@@ -127,6 +127,8 @@ impl ReleaseDesk {
                                                     this.settings = updated;
                                                     this.workspace_revision = this.workspace_revision.wrapping_add(1);
                                                     this.git_statuses.clear();
+                                                    this.languages_expanded.clear();
+                                                    this.language_breakdowns.clear();
                                                     this.release_state = Default::default();
                                                     if this.selected_project_id == Some(project_id) {
                                                         this.source_dialog = views::project_sources::SourceDialog::Select(source_index);
@@ -233,7 +235,7 @@ impl ReleaseDesk {
                             if let Some(source) = updated.projects.iter_mut().find(|p| p.id == project_id).and_then(|p| p.sources.iter_mut().find(|s| s.provider == provider && s.handle.eq_ignore_ascii_case(&handle))) {
                                 source.refresh_from_fetched(profile);
                                 match settings::save(&updated) {
-                                    Ok(()) => { this.settings = updated; this.projects = this.settings.projects.clone(); this.workspace_revision = this.workspace_revision.wrapping_add(1); this.git_statuses.clear(); this.release_state = Default::default(); this.message = format!("Refreshed @{handle}; your selections were kept."); }
+                                    Ok(()) => { this.settings = updated; this.projects = this.settings.projects.clone(); this.workspace_revision = this.workspace_revision.wrapping_add(1); this.git_statuses.clear(); this.languages_expanded.clear(); this.language_breakdowns.clear(); this.release_state = Default::default(); this.message = format!("Refreshed @{handle}; your selections were kept."); }
                                     Err(error) => this.message = error,
                                 }
                             } else { this.message = format!("@{handle} was removed while refreshing."); }

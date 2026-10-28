@@ -79,7 +79,7 @@ impl ReleaseDesk {
     pub(crate) fn confirm_import_dialog(
         &mut self,
         _candidate_handle: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(dialog) = self.import_dialog.take() else {
@@ -147,7 +147,13 @@ impl ReleaseDesk {
                     result: Ok(releases),
                 });
             }
-            self.release_state = crate::workspace_releases::ReleaseViewState::Loaded(loaded_repos);
+            let extension = self.settings.installer_extension.clone();
+            self.release_state = crate::workspace_releases::ReleaseViewState::Loaded {
+                repositories: loaded_repos,
+                presentations: Vec::new(),
+                extension,
+            };
+            self.refresh_release_presentations(cx);
         }
 
         // Cache avatar in background
@@ -161,7 +167,7 @@ impl ReleaseDesk {
 
         self.message =
             format!("Imported {discovered_repos_count} repositories from @{source_handle_clean}.");
-        self.check_repository_updates(None, true, window, cx);
+        self.check_repository_updates(None, true, cx);
         cx.notify();
     }
 }

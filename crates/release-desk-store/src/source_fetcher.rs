@@ -3,6 +3,7 @@
 
 use release_desk_core::error::DomainError;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Store a provider avatar locally so GPUI can render it without its HTTP image loader.
@@ -53,6 +54,134 @@ pub struct FetchedRepo {
     pub is_fork: bool,
     pub clone_url: String,
     pub default_branch: String,
+}
+
+/// A repository language and its share of the reported source code.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LanguageUsage {
+    pub name: String,
+    pub percentage: f64,
+}
+
+/// Load the language breakdown for one repository without fetching every repository's languages.
+pub fn fetch_repository_languages(
+    provider: &str,
+    full_name: &str,
+    token: Option<&str>,
+) -> Result<Vec<LanguageUsage>, DomainError> {
+    let segments: Vec<_> = full_name.split('/').collect();
+    let valid = segments.len() >= 2
+        && segments.iter().all(|segment| {
+            !segment.is_empty()
+                && *segment != "."
+                && *segment != ".."
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        });
+    if !valid {
+        return Err(DomainError::PortFailure {
+            port: "repository_languages",
+            message: "Repository name is invalid".into(),
+        });
+    }
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("ReleaseDesk/1.0")
+        .build()
+        .map_err(|error| DomainError::PortFailure {
+            port: "repository_languages",
+            message: format!("Could not prepare language request: {error}"),
+        })?;
+
+    let (url, port) = match provider {
+        "github" if segments.len() == 2 => (
+            format!("https://api.github.com/repos/{full_name}/languages"),
+            "github_api",
+        ),
+        "gitlab" => {
+            let encoded = full_name
+                .bytes()
+                .map(|byte| {
+                    if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                        (byte as char).to_string()
+                    } else {
+                        format!("%{byte:02X}")
+                    }
+                })
+                .collect::<String>();
+            (
+                format!("https://gitlab.com/api/v4/projects/{encoded}/languages"),
+                "gitlab_api",
+            )
+        }
+        _ => {
+            return Err(DomainError::PortFailure {
+                port: "repository_languages",
+                message: format!("Language breakdown is unavailable for {provider}"),
+            });
+        }
+    };
+
+    let mut request = client.get(url).header("Accept", "application/json");
+    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
+        request = if provider == "gitlab" {
+            request.header("PRIVATE-TOKEN", token)
+        } else {
+            request.bearer_auth(token)
+        };
+    }
+    let response = request.send().map_err(|error| DomainError::PortFailure {
+        port,
+        message: format!("Could not load repository languages: {error}"),
+    })?;
+    let response = response
+        .error_for_status()
+        .map_err(|error| DomainError::PortFailure {
+            port,
+            message: format!("Could not load repository languages: {error}"),
+        })?;
+    if provider == "github" {
+        let bytes: BTreeMap<String, u64> =
+            response.json().map_err(|error| DomainError::PortFailure {
+                port,
+                message: format!("Could not read language counts: {error}"),
+            })?;
+        Ok(language_percentages(
+            bytes.into_iter().map(|(name, count)| (name, count as f64)),
+        ))
+    } else {
+        let percentages: BTreeMap<String, f64> =
+            response.json().map_err(|error| DomainError::PortFailure {
+                port,
+                message: format!("Could not read language percentages: {error}"),
+            })?;
+        Ok(language_percentages(percentages))
+    }
+}
+
+fn language_percentages(values: impl IntoIterator<Item = (String, f64)>) -> Vec<LanguageUsage> {
+    let mut values: Vec<_> = values
+        .into_iter()
+        .filter(|(_, amount)| amount.is_finite() && *amount > 0.0)
+        .collect();
+    let total: f64 = values.iter().map(|(_, amount)| amount).sum();
+    if total <= 0.0 {
+        return Vec::new();
+    }
+    values.sort_by(|(name_a, amount_a), (name_b, amount_b)| {
+        amount_b
+            .total_cmp(amount_a)
+            .then_with(|| name_a.cmp(name_b))
+    });
+    values
+        .into_iter()
+        .map(|(name, amount)| LanguageUsage {
+            name,
+            percentage: amount / total * 100.0,
+        })
+        .collect()
 }
 
 /// Profile information and repository collection for a remote Git user or organization.
@@ -623,6 +752,28 @@ fn map_gitlab_repo(project: GlProjectItem) -> FetchedRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_percentages_are_sorted_and_normalized() {
+        let languages = language_percentages([
+            ("HTML".into(), 15.0),
+            ("Rust".into(), 970.0),
+            ("Python".into(), 6.0),
+            ("Empty".into(), 0.0),
+        ]);
+        assert_eq!(languages.len(), 3);
+        assert_eq!(languages[0].name, "Rust");
+        assert!((languages.iter().map(|item| item.percentage).sum::<f64>() - 100.0).abs() < 0.001);
+        assert!(languages[0].percentage > languages[1].percentage);
+    }
+
+    #[test]
+    fn invalid_language_target_fails_before_network() {
+        for target in ["owner", "owner/../repo", "owner/repo?query", "owner//repo"] {
+            assert!(fetch_repository_languages("github", target, None).is_err());
+        }
+        assert!(fetch_repository_languages("gitlab", "owner/../repo", None).is_err());
+    }
 
     #[test]
     fn pagination_fetches_every_page_and_never_returns_partial_results_on_error() {

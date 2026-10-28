@@ -1,5 +1,6 @@
 //! Repository master/detail browser matching the ArtCraft Release Desk design.
 
+use crate::colors::rgb;
 use crate::components::app_icon::repo_icon;
 use crate::components::avatar::source_avatar;
 use crate::components::badge::{branch_chip, language_chip, version_pill, visibility_chip};
@@ -9,6 +10,8 @@ use crate::components::icons::{
     refresh_icon, terminal_icon,
 };
 use crate::components::motion_button::Button;
+use crate::controllers::git_controller::GitActivity;
+use crate::icon_catalog::{Language, LanguageColor};
 use crate::repository_git::{RepositoryStatus, repository_owner};
 use crate::styles::CssExt as _;
 use crate::workspace::WorkspaceProject;
@@ -23,6 +26,29 @@ use gpui_kit::{
 };
 use release_desk_core::app_catalog::find_known_app;
 use release_desk_git::CloneStatus;
+use release_desk_store::source_fetcher::LanguageUsage;
+
+/// The state of an on-demand repository language request.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LanguageBreakdownState {
+    Loading,
+    Loaded(Vec<LanguageUsage>),
+    Error(String),
+}
+
+fn row_activity(
+    activity: Option<GitActivity>,
+    pending: &std::collections::HashSet<(usize, usize)>,
+    key: (usize, usize),
+) -> Option<GitActivity> {
+    activity.filter(|_| pending.contains(&key))
+}
+
+fn language_color(name: &str) -> gpui_kit::Rgba {
+    rgb(Language::from_name(name)
+        .map_or(LanguageColor::Unknown, Language::color)
+        .rgb())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorIconKind {
@@ -41,6 +67,64 @@ pub struct ExternalEditor {
     pub name: &'static str,
     pub app_name: &'static str,
     pub icon_kind: EditorIconKind,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RepositoryPresentation {
+    pub icon_path: Option<std::path::PathBuf>,
+    pub version_tag: Option<String>,
+    pub latest_snapshot: Option<release_desk_store::workspace_releases::WorkspaceRelease>,
+    pub present: bool,
+    pub recent_commits: Vec<crate::repository_git::GitCommit>,
+}
+
+/// Build one row's local presentation so it can be delivered with its status.
+pub fn build_repository_presentation(
+    project: &WorkspaceProject,
+    source_index: usize,
+    repo_index: usize,
+) -> Option<RepositoryPresentation> {
+    let source = project.sources.get(source_index)?;
+    let repo = source.repositories.get(repo_index)?;
+    let repo_dir = crate::repository_git::resolve_target_path(
+        &project.directory,
+        project.disk_layout,
+        repository_owner(source, repo),
+        &repo.name,
+    );
+    let icon_path = crate::components::app_icon::find_local_repo_icon(&repo_dir, &repo.name)
+        .or_else(|| {
+            crate::components::app_icon::find_cached_repo_icon(
+                &repo.name,
+                Some(repository_owner(source, repo)),
+            )
+        });
+    let latest_snapshot = release_desk_store::workspace_releases::load_snapshot_releases(
+        &project.directory,
+        &repo.name,
+    )
+    .and_then(|mut releases| {
+        if releases.is_empty() {
+            None
+        } else {
+            Some(releases.remove(0))
+        }
+    });
+    let version_tag = latest_snapshot
+        .as_ref()
+        .map(|release| release.tag_name.clone());
+    let present = repo_dir.join(".git").exists();
+    Some(RepositoryPresentation {
+        icon_path,
+        version_tag,
+        latest_snapshot,
+        present,
+        recent_commits: if present {
+            crate::repository_git::load_recent_commits(&repo_dir, 15)
+        } else {
+            Vec::new()
+        },
+    })
 }
 
 pub fn is_app_installed(app_name: &str) -> bool {
@@ -68,6 +152,11 @@ pub fn is_app_installed(app_name: &str) -> bool {
 }
 
 pub fn available_editors() -> Vec<ExternalEditor> {
+    static AVAILABLE_EDITORS: std::sync::OnceLock<Vec<ExternalEditor>> = std::sync::OnceLock::new();
+    AVAILABLE_EDITORS.get_or_init(discover_editors).clone()
+}
+
+fn discover_editors() -> Vec<ExternalEditor> {
     let all = [
         ExternalEditor {
             id: "vscode",
@@ -243,11 +332,7 @@ pub(crate) fn status_text(status: Option<&RepositoryStatus>) -> (&'static str, S
                         _ => "Local status only; remote has not been checked.".into(),
                     }
                 });
-                (
-                    label,
-                    detail,
-                    status.fetched && state.status == CloneStatus::Behind,
-                )
+                (label, detail, crate::repository_git::can_pull(status))
             }
         },
     }
@@ -268,33 +353,44 @@ pub fn render_project_repository_status<
     T: 'static,
     FCheck: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FUpdate: Fn(usize, usize, &mut T, &mut Window, &mut Context<T>) + Copy + 'static,
+    FPullAll: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FClone: Fn(usize, usize, &mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FCloneAll: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FSelect: Fn(usize, usize, &mut T, &mut Context<T>) + Copy + 'static,
     FOpen: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
     FBrowseSources: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FToggleCommits: Fn(&mut T, &mut Context<T>) + Copy + 'static,
+    FToggleLanguages: Fn(usize, usize, &mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FToggleEditorMenu: Fn(&mut T, &mut Context<T>) + Copy + 'static,
     FSelectEditor: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
     FOpenInEditor: Fn(std::path::PathBuf, String, &mut T, &mut Context<T>) + Copy + 'static,
 >(
     project: &WorkspaceProject,
     statuses: &[RepositoryStatus],
+    presentations: &std::collections::HashMap<(usize, usize), RepositoryPresentation>,
     selected: Option<(usize, usize)>,
     search_input: &Entity<InputState>,
     busy: bool,
+    check_completed: usize,
+    check_total: usize,
+    activity: Option<GitActivity>,
+    pending: &std::collections::HashSet<(usize, usize)>,
     commits_collapsed: bool,
+    languages_expanded: &std::collections::HashSet<(usize, usize)>,
+    language_breakdowns: &std::collections::HashMap<(usize, usize), LanguageBreakdownState>,
     selected_editor_id: &str,
     editor_menu_open: bool,
     cx: &Context<T>,
     on_check: FCheck,
     on_update: FUpdate,
+    on_pull_all: FPullAll,
     on_clone: FClone,
     on_clone_all: FCloneAll,
     on_select: FSelect,
     on_open: FOpen,
     on_browse_sources: FBrowseSources,
     on_toggle_commits: FToggleCommits,
+    on_toggle_languages: FToggleLanguages,
     on_toggle_editor_menu: FToggleEditorMenu,
     on_select_editor: FSelectEditor,
     on_open_in_editor: FOpenInEditor,
@@ -338,27 +434,32 @@ pub fn render_project_repository_status<
         })
         .or_else(|| repositories.first().map(|(s, r, _, _)| (*s, *r)));
 
+    let status_by_repo: std::collections::HashMap<_, _> = statuses
+        .iter()
+        .map(|status| ((status.source_index, status.repo_index), status))
+        .collect();
+
     let uncloned_count = all_repositories
         .iter()
-        .filter(|(s_idx, r_idx, s, r)| {
-            let status = statuses
-                .iter()
-                .find(|item| item.source_index == *s_idx && item.repo_index == *r_idx);
-            let not_cloned_status = status
-                .and_then(|item| item.state.as_ref().ok())
-                .is_some_and(|st| st.status == CloneStatus::NotCloned);
-            let owner = crate::repository_git::repository_owner(s, r);
-            let target_path = crate::repository_git::resolve_target_path(
-                &project.directory,
-                project.disk_layout,
-                owner,
-                &r.name,
-            );
-            not_cloned_status || !target_path.exists()
+        .filter(|(s_idx, r_idx, _, _)| {
+            status_by_repo.get(&(*s_idx, *r_idx)).is_some_and(|item| {
+                item.state
+                    .as_ref()
+                    .ok()
+                    .is_some_and(|st| st.status == CloneStatus::NotCloned)
+            })
         })
         .count();
 
-    let mut header_actions = div().flex().items_center().gap_3();
+    let mut header_actions = div().flex().flex_wrap().items_center().gap_3();
+    let pull_count = all_repositories
+        .iter()
+        .filter(|(source_index, repo_index, _, _)| {
+            presentations
+                .get(&(*source_index, *repo_index))
+                .is_some_and(|presentation| presentation.present)
+        })
+        .count();
 
     if uncloned_count > 0 {
         header_actions = header_actions.child(
@@ -371,13 +472,32 @@ pub fn render_project_repository_status<
         );
     }
 
+    if all_repositories.len() > 1 {
+        header_actions = header_actions.child(
+            Button::new("git-pull-all-updates")
+                .icon(download_icon())
+                .label(format!("Pull all cloned ({pull_count})"))
+                .primary()
+                .disabled(busy || pull_count == 0)
+                .on_click(cx.listener(move |this, _, window, cx| on_pull_all(this, window, cx))),
+        );
+    }
+
     header_actions = header_actions.child(
         Button::new("git-check-updates")
             .icon(refresh_icon())
-            .label(if busy {
-                "Checking…"
+            .label(if busy && check_total > 0 {
+                let verb = match activity {
+                    Some(GitActivity::Inspecting) => "Inspecting",
+                    Some(GitActivity::Checking) => "Checking",
+                    Some(GitActivity::Pulling) => "Pulling",
+                    None => "Working",
+                };
+                format!("{verb} {check_completed}/{check_total}")
+            } else if busy {
+                "Working…".to_string()
             } else {
-                "Check for updates"
+                "Check for updates".to_string()
             })
             .outline()
             .disabled(busy || all_repositories.is_empty())
@@ -500,9 +620,9 @@ pub fn render_project_repository_status<
 
     for (source_index, repo_index, source, repo) in &repositories {
         let (source_index, repo_index) = (*source_index, *repo_index);
-        let status = statuses
-            .iter()
-            .find(|status| status.source_index == source_index && status.repo_index == repo_index);
+        let status = status_by_repo.get(&(source_index, repo_index)).copied();
+        let active_row_activity = row_activity(activity, pending, (source_index, repo_index));
+        let row_is_pulling = active_row_activity == Some(GitActivity::Pulling);
 
         let is_active = active == Some((source_index, repo_index));
         let known = find_known_app(&repo.name);
@@ -529,7 +649,17 @@ pub fn render_project_repository_status<
                     .is_some_and(|st| st.status == CloneStatus::Error)
         });
 
-        let status_badge = if is_not_cloned {
+        let status_badge = if row_is_pulling {
+            div()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(cx.theme().primary.opacity(0.12))
+                .text_color(cx.theme().primary)
+                .text_size(px(10.))
+                .font_bold()
+                .child("Pulling…")
+        } else if is_not_cloned {
             div()
                 .px_2()
                 .py_0p5()
@@ -605,33 +735,21 @@ pub fn render_project_repository_status<
                 .text_color(cx.theme().muted_foreground)
                 .text_size(px(10.))
                 .font_bold()
-                .child(label)
+                .child(
+                    if status.is_none() && active_row_activity == Some(GitActivity::Inspecting) {
+                        "Inspecting…"
+                    } else if status.is_none() && active_row_activity == Some(GitActivity::Checking)
+                    {
+                        "Checking…"
+                    } else {
+                        label
+                    },
+                )
         };
 
-        let repo_dir = crate::repository_git::resolve_target_path(
-            &project.directory,
-            project.disk_layout,
-            repository_owner(source, repo),
-            &repo.name,
-        );
-        let row_icon_path = crate::components::app_icon::find_local_repo_icon(
-            &repo_dir, &repo.name,
-        )
-        .or_else(|| {
-            crate::components::app_icon::find_cached_repo_icon(
-                &repo.name,
-                Some(repository_owner(source, repo)),
-            )
-        });
-
-        let snapshot_rels = release_desk_store::workspace_releases::load_snapshot_releases(
-            &project.directory,
-            &repo.name,
-        );
-        let version_tag = snapshot_rels
-            .as_ref()
-            .and_then(|r| r.first())
-            .map(|r| r.tag_name.clone());
+        let presentation = presentations.get(&(source_index, repo_index));
+        let row_icon_path = presentation.and_then(|item| item.icon_path.as_deref());
+        let version_tag = presentation.and_then(|item| item.version_tag.as_deref());
 
         let row = div()
             .id(ElementId::Name(
@@ -667,7 +785,7 @@ pub fn render_project_repository_status<
                             .flex()
                             .items_center()
                             .gap_2p5()
-                            .child(repo_icon(&repo.name, 36., row_icon_path.as_deref()))
+                            .child(repo_icon(&repo.name, 36., row_icon_path))
                             .child(
                                 div()
                                     .flex_1()
@@ -715,7 +833,7 @@ pub fn render_project_repository_status<
                             .gap_1p5()
                             .flex_wrap()
                             .child(status_badge);
-                        if let Some(ref ver) = version_tag {
+                        if let Some(ver) = version_tag {
                             tags = tags.child(version_pill(ver, cx.theme()));
                         }
                         tags.child(branch_chip(&repo.default_branch, cx.theme()))
@@ -746,9 +864,9 @@ pub fn render_project_repository_status<
     });
 
     let detail_panel = if let Some((source_index, repo_index, source, repo)) = active_entry {
-        let status = statuses
-            .iter()
-            .find(|status| status.source_index == source_index && status.repo_index == repo_index);
+        let status = status_by_repo.get(&(source_index, repo_index)).copied();
+        let active_row_activity = row_activity(activity, pending, (source_index, repo_index));
+        let row_is_pulling = active_row_activity == Some(GitActivity::Pulling);
 
         let owner = crate::repository_git::repository_owner(source, repo);
         let target_path = crate::repository_git::resolve_target_path(
@@ -758,10 +876,15 @@ pub fn render_project_repository_status<
             &repo.name,
         );
 
-        let is_cloned = target_path.exists()
+        let is_cloned = presentations
+            .get(&(source_index, repo_index))
+            .is_some_and(|item| item.present)
             && !status
                 .and_then(|item| item.state.as_ref().ok())
                 .is_some_and(|st| st.status == CloneStatus::NotCloned);
+        let is_inspecting =
+            status.is_none() && active_row_activity == Some(GitActivity::Inspecting);
+        let is_checking = status.is_none() && active_row_activity == Some(GitActivity::Checking);
 
         let known = find_known_app(&repo.name);
         let browser_url = source
@@ -779,10 +902,9 @@ pub fn render_project_repository_status<
             .or_else(|| known.as_ref().map(|k| k.description.clone()))
             .unwrap_or_else(|| "Local Git workspace component".into());
 
-        let detail_icon_path =
-            crate::components::app_icon::find_local_repo_icon(&target_path, &repo.name).or_else(
-                || crate::components::app_icon::find_cached_repo_icon(&repo.name, Some(owner)),
-            );
+        let detail_icon_path = presentations
+            .get(&(source_index, repo_index))
+            .and_then(|item| item.icon_path.as_deref());
 
         let mut meta_badges = div().flex().items_center().gap_2p5().pt_2().flex_wrap();
         if let Some(ref lang) = repo.primary_language {
@@ -803,7 +925,7 @@ pub fn render_project_repository_status<
                     .flex()
                     .items_start()
                     .gap_4()
-                    .child(repo_icon(&repo.name, 60., detail_icon_path.as_deref()))
+                    .child(repo_icon(&repo.name, 60., detail_icon_path))
                     .child(
                         div()
                             .flex()
@@ -1068,7 +1190,27 @@ pub fn render_project_repository_status<
             );
 
         // Git Action Card
-        let git_card = if !is_cloned {
+        let git_card = if row_is_pulling {
+            div()
+                .p_4()
+                .rounded_xl()
+                .border_1()
+                .border_color(cx.theme().primary.opacity(0.3))
+                .bg(cx.theme().primary.opacity(0.05))
+                .text_size(px(13.))
+                .text_color(cx.theme().primary)
+                .child("Pulling updates for this repository…")
+        } else if is_inspecting {
+            div()
+                .p_4()
+                .rounded_xl()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary.opacity(0.08))
+                .text_size(px(13.))
+                .text_color(cx.theme().muted_foreground)
+                .child("Inspecting this repository locally…")
+        } else if !is_cloned {
             div()
                 .p_4()
                 .rounded_xl()
@@ -1100,7 +1242,7 @@ pub fn render_project_repository_status<
                 .child(
                     Button::new("git-clone-selected")
                         .icon(download_icon())
-                        .label(if busy { "Cloning…" } else { "Clone repository" })
+                        .label("Clone repository")
                         .primary()
                         .disabled(busy)
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -1110,8 +1252,20 @@ pub fn render_project_repository_status<
         } else {
             let (status_title, status_desc, is_behind, is_error) = match status {
                 None => (
-                    "Not checked",
-                    "Local repository status has not been inspected yet.".to_string(),
+                    if is_inspecting {
+                        "Inspecting…"
+                    } else if is_checking {
+                        "Checking…"
+                    } else {
+                        "Not checked"
+                    },
+                    if is_inspecting {
+                        "Inspecting this repository locally.".to_string()
+                    } else if is_checking {
+                        "Checking this repository against its remote.".to_string()
+                    } else {
+                        "Local repository status has not been inspected yet.".to_string()
+                    },
                     false,
                     false,
                 ),
@@ -1242,11 +1396,7 @@ pub fn render_project_repository_status<
             let action_btn = if is_behind {
                 Button::new("git-update-selected")
                     .icon(download_icon())
-                    .label(if busy {
-                        "Pulling updates…"
-                    } else {
-                        "Pull updates"
-                    })
+                    .label("Pull updates")
                     .primary()
                     .disabled(busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1255,7 +1405,7 @@ pub fn render_project_repository_status<
             } else if is_error {
                 Button::new("git-update-selected")
                     .icon(refresh_icon())
-                    .label(if busy { "Retrying…" } else { "Retry update" })
+                    .label("Retry update")
                     .danger()
                     .disabled(busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -1264,11 +1414,7 @@ pub fn render_project_repository_status<
             } else {
                 Button::new("git-update-selected")
                     .icon(refresh_icon())
-                    .label(if busy {
-                        "Checking…"
-                    } else {
-                        "Check for updates"
-                    })
+                    .label("Check for updates")
                     .outline()
                     .disabled(busy)
                     .on_click(cx.listener(move |this, _, window, cx| on_check(this, window, cx)))
@@ -1288,13 +1434,110 @@ pub fn render_project_repository_status<
                 .child(div().flex_shrink_0().child(action_btn))
         };
 
+        let languages_section = {
+            let key = (source_index, repo_index);
+            let expanded = languages_expanded.contains(&key);
+            let header = div()
+                .id("languages-toggle-header")
+                .flex()
+                .items_center()
+                .justify_between()
+                .p_3p5()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    on_toggle_languages(source_index, repo_index, this, window, cx);
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            if expanded {
+                                chevron_down_icon()
+                            } else {
+                                chevron_right_icon()
+                            }
+                            .w(px(14.))
+                            .h(px(14.))
+                            .text_color(cx.theme().muted_foreground),
+                        )
+                        .child(div().font_bold().text_size(px(14.)).child("Languages")),
+                );
+            let mut section = div()
+                .rounded_xl()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().background)
+                .overflow_hidden()
+                .child(header);
+
+            if expanded {
+                let mut content = div()
+                    .p_4()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .flex()
+                    .flex_col()
+                    .gap_3();
+                match language_breakdowns.get(&key) {
+                    Some(LanguageBreakdownState::Loaded(languages)) if !languages.is_empty() => {
+                        let mut bar = div()
+                            .w_full()
+                            .max_w(px(540.))
+                            .h(px(9.))
+                            .rounded_full()
+                            .overflow_hidden()
+                            .flex();
+                        let mut legend = div().flex().flex_wrap().items_center().gap_3();
+                        for language in languages {
+                            let color = language_color(&language.name);
+                            bar = bar.child(
+                                div()
+                                    .h_full()
+                                    .flex_basis(px(0.))
+                                    .flex_grow(language.percentage as f32)
+                                    .bg(color),
+                            );
+                            legend = legend.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .text_size(px(12.))
+                                    .child(div().w(px(8.)).h(px(8.)).rounded_full().bg(color))
+                                    .child(div().font_bold().child(language.name.clone()))
+                                    .child(
+                                        div()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!("{:.1}%", language.percentage)),
+                                    ),
+                            );
+                        }
+                        content = content.child(bar).child(legend);
+                    }
+                    Some(LanguageBreakdownState::Loaded(_)) => {
+                        content =
+                            content.child("No language statistics reported for this repository.");
+                    }
+                    Some(LanguageBreakdownState::Error(error)) => {
+                        content = content.child(format!("{error} · Collapse and reopen to retry."));
+                    }
+                    Some(LanguageBreakdownState::Loading) | None => {
+                        content = content.child("Loading language statistics…");
+                    }
+                }
+                section = section.child(content);
+            }
+            section
+        };
+
         // Commits Section (Collapsible with git commit table)
         let commits_section = {
-            let commits = if is_cloned {
-                crate::repository_git::load_recent_commits(&target_path, 15)
-            } else {
-                Vec::new()
-            };
+            let commits = presentations
+                .get(&(source_index, repo_index))
+                .map(|item| item.recent_commits.clone())
+                .unwrap_or_default();
 
             let header_el = div()
                 .id("commits-toggle-header")
@@ -1340,6 +1583,8 @@ pub fn render_project_repository_status<
                                 .font_bold()
                                 .child(if is_cloned {
                                     format!("{} commits", commits.len())
+                                } else if is_inspecting {
+                                    "Inspecting…".to_string()
                                 } else {
                                     "Not cloned".to_string()
                                 }),
@@ -1375,7 +1620,11 @@ pub fn render_project_repository_status<
                         .justify_center()
                         .text_size(px(12.))
                         .text_color(cx.theme().muted_foreground)
-                        .child("Repository is not cloned locally yet. Clone this repository to view commit history.")
+                        .child(if is_inspecting {
+                            "Inspecting local commit history…"
+                        } else {
+                            "Repository is not cloned locally yet. Clone this repository to view commit history."
+                        })
                 } else if commits.is_empty() {
                     div()
                         .p_6()
@@ -1480,11 +1729,9 @@ pub fn render_project_repository_status<
 
         // Changelog / Scorecard Card
         let changelog_card = {
-            let snapshot_releases = release_desk_store::workspace_releases::load_snapshot_releases(
-                &project.directory,
-                &repo.name,
-            );
-            let latest_snapshot_release = snapshot_releases.as_ref().and_then(|r| r.first());
+            let latest_snapshot_release = presentations
+                .get(&(source_index, repo_index))
+                .and_then(|item| item.latest_snapshot.as_ref());
 
             if let Some(rel) = latest_snapshot_release {
                 let version_label = rel.tag_name.clone();
@@ -1631,7 +1878,11 @@ pub fn render_project_repository_status<
                         div()
                             .font_bold()
                             .text_size(px(14.))
-                            .child("No releases published yet"),
+                            .child(if is_inspecting {
+                                "Loading local release information…"
+                            } else {
+                                "No releases published yet"
+                            }),
                     )
                     .child(
                         div()
@@ -1652,6 +1903,7 @@ pub fn render_project_repository_status<
             .h(px(640.))
             .overflow_y_scrollbar()
             .child(hero)
+            .child(languages_section)
             .child(directory_row)
             .child(git_card)
             .child(commits_section)
@@ -1702,6 +1954,20 @@ pub fn render_project_repository_status<
 mod tests {
     use super::*;
     use release_desk_git::{CloneState, CloneStatus};
+
+    #[test]
+    fn pull_activity_is_scoped_to_pending_repositories() {
+        let pending = std::collections::HashSet::from([(0, 1)]);
+        assert_eq!(
+            row_activity(Some(GitActivity::Pulling), &pending, (0, 1)),
+            Some(GitActivity::Pulling)
+        );
+        assert_eq!(
+            row_activity(Some(GitActivity::Pulling), &pending, (0, 2)),
+            None
+        );
+        assert_eq!(row_activity(None, &pending, (0, 1)), None);
+    }
 
     fn status(state: CloneStatus, fetched: bool) -> RepositoryStatus {
         RepositoryStatus {

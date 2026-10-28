@@ -4,12 +4,39 @@ use crate::app::ReleaseDesk;
 use crate::workspace::ProjectSection;
 use gpui_kit::{Context, Window};
 
+/// The active Git operation shown in repository progress controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitActivity {
+    Inspecting,
+    Checking,
+    Pulling,
+}
+
 impl ReleaseDesk {
     pub(crate) fn check_repository_updates(
         &mut self,
         update: Option<(usize, usize)>,
         local_only: bool,
-        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let activity = if update.is_some() {
+            GitActivity::Pulling
+        } else if local_only {
+            GitActivity::Inspecting
+        } else {
+            GitActivity::Checking
+        };
+        self.run_repository_operation(activity, update, cx);
+    }
+
+    pub(crate) fn pull_all_updates(&mut self, cx: &mut Context<Self>) {
+        self.run_repository_operation(GitActivity::Pulling, None, cx);
+    }
+
+    fn run_repository_operation(
+        &mut self,
+        activity: GitActivity,
+        update: Option<(usize, usize)>,
         cx: &mut Context<Self>,
     ) {
         if self.git_busy {
@@ -23,7 +50,7 @@ impl ReleaseDesk {
         };
         let project_id = project.id;
         let revision = self.workspace_revision;
-        let targets = match crate::repository_git::targets(project) {
+        let all_targets = match crate::repository_git::targets(project) {
             Ok(targets) => targets,
             Err(error) => {
                 self.message = error;
@@ -31,75 +58,205 @@ impl ReleaseDesk {
                 return;
             }
         };
+        let targets: Vec<_> = match (activity, update) {
+            (GitActivity::Pulling, Some(key)) => all_targets
+                .into_iter()
+                .filter(|target| (target.source_index, target.repo_index) == key)
+                .collect(),
+            (GitActivity::Pulling, None) => all_targets
+                .into_iter()
+                .filter(|target| {
+                    self.repository_presentations
+                        .get(&(target.source_index, target.repo_index))
+                        .is_some_and(|presentation| presentation.present)
+                })
+                .collect(),
+            _ => all_targets,
+        };
+        if targets.is_empty() {
+            if activity == GitActivity::Pulling {
+                self.message = "No cloned repositories are ready to pull.".into();
+                cx.notify();
+            }
+            return;
+        }
         self.git_busy = true;
-        self.message = if local_only {
-            "Inspecting local repositories…"
-        } else if update.is_some() {
-            "Updating repository…"
-        } else {
-            "Checking repositories for updates…"
+        self.git_activity = Some(activity);
+        self.git_pending = targets
+            .iter()
+            .map(|target| (target.source_index, target.repo_index))
+            .collect();
+        self.git_check_completed = 0;
+        self.git_check_total = targets.len();
+        self.message = match activity {
+            GitActivity::Inspecting => "Inspecting local repositories…",
+            GitActivity::Checking => "Checking repositories for updates…",
+            GitActivity::Pulling => "Pulling repository updates…",
         }
         .into();
         cx.notify();
-        let previous_statuses = self.git_statuses.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let project_clone = project.clone();
+        let (status_tx, status_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut message = None;
-            let statuses = targets
-                .iter()
-                .map(|target| {
-                    if update == Some((target.source_index, target.repo_index)) {
-                        message = Some(match crate::repository_git::update(target) {
-                            Ok(outcome) => format!(
-                                "{}: {}",
-                                target.name,
-                                match outcome {
-                                    release_desk_git::SyncOutcome::FastForwarded { .. } =>
-                                        "updated successfully".to_string(),
-                                    release_desk_git::SyncOutcome::AlreadyCurrent =>
-                                        "already up to date".to_string(),
-                                    release_desk_git::SyncOutcome::Skipped(state) =>
-                                        format!("not updated ({:?})", state.status),
-                                    release_desk_git::SyncOutcome::Cloned { .. } =>
-                                        "cloned".to_string(),
+            let messages = crate::modules::parallel::map_bounded(
+                &targets,
+                crate::modules::parallel::IO_WORKERS,
+                |target| {
+                    let (status, result) = match activity {
+                        GitActivity::Inspecting => (crate::repository_git::inspect(target), None),
+                        GitActivity::Checking => {
+                            (crate::repository_git::check_for_updates(target), None)
+                        }
+                        GitActivity::Pulling => {
+                            match crate::repository_git::pull_existing(target) {
+                                Ok(outcome) => {
+                                    let (message, status) = match outcome {
+                                        release_desk_git::SyncOutcome::FastForwarded { .. } => {
+                                            ("updated successfully".to_string(), None)
+                                        }
+                                        release_desk_git::SyncOutcome::AlreadyCurrent => {
+                                            ("already up to date".to_string(), None)
+                                        }
+                                        release_desk_git::SyncOutcome::Cloned { .. } => {
+                                            ("cloned".to_string(), None)
+                                        }
+                                        release_desk_git::SyncOutcome::Skipped(state) => {
+                                            let message =
+                                                format!("not updated ({:?})", state.status);
+                                            (
+                                                message,
+                                                Some(crate::repository_git::RepositoryStatus {
+                                                    source_index: target.source_index,
+                                                    repo_index: target.repo_index,
+                                                    state: Ok(state),
+                                                    fetched: false,
+                                                }),
+                                            )
+                                        }
+                                    };
+                                    let status = status.unwrap_or_else(|| {
+                                        let mut inspected = crate::repository_git::inspect(target);
+                                        inspected.fetched = inspected.state.is_ok();
+                                        inspected
+                                    });
+                                    let succeeded = status.state.is_ok() && status.fetched;
+                                    (
+                                        status,
+                                        Some((succeeded, format!("{}: {message}", target.name))),
+                                    )
                                 }
-                            ),
-                            Err(error) => format!("{}: {error}", target.name),
+                                Err(error) => (
+                                    crate::repository_git::RepositoryStatus {
+                                        source_index: target.source_index,
+                                        repo_index: target.repo_index,
+                                        state: Err(error.clone()),
+                                        fetched: false,
+                                    },
+                                    Some((false, format!("{}: {error}", target.name))),
+                                ),
+                            }
+                        }
+                    };
+                    let presentation =
+                        crate::views::project_repository_status::build_repository_presentation(
+                            &project_clone,
+                            target.source_index,
+                            target.repo_index,
+                        );
+                    let _ = status_tx.send((status, presentation));
+                    result
+                },
+            );
+            let results: Vec<_> = messages.into_iter().flatten().collect();
+            let message = if activity == GitActivity::Pulling && results.len() > 1 {
+                let succeeded = results.iter().filter(|(success, _)| *success).count();
+                Some(format!(
+                    "Pulled {succeeded} repositories; {} need attention.",
+                    results.len() - succeeded
+                ))
+            } else {
+                results.into_iter().next().map(|(_, message)| message)
+            };
+            let _ = done_tx.send(message);
+        });
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(40))
+                    .await;
+                let mut arrived = Vec::new();
+                while let Ok(row) = status_rx.try_recv() {
+                    arrived.push(row);
+                }
+                if !arrived.is_empty() {
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            if this.workspace_revision == revision
+                                && this.selected_project_id == Some(project_id)
+                            {
+                                this.git_check_completed += arrived.len();
+                                for (status, presentation) in arrived {
+                                    this.git_pending.remove(&(status.source_index, status.repo_index));
+                                    if let Some(presentation) = presentation {
+                                        this.repository_presentations.insert(
+                                            (status.source_index, status.repo_index),
+                                            presentation,
+                                        );
+                                    }
+                                    if let Some(existing) = this.git_statuses.iter_mut().find(|item| {
+                                        item.source_index == status.source_index
+                                            && item.repo_index == status.repo_index
+                                    }) {
+                                        *existing = status;
+                                    } else {
+                                        this.git_statuses.push(status);
+                                    }
+                                }
+                                cx.notify();
+                            }
                         });
                     }
-                    if local_only {
-                        crate::repository_git::inspect(target)
-                    } else if update.is_none()
-                        || update == Some((target.source_index, target.repo_index))
-                    {
-                        crate::repository_git::check_for_updates(target)
-                    } else {
-                        previous_statuses
-                            .iter()
-                            .find(|status| {
-                                status.source_index == target.source_index
-                                    && status.repo_index == target.repo_index
-                            })
-                            .cloned()
-                            .unwrap_or_else(|| crate::repository_git::inspect(target))
-                    }
-                })
-                .collect::<Vec<_>>();
-            let _ = tx.send((statuses, message));
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
-                match rx.try_recv() {
-                    Ok((statuses, message)) => { let _ = this.update_in(cx, |this, _, cx| {
-                        this.git_busy = false;
-                        if this.selected_project_id == Some(project_id) && this.workspace_revision == revision {
-                            this.git_statuses = statuses;
-                            this.message = message.unwrap_or_else(|| if local_only { "Local repository inspection finished." } else { "Repository check finished. See each repository for its status." }.into());
+                }
+                match done_rx.try_recv() {
+                    Ok(message) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                if this.workspace_revision == revision
+                                    && this.selected_project_id == Some(project_id)
+                                {
+                                    this.git_busy = false;
+                                    this.git_activity = None;
+                                    this.git_pending.clear();
+                                    this.git_check_total = 0;
+                                    this.git_check_completed = 0;
+                                    this.message = message.unwrap_or_else(|| match activity {
+                                        GitActivity::Inspecting => "Local repository inspection finished.",
+                                        GitActivity::Checking => "Repository check finished. See each repository for its status.",
+                                        GitActivity::Pulling => "Repository pulls finished. See each repository for its status.",
+                                    }.into());
+                                    cx.notify();
+                                }
+                            });
                         }
-                        cx.notify();
-                    }); return; }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => { let _ = this.update_in(cx, |this, _, cx| { this.git_busy = false; this.message = "Repository check stopped unexpectedly.".into(); cx.notify(); }); return; }
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                if this.workspace_revision == revision {
+                                    this.git_busy = false;
+                                    this.git_activity = None;
+                                    this.git_pending.clear();
+                                    this.git_check_total = 0;
+                                    this.git_check_completed = 0;
+                                    this.message = "Repository check stopped unexpectedly.".into();
+                                    cx.notify();
+                                }
+                            });
+                        }
+                        return;
+                    }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 }
             }
@@ -289,7 +446,7 @@ impl ReleaseDesk {
                     .await;
                 match rx.try_recv() {
                     Ok((status, outcome_msg)) => {
-                        let _ = this.update_in(cx, |this, window, cx| {
+                        let _ = this.update_in(cx, |this, _, cx| {
                             this.git_busy = false;
                             if this.selected_project_id == Some(project_id)
                                 && this.workspace_revision == revision
@@ -303,7 +460,7 @@ impl ReleaseDesk {
                                     this.git_statuses.push(status);
                                 }
                                 this.message = outcome_msg;
-                                this.check_repository_updates(None, true, window, cx);
+                                this.check_repository_updates(None, true, cx);
                             }
                             cx.notify();
                         });
@@ -399,13 +556,13 @@ impl ReleaseDesk {
                     .await;
                 match rx.try_recv() {
                     Ok((finished, message)) => {
-                        let _ = this.update_in(cx, |this, window, cx| {
+                        let _ = this.update_in(cx, |this, _, cx| {
                             if finished {
                                 this.git_busy = false;
                                 if this.selected_project_id == Some(project_id)
                                     && this.workspace_revision == revision
                                 {
-                                    this.check_repository_updates(None, true, window, cx);
+                                    this.check_repository_updates(None, true, cx);
                                 }
                             }
                             if this.selected_project_id == Some(project_id)

@@ -314,6 +314,8 @@ impl ReleaseDesk {
         self.workspace_revision = self.workspace_revision.wrapping_add(1);
         self.git_statuses.clear();
         self.selected_repository = None;
+        self.languages_expanded.clear();
+        self.language_breakdowns.clear();
         self.release_state = Default::default();
         if let Err(error) = settings::save(&updated) {
             self.message = error;
