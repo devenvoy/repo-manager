@@ -636,44 +636,7 @@ pub fn render_live_releases<T: 'static>(
 
                 let slots_row = div().flex().flex_wrap().gap_3().child(slot1).child(slot2).child(slot3);
 
-                // Release notes / changelog block
-                let notes_block = latest_release.and_then(|rel| {
-                    let text = rel
-                        .description
-                        .as_deref()
-                        .filter(|d| !d.trim().is_empty())?;
-
-                    if text.is_empty() {
-                        return None;
-                    }
-
-                    Some(
-                        div()
-                            .p_3()
-                            .rounded_lg()
-                            .bg(cx.theme().secondary.opacity(0.03))
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .flex()
-                            .flex_col()
-                            .gap_1p5()
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .font_bold()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("RELEASE NOTES"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(text.to_string()),
-                            ),
-                    )
-                });
-
-                let mut card = div()
+                let card = div()
                     .css_card_padded(cx.theme())
                     .shadow_xs()
                     .flex()
@@ -681,10 +644,6 @@ pub fn render_live_releases<T: 'static>(
                     .gap_4()
                     .child(card_head)
                     .child(slots_row);
-
-                if let Some(notes) = notes_block {
-                    card = card.child(notes);
-                }
 
                 list = list.child(card);
             }

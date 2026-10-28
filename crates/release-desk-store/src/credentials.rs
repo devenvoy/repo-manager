@@ -5,10 +5,8 @@
 
 use release_desk_core::error::DomainError;
 use release_desk_core::port::SecretStorePort;
-#[cfg(not(target_os = "macos"))]
 use std::collections::HashMap;
 use std::process::Command;
-#[cfg(not(target_os = "macos"))]
 use std::sync::RwLock;
 
 const SERVICE_NAME: &str = "Release Desk";
@@ -16,8 +14,7 @@ const SERVICE_NAME: &str = "Release Desk";
 /// OS-backed secret store for GitHub tokens and sensitive credentials.
 #[derive(Debug, Default)]
 pub struct OsSecretStore {
-    #[cfg(not(target_os = "macos"))]
-    fallback: RwLock<HashMap<String, String>>,
+    cache: RwLock<HashMap<String, String>>,
 }
 
 impl OsSecretStore {
@@ -94,13 +91,21 @@ impl OsSecretStore {
     #[cfg(target_os = "macos")]
     fn get_macos_keychain(&self, key: &str) -> Result<Option<String>, DomainError> {
         use security_framework::passwords::get_generic_password;
+        if let Some(secret) = self.cache.read().unwrap().get(key).cloned() {
+            return Ok(Some(secret));
+        }
         match get_generic_password(SERVICE_NAME, key) {
-            Ok(bytes) => String::from_utf8(bytes)
-                .map(Some)
-                .map_err(|_| DomainError::PortFailure {
+            Ok(bytes) => {
+                let secret = String::from_utf8(bytes).map_err(|_| DomainError::PortFailure {
                     port: "Keychain",
                     message: "stored credential is not valid UTF-8".into(),
-                }),
+                })?;
+                self.cache
+                    .write()
+                    .unwrap()
+                    .insert(key.to_string(), secret.clone());
+                Ok(Some(secret))
+            }
             Err(error) if error.code() == -25300 => Ok(None),
             Err(error) => Err(DomainError::PortFailure {
                 port: "Keychain",
@@ -111,21 +116,26 @@ impl OsSecretStore {
 
     #[cfg(not(target_os = "macos"))]
     fn get_macos_keychain(&self, key: &str) -> Result<Option<String>, DomainError> {
-        Ok(self.fallback.read().unwrap().get(key).cloned())
+        Ok(self.cache.read().unwrap().get(key).cloned())
     }
 
     #[cfg(target_os = "macos")]
     fn set_macos_keychain(&self, key: &str, secret: &str) -> Result<(), DomainError> {
         security_framework::passwords::set_generic_password(SERVICE_NAME, key, secret.as_bytes())
             .map_err(|error| DomainError::PortFailure {
-                port: "Keychain",
-                message: format!("cannot save credential: {error}"),
-            })
+            port: "Keychain",
+            message: format!("cannot save credential: {error}"),
+        })?;
+        self.cache
+            .write()
+            .unwrap()
+            .insert(key.to_string(), secret.to_string());
+        Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]
     fn set_macos_keychain(&self, key: &str, secret: &str) -> Result<(), DomainError> {
-        self.fallback
+        self.cache
             .write()
             .unwrap()
             .insert(key.to_string(), secret.to_string());
@@ -134,19 +144,24 @@ impl OsSecretStore {
 
     #[cfg(target_os = "macos")]
     fn delete_macos_keychain(&self, key: &str) -> Result<(), DomainError> {
-        match security_framework::passwords::delete_generic_password(SERVICE_NAME, key) {
+        let result = match security_framework::passwords::delete_generic_password(SERVICE_NAME, key)
+        {
             Ok(()) => Ok(()),
             Err(error) if error.code() == -25300 => Ok(()),
             Err(error) => Err(DomainError::PortFailure {
                 port: "Keychain",
                 message: format!("cannot delete credential: {error}"),
             }),
+        };
+        if result.is_ok() {
+            self.cache.write().unwrap().remove(key);
         }
+        result
     }
 
     #[cfg(not(target_os = "macos"))]
     fn delete_macos_keychain(&self, key: &str) -> Result<(), DomainError> {
-        self.fallback.write().unwrap().remove(key);
+        self.cache.write().unwrap().remove(key);
         Ok(())
     }
 }

@@ -160,8 +160,6 @@ impl ReleaseDesk {
             webview_auth.clone(),
             EventBroadcaster::default(),
         );
-        let detected_system_credential =
-            OsSecretStore::discover_system_git_credentials("github.com");
         let selected_editor_id =
             if views::project_repository_status::is_app_installed("Visual Studio Code") {
                 "vscode".to_string()
@@ -217,7 +215,7 @@ impl ReleaseDesk {
             saved_credential_ref: None,
             auth_mode_choice: AuthModeChoice::OAuthBrowser,
             auth_status_message: None,
-            detected_system_credential,
+            detected_system_credential: None,
             local_oauth_server: None,
             device_flow_user_code: None,
             device_flow_verification_uri: None,
