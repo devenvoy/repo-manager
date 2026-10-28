@@ -1,20 +1,20 @@
 //! Selected project workspace and its settings boundary.
 
+use crate::components::motion_button::Button;
 use crate::components::provider_icon::provider_icon;
 use crate::workspace::{ProjectSection, WorkspaceProject};
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div, px,
 };
-use release_desk_core::project::DiskLayout;
 
 #[allow(clippy::too_many_arguments)] // One renderer boundary carries the selected project and four UI actions.
 pub fn render_project_workspace<
     T: 'static,
-    FSection: Fn(ProjectSection, &mut T, &mut Context<T>) + Copy + 'static,
+    FSection: Fn(ProjectSection, &mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FBack: Fn(&mut T, &mut Context<T>) + Copy + 'static,
     FEdit: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FDelete: Fn(&mut T, &mut Context<T>) + Copy + 'static,
@@ -31,32 +31,51 @@ pub fn render_project_workspace<
 ) -> impl IntoElement {
     let mut tabs = div()
         .flex()
-        .gap_2()
+        .flex_wrap()
+        .gap_1()
         .border_b_1()
         .border_color(cx.theme().border);
     for tab in ProjectSection::ALL {
         let is_active = tab == section;
-        let mut btn = Button::new(format!("section-{tab:?}")).label(tab.label().to_string());
-        if is_active {
-            btn = btn.primary();
-        } else {
-            btn = btn.ghost();
-        }
-        tabs =
-            tabs.child(btn.on_click(cx.listener(move |this, _, _, cx| on_section(tab, this, cx))));
+        tabs = tabs.child(
+            div()
+                .border_b_2()
+                .border_color(if is_active {
+                    cx.theme().primary
+                } else {
+                    cx.theme().background
+                })
+                .child(
+                    Button::new(format!("section-{tab:?}"))
+                        .label(tab.label().to_string())
+                        .ghost()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            on_section(tab, this, window, cx)
+                        })),
+                ),
+        );
     }
 
     let body = match section {
-        ProjectSection::Overview => div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(div().text_size(px(20.)).font_bold().child("Project overview"))
-            .child(detail_row("Provider", project.provider.label(), cx))
-            .child(detail_row("Account", &project.account, cx))
-            .child(detail_row("Folder", &project.directory.display().to_string(), cx))
-            .child(detail_row("Disk layout", if project.disk_layout == DiskLayout::Grouped { "Grouped by owner" } else { "Flat" }, cx))
-            .into_any_element(),
+        ProjectSection::Overview => {
+            let discovered: usize = project.sources.iter().map(|source| source.repositories.len()).sum();
+            let selected: usize = project.sources.iter().flat_map(|source| &source.repositories).filter(|repo| repo.selected).count();
+            div()
+                .flex().flex_col().gap_5()
+                .child(div().text_size(px(12.)).font_bold().text_color(cx.theme().primary).child("YOUR WORKSPACE"))
+                .child(div().text_size(px(27.)).font_bold().child("Your repositories, together."))
+                .child(div().text_size(px(14.)).text_color(cx.theme().muted_foreground).child("Browse the repositories you discover, choose what to manage, and keep your local copies up to date."))
+                .child(div().flex().flex_wrap().gap_3()
+                    .child(summary_card("Sources", project.sources.len(), cx))
+                    .child(summary_card("Discovered repositories", discovered, cx))
+                    .child(summary_card("Selected to manage", selected, cx)))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(Button::new("overview-sources").label(if project.sources.is_empty() { "Add your first source" } else { "Browse sources" }).primary().on_click(cx.listener(move |this, _, window, cx| on_section(ProjectSection::Sources, this, window, cx))))
+                    .child(Button::new("overview-repos").label("View repositories").outline().on_click(cx.listener(move |this, _, window, cx| on_section(ProjectSection::Repositories, this, window, cx))))
+                    .child(Button::new("overview-releases").label("View releases").ghost().on_click(cx.listener(move |this, _, window, cx| on_section(ProjectSection::Releases, this, window, cx)))))
+                .child(div().pt_3().text_size(px(12.)).text_color(cx.theme().muted_foreground).child(format!("Project folder · {}", project.directory.display())))
+                .into_any_element()
+        },
         ProjectSection::Sources | ProjectSection::Repositories | ProjectSection::Releases => section_content.unwrap_or_else(|| empty_section("No content yet", "Add sources and repositories to see details here.", cx).into_any_element()),
         ProjectSection::Settings => div()
             .flex()
@@ -122,11 +141,44 @@ pub fn render_project_workspace<
         )
         .child(tabs)
         .child(
+            if matches!(section, ProjectSection::Overview | ProjectSection::Settings) {
+                div()
+                    .p_6()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .child(body)
+                    .into_any_element()
+            } else {
+                div().min_h(px(560.)).child(body).into_any_element()
+            },
+        )
+}
+
+fn summary_card<T: 'static>(label: &str, count: usize, cx: &Context<T>) -> impl IntoElement {
+    div()
+        .flex_1()
+        .min_w(px(150.))
+        .p_4()
+        .rounded_lg()
+        .bg(cx.theme().background)
+        .border_1()
+        .border_color(cx.theme().border)
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
             div()
-                .p_5()
-                .rounded_xl()
-                .bg(cx.theme().secondary)
-                .child(body),
+                .text_size(px(25.))
+                .font_bold()
+                .child(count.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child(label.to_string()),
         )
 }
 
@@ -168,99 +220,5 @@ fn empty_section<T: 'static>(title: &str, message: &str, cx: &Context<T>) -> imp
                 .text_size(px(12.))
                 .text_color(cx.theme().muted_foreground)
                 .child(message.to_string()),
-        )
-}
-
-/// Render the Release shelf for a project with multi-platform filters and installer destination note.
-pub fn render_project_releases<
-    T: 'static,
-    FPlatform: Fn(&'static str, &mut T, &mut Context<T>) + Copy + 'static,
-    FDownload: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
->(
-    project: &WorkspaceProject,
-    current_platform: &'static str,
-    cx: &Context<T>,
-    on_platform: FPlatform,
-    on_download: FDownload,
-) -> impl IntoElement {
-    let platforms = ["macOS", "Windows", "Linux", "All"];
-    let mut platform_bar = div().flex().gap_1().p_1().rounded_lg().bg(cx.theme().muted);
-    for platform in platforms {
-        let is_selected = current_platform == platform;
-        let mut btn = Button::new(format!("platform-{platform}")).label(platform.to_string());
-        if is_selected {
-            btn = btn.primary();
-        } else {
-            btn = btn.ghost();
-        }
-        platform_bar = platform_bar.child(
-            btn.on_click(cx.listener(move |this, _, _, cx| on_platform(platform, this, cx))),
-        );
-    }
-
-    let installers_path = project.directory.join(".release-desk").join("installers");
-
-    div()
-        .flex()
-        .flex_col()
-        .gap_5()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(div().text_size(px(11.)).font_bold().text_color(cx.theme().primary).child("RELEASES"))
-                        .child(div().text_size(px(20.)).font_bold().child("Release shelf"))
-                        .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child(format!("Downloaded assets are saved in: {}", installers_path.display()))),
-                )
-                .child(platform_bar),
-        )
-        .child(
-            div()
-                .p_4()
-                .rounded_lg()
-                .bg(cx.theme().secondary)
-                .border_1()
-                .border_color(cx.theme().border)
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(div().font_bold().child(format!("{} builds for {}", current_platform, project.name)))
-                        .child(div().text_size(px(11.)).text_color(cx.theme().muted_foreground).child("Per-project storage")),
-                )
-                .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child("Select repositories and fetch upstream release tags to manage and stage build installers."))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .pt_2()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("{}-latest-asset", project.name.to_lowercase().replace(' ', "-"))),
-                        )
-                        .child(
-                            Button::new("download-sample-asset")
-                                .label("Stage in .release-desk/installers/")
-                                .primary()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    on_download("latest-build".into(), this, cx);
-                                })),
-                        ),
-                ),
         )
 }

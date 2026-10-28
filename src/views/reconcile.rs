@@ -1,8 +1,9 @@
 //! Local backup snapshot reconciliation and disaster recovery panel.
 
+use crate::components::motion_button::Button;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, div, px};
 use release_desk_core::snapshot::MismatchReport;

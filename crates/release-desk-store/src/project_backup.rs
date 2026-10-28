@@ -293,7 +293,7 @@ mod tests {
 
         // 1. In sync
         let report = manager
-            .detect_mismatch(temp.path(), &[repo1.clone()])
+            .detect_mismatch(temp.path(), std::slice::from_ref(&repo1))
             .unwrap();
         assert!(report.is_synchronized());
         assert_eq!(report.matched_repositories, vec!["repo-alpha"]);

@@ -1,6 +1,7 @@
 //! First-run setup and library initialization view.
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use crate::components::motion_button::Button;
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::{Context, Entity, IntoElement, ParentElement as _, Styled as _, div};

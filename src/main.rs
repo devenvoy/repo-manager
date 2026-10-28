@@ -55,10 +55,17 @@ struct ReleaseDesk {
     oauth_client_id_input: Entity<InputState>,
     token_input: Entity<InputState>,
     source_input: Entity<InputState>,
+    source_search: Entity<InputState>,
+    source_dialog: views::project_sources::SourceDialog,
+    source_busy: bool,
     store_items: Vec<AppStoreItem>,
     selected_app_id: Option<String>,
-    reviewing_clones: bool,
-    selected_platform: &'static str,
+    git_statuses: Vec<repo_manager::repository_git::RepositoryStatus>,
+    selected_repository: Option<(usize, usize)>,
+    git_busy: bool,
+    workspace_revision: u64,
+    release_state: repo_manager::workspace_releases::ReleaseViewState,
+    release_busy: bool,
     message: String,
     nav_history: Vec<NavLocation>,
     nav_index: usize,
@@ -75,6 +82,20 @@ struct ReleaseDesk {
     device_flow_verification_uri: Option<String>,
     device_flow_canceller: Option<Arc<std::sync::atomic::AtomicBool>>,
     active_webview_child: Option<std::process::Child>,
+}
+
+fn project_auth_token(
+    project: &WorkspaceProject,
+    secret_store: &OsSecretStore,
+) -> Result<Option<String>, String> {
+    let Some(reference) = &project.credential_ref else {
+        return Ok(None);
+    };
+    match secret_store.get_secret(reference) {
+        Ok(Some(token)) if !token.is_empty() => Ok(Some(token)),
+        Ok(_) => Err("Selected project credential is missing. Connect the account again.".into()),
+        Err(error) => Err(format!("Cannot read selected project credential: {error}")),
+    }
 }
 
 fn find_webview_binary() -> Option<std::path::PathBuf> {
@@ -121,6 +142,9 @@ impl ReleaseDesk {
             cx.new(|cx| InputState::new(window, cx).placeholder("Personal access token"));
         let source_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Handle or profile URL"));
+        let source_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search repositories"));
+        cx.observe(&source_search, |_, _, cx| cx.notify()).detach();
         let secret_store = Arc::new(OsSecretStore::new());
         let browser_auth = Arc::new(SystemBrowserAuthPort::new());
         let webview_auth = Arc::new(ModalWebviewAuthPort::new());
@@ -151,10 +175,17 @@ impl ReleaseDesk {
             oauth_client_id_input,
             token_input,
             source_input,
+            source_search,
+            source_dialog: Default::default(),
+            source_busy: false,
             store_items: Vec::new(),
             selected_app_id: None,
-            reviewing_clones: false,
-            selected_platform: "macOS",
+            git_statuses: Vec::new(),
+            selected_repository: None,
+            git_busy: false,
+            workspace_revision: 0,
+            release_state: Default::default(),
+            release_busy: false,
             message,
             nav_history: vec![initial_loc],
             nav_index: 0,
@@ -172,6 +203,34 @@ impl ReleaseDesk {
             active_webview_child: None,
         };
         app.apply_appearance(window, cx);
+        let avatar_requests: Vec<_> = app
+            .projects
+            .iter()
+            .flat_map(|project| &project.sources)
+            .filter_map(WorkspaceSource::avatar_cache_request)
+            .filter(|(_, path)| !path.is_file())
+            .collect();
+        if !avatar_requests.is_empty() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for (url, path) in avatar_requests {
+                    let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path);
+                }
+                let _ = tx.send(());
+            });
+            cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(100))
+                        .await;
+                    if rx.try_recv().is_ok() {
+                        let _ = this.update_in(cx, |_, _, cx| cx.notify());
+                        return;
+                    }
+                }
+            })
+            .detach();
+        }
         app
     }
 
@@ -189,6 +248,17 @@ impl ReleaseDesk {
     }
 
     fn apply_nav_location(&mut self, loc: NavLocation) {
+        let next_project = match &loc {
+            NavLocation::Project(id, _) => Some(*id),
+            _ => None,
+        };
+        if next_project != self.selected_project_id {
+            self.workspace_revision = self.workspace_revision.wrapping_add(1);
+            self.git_statuses.clear();
+            self.selected_repository = None;
+            self.release_state = Default::default();
+            self.source_dialog = views::project_sources::SourceDialog::Closed;
+        }
         match loc {
             NavLocation::ProjectHub => {
                 self.tab = WorkspaceTab::ProjectHub;
@@ -244,22 +314,41 @@ impl ReleaseDesk {
         let is_dark = mode.is_dark();
         Theme::update(cx, |theme| {
             if is_dark {
-                theme.background = gpui_kit::hsla(222.0 / 360.0, 0.40, 0.08, 1.0);
-                theme.secondary = gpui_kit::hsla(222.0 / 360.0, 0.40, 0.05, 1.0);
-                theme.border = gpui_kit::hsla(217.0 / 360.0, 0.25, 0.20, 1.0);
-                theme.primary = gpui_kit::hsla(232.0 / 360.0, 0.85, 0.65, 1.0);
-                theme.foreground = gpui_kit::hsla(210.0 / 360.0, 0.40, 0.98, 1.0);
-                theme.muted_foreground = gpui_kit::hsla(215.0 / 360.0, 0.20, 0.65, 1.0);
-                theme.muted = gpui_kit::hsla(222.0 / 360.0, 0.35, 0.14, 1.0);
+                theme.background = gpui_kit::hsla(216.0 / 360.0, 0.23, 0.086, 1.0);
+                theme.secondary = gpui_kit::hsla(219.0 / 360.0, 0.21, 0.13, 1.0);
+                theme.border = gpui_kit::hsla(218.0 / 360.0, 0.20, 0.22, 1.0);
+                theme.primary = gpui_kit::hsla(232.0 / 360.0, 1.0, 0.78, 1.0);
+                theme.primary_foreground = gpui_kit::hsla(225.0 / 360.0, 0.32, 0.09, 1.0);
+                theme.foreground = gpui_kit::hsla(215.0 / 360.0, 0.22, 0.93, 1.0);
+                theme.muted_foreground = gpui_kit::hsla(216.0 / 360.0, 0.17, 0.65, 1.0);
+                theme.muted = gpui_kit::hsla(229.0 / 360.0, 0.35, 0.21, 1.0);
+                theme.success = gpui_kit::hsla(150.0 / 360.0, 0.58, 0.60, 1.0);
+                theme.warning = gpui_kit::hsla(38.0 / 360.0, 0.86, 0.62, 1.0);
+                theme.danger = gpui_kit::hsla(5.0 / 360.0, 1.0, 0.75, 1.0);
             } else {
-                theme.background = gpui_kit::hsla(220.0 / 360.0, 0.14, 0.97, 1.0);
-                theme.secondary = gpui_kit::hsla(220.0 / 360.0, 0.18, 0.95, 1.0);
-                theme.border = gpui_kit::hsla(216.0 / 360.0, 0.23, 0.91, 1.0);
-                theme.primary = gpui_kit::hsla(232.0 / 360.0, 0.80, 0.56, 1.0);
-                theme.foreground = gpui_kit::hsla(218.0 / 360.0, 0.37, 0.15, 1.0);
-                theme.muted_foreground = gpui_kit::hsla(217.0 / 360.0, 0.14, 0.48, 1.0);
-                theme.muted = gpui_kit::hsla(220.0 / 360.0, 0.25, 0.93, 1.0);
+                theme.background = gpui_kit::hsla(216.0 / 360.0, 0.23, 0.96, 1.0);
+                theme.secondary = gpui_kit::hsla(0.0, 0.0, 1.0, 1.0);
+                theme.border = gpui_kit::hsla(218.0 / 360.0, 0.20, 0.87, 1.0);
+                theme.primary = gpui_kit::hsla(232.0 / 360.0, 0.72, 0.52, 1.0);
+                theme.primary_foreground = gpui_kit::hsla(0.0, 0.0, 1.0, 1.0);
+                theme.foreground = gpui_kit::hsla(218.0 / 360.0, 0.28, 0.12, 1.0);
+                theme.muted_foreground = gpui_kit::hsla(216.0 / 360.0, 0.14, 0.40, 1.0);
+                theme.muted = gpui_kit::hsla(232.0 / 360.0, 0.73, 0.94, 1.0);
+                theme.success = gpui_kit::hsla(151.0 / 360.0, 0.68, 0.28, 1.0);
+                theme.warning = gpui_kit::hsla(35.0 / 360.0, 1.0, 0.30, 1.0);
+                theme.danger = gpui_kit::hsla(5.0 / 360.0, 0.71, 0.40, 1.0);
             }
+            theme.button = theme.secondary;
+            theme.button_foreground = theme.foreground;
+            theme.button_primary = theme.primary;
+            theme.button_primary_foreground = theme.primary_foreground;
+            theme.button_primary_hover =
+                gpui_kit::hsla(232.0 / 360.0, 0.90, if is_dark { 0.83 } else { 0.47 }, 1.0);
+            theme.button_primary_active =
+                gpui_kit::hsla(232.0 / 360.0, 0.90, if is_dark { 0.70 } else { 0.40 }, 1.0);
+            theme.tokens.button_primary = theme.button_primary.into();
+            theme.tokens.button_primary_hover = theme.button_primary_hover.into();
+            theme.tokens.button_primary_active = theme.button_primary_active.into();
         });
     }
 
@@ -363,7 +452,11 @@ impl ReleaseDesk {
     fn connect_system_credential(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some((ref username, ref token)) = self.detected_system_credential {
             let cred_key = format!("release_desk_{}_{}", self.setup_provider.as_str(), username);
-            let _ = self.secret_store.set_secret(&cred_key, token);
+            if let Err(error) = self.secret_store.set_secret(&cred_key, token) {
+                self.message = format!("Could not save account credential: {error}");
+                cx.notify();
+                return;
+            }
             self.saved_credential_ref = Some(cred_key);
             self.selected_saved_account = Some(username.clone());
             self.auth_mode_choice = AuthModeChoice::SavedAccount;
@@ -387,6 +480,19 @@ impl ReleaseDesk {
         cx: &mut Context<Self>,
     ) {
         let cred_key = format!("release_desk_{}_{}", self.setup_provider.as_str(), handle);
+        match self.secret_store.get_secret(&cred_key) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                self.message = "Saved account credential is missing. Connect again.".into();
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.message = format!("Cannot read saved account: {error}");
+                cx.notify();
+                return;
+            }
+        }
         self.selected_saved_account = Some(handle.clone());
         self.saved_credential_ref = Some(cred_key);
         self.auth_mode_choice = AuthModeChoice::SavedAccount;
@@ -508,7 +614,11 @@ impl ReleaseDesk {
 
                                     let _ = this.update_in(cx, |this, window, cx| {
                                         let cred_key = format!("release_desk_github_{user_login}");
-                                        let _ = this.secret_store.set_secret(&cred_key, &access_token);
+                                        if let Err(error) = this.secret_store.set_secret(&cred_key, &access_token) {
+                                            this.message = format!("Could not save account credential: {error}");
+                                            cx.notify();
+                                            return;
+                                        }
                                         this.saved_credential_ref = Some(cred_key);
                                         this.selected_saved_account = Some(user_login.clone());
                                         this.auth_status_message = Some(format!(
@@ -621,26 +731,11 @@ impl ReleaseDesk {
                             });
 
                             if let Ok(Some(outcome)) = outcome {
-                                let _ = this.update_in(cx, |this, window, cx| {
+                                let _ = this.update_in(cx, |this, _window, cx| {
                                     match outcome {
-                                        OAuthRedirectOutcome::Success { code } => {
-                                            let cred_key = format!(
-                                                "release_desk_{}_browser_oauth",
-                                                this.setup_provider.as_str()
-                                            );
-                                            let _ = this.secret_store.set_secret(&cred_key, &code);
-                                            this.saved_credential_ref = Some(cred_key);
-                                            this.selected_saved_account =
-                                                Some("browser-authorized".into());
-                                            this.auth_status_message = Some(
-                                                "Successfully authenticated via browser (5,000 req/hr)."
-                                                    .into(),
-                                            );
-                                            this.message =
-                                                "Browser authentication received successfully.".into();
-                                            this.account_input.update(cx, |input, cx| {
-                                                input.set_value("browser-authorized", window, cx);
-                                            });
+                                        OAuthRedirectOutcome::Success { .. } => {
+                                            this.message = "Browser sign-in returned an authorization code, but token exchange is not available. Use a personal access token or device sign-in.".into();
+                                            this.auth_status_message = Some(this.message.clone());
                                         }
                                         OAuthRedirectOutcome::Error { message } => {
                                             this.auth_status_message = Some(format!(
@@ -796,7 +891,11 @@ impl ReleaseDesk {
                                             let _ = child.kill();
                                         }
                                         let cred_key = format!("release_desk_github_{user_login}");
-                                        let _ = this.secret_store.set_secret(&cred_key, &access_token);
+                                        if let Err(error) = this.secret_store.set_secret(&cred_key, &access_token) {
+                                            this.message = format!("Could not save account credential: {error}");
+                                            cx.notify();
+                                            return;
+                                        }
                                         this.saved_credential_ref = Some(cred_key);
                                         this.selected_saved_account = Some(user_login.clone());
                                         this.auth_status_message = Some(format!(
@@ -934,7 +1033,11 @@ impl ReleaseDesk {
             return;
         }
         let cred_key = format!("release_desk_{}_pat", self.setup_provider.as_str());
-        let _ = self.secret_store.set_secret(&cred_key, &token);
+        if let Err(error) = self.secret_store.set_secret(&cred_key, &token) {
+            self.message = format!("Could not save token: {error}");
+            cx.notify();
+            return;
+        }
         self.saved_credential_ref = Some(cred_key);
         self.selected_saved_account = Some("token-user".into());
         self.auth_status_message =
@@ -1007,7 +1110,7 @@ impl ReleaseDesk {
             cx.notify();
             return;
         }
-        if self.setup_step < 2 {
+        if self.setup_step < 1 {
             self.setup_step += 1;
             self.message.clear();
             cx.notify();
@@ -1037,7 +1140,11 @@ impl ReleaseDesk {
                 self.setup_provider.as_str(),
                 key_suffix
             );
-            let _ = self.secret_store.set_secret(&cred_key, &token);
+            if let Err(error) = self.secret_store.set_secret(&cred_key, &token) {
+                self.message = format!("Could not save token: {error}");
+                cx.notify();
+                return;
+            }
             Some(cred_key)
         } else if let Some(existing) = self
             .editing_project_id
@@ -1147,6 +1254,10 @@ impl ReleaseDesk {
             return;
         };
         change(project);
+        self.workspace_revision = self.workspace_revision.wrapping_add(1);
+        self.git_statuses.clear();
+        self.selected_repository = None;
+        self.release_state = Default::default();
         if let Err(error) = settings::save(&updated) {
             self.message = error;
         } else {
@@ -1157,34 +1268,243 @@ impl ReleaseDesk {
         cx.notify();
     }
 
-    fn add_source(&mut self, cx: &mut Context<Self>) {
-        let raw = self.source_input.read(cx).value().to_string();
-        match WorkspaceSource::sample(&raw) {
-            Ok(source) => {
-                if self
-                    .selected_project_id
-                    .and_then(|id| self.projects.iter().find(|project| project.id == id))
-                    .is_some_and(|project| {
-                        project
-                            .sources
-                            .iter()
-                            .any(|existing| existing.handle == source.handle)
-                    })
-                {
-                    self.message = "That source is already in this project.".into();
+    fn add_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.source_busy {
+            return;
+        }
+        let raw = self.source_input.read(cx).value().trim().to_string();
+        if raw.is_empty() {
+            self.message = "Enter a user handle, organization, or repository URL.".into();
+            cx.notify();
+            return;
+        }
+
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|project| project.id == id))
+        else {
+            self.message = "No project selected.".into();
+            cx.notify();
+            return;
+        };
+
+        let default_provider = project.provider.as_str();
+        let (provider, owner, _) =
+            release_desk_store::source_fetcher::parse_input_target(&raw, default_provider);
+
+        if owner.is_empty()
+            || owner.contains(['?', '#', ' ', '\\'])
+            || owner.chars().any(char::is_control)
+        {
+            self.message = "Enter a valid user or organization handle, or profile URL.".into();
+            cx.notify();
+            return;
+        }
+
+        if let Some(existing_index) = project.sources.iter().position(|existing| {
+            existing.provider.eq_ignore_ascii_case(&provider)
+                && existing.handle.eq_ignore_ascii_case(&owner)
+        }) {
+            self.source_dialog = views::project_sources::SourceDialog::Select(existing_index);
+            self.message = format!(
+                "@{owner} is already a source. Choose repositories from its existing profile."
+            );
+            cx.notify();
+            return;
+        }
+
+        let project_id = project.id;
+        let auth_token = if provider == project.provider.as_str() {
+            match project_auth_token(project, &self.secret_store) {
+                Ok(token) => token,
+                Err(error) => {
+                    self.message = error;
                     cx.notify();
                     return;
                 }
-                self.change_selected_project(|project| project.sources.push(source), cx);
             }
-            Err(error) => {
-                self.message = error;
-                cx.notify();
+        } else {
+            None
+        };
+
+        let input_for_fetch = raw.clone();
+        let provider_for_fetch = default_provider.to_string();
+        let auth_token_clone = auth_token.clone();
+
+        self.source_busy = true;
+        self.message = format!("Fetching live repositories for @{owner} from {provider}...");
+        cx.notify();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let res = release_desk_store::source_fetcher::fetch_source_input(
+                &input_for_fetch,
+                &provider_for_fetch,
+                auth_token_clone.as_deref(),
+            );
+            if let Ok((profile, _)) = &res {
+                if let Some((url, path)) =
+                    WorkspaceSource::from_fetched(profile.clone(), None).avatar_cache_request()
+                {
+                    let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path);
+                }
             }
+            let _ = tx.send(res);
+        });
+
+        let display_owner = owner.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(50))
+                    .await;
+
+                match rx.try_recv() {
+                    Ok(res) => {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.source_busy = false;
+                            match res {
+                                Ok((profile, specific_repo)) => {
+                                    let source = WorkspaceSource::from_fetched(
+                                        profile,
+                                        specific_repo.as_deref(),
+                                    );
+                                    if specific_repo.is_some() && !source.repositories.iter().any(|repo| repo.selected) {
+                                        this.message = format!("Repository {} was not found or is not accessible.", specific_repo.as_deref().unwrap_or_default());
+                                        cx.notify();
+                                        return;
+                                    }
+                                    let repo_count = source.repositories.len();
+                                    let handle = source.handle.clone();
+                                    let mut updated = this.settings.clone();
+                                    if let Some(project) = updated.projects.iter_mut().find(|p| p.id == project_id) {
+                                        if !project.sources.iter().any(|existing| existing.provider == source.provider && existing.handle.eq_ignore_ascii_case(&source.handle)) {
+                                            project.sources.push(source);
+                                            let source_index = project.sources.len() - 1;
+                                            match settings::save(&updated) {
+                                                Ok(()) => {
+                                                    this.projects = updated.projects.clone();
+                                                    this.settings = updated;
+                                                    this.workspace_revision = this.workspace_revision.wrapping_add(1);
+                                                    this.git_statuses.clear();
+                                                    this.release_state = Default::default();
+                                                    if this.selected_project_id == Some(project_id) {
+                                                        this.source_dialog = views::project_sources::SourceDialog::Select(source_index);
+                                                    }
+                                                    if this.selected_project_id == Some(project_id) && this.source_input.read(cx).value().trim() == raw {
+                                                        this.source_input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
+                                                    }
+                                                    this.message = format!("Discovered {repo_count} repositories for @{handle}.");
+                                                }
+                                                Err(error) => this.message = error,
+                                            }
+                                        } else { this.message = format!("Source @{handle} is already in this project."); }
+                                    } else { this.message = "The project was removed while the source was loading.".into(); }
+                                }
+                                Err(err) => {
+                                    this.message =
+                                        format!("Could not fetch source @{display_owner}: {err}");
+                                }
+                            }
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let _ = this.update_in(cx, |this, _window, cx| {
+                            this.source_busy = false;
+                            this.message = format!(
+                                "Failed to fetch source @{display_owner}: request aborted."
+                            );
+                            cx.notify();
+                        });
+                        return;
+                    }
+                }
+            }
+
+
+        })
+        .detach();
+    }
+
+    fn refresh_source(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.source_busy {
+            return;
         }
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+        else {
+            return;
+        };
+        let Some(source) = project.sources.get(index) else {
+            return;
+        };
+        let project_id = project.id;
+        let handle = source.handle.clone();
+        let provider = source.provider.clone();
+        let token = if provider == project.provider.as_str() {
+            match project_auth_token(project, &self.secret_store) {
+                Ok(token) => token,
+                Err(error) => {
+                    self.message = error;
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let fetch_handle = handle.clone();
+        let fetch_provider = provider.clone();
+        self.source_busy = true;
+        self.message = format!("Refreshing @{handle}…");
+        cx.notify();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = release_desk_store::source_fetcher::fetch_profile_and_repos(
+                &fetch_handle,
+                &fetch_provider,
+                token.as_deref(),
+            );
+            if let Ok(profile) = &result {
+                if let Some((url, path)) =
+                    WorkspaceSource::from_fetched(profile.clone(), None).avatar_cache_request()
+                {
+                    let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path);
+                }
+            }
+            let _ = tx.send(result);
+        });
+        cx.spawn_in(window, async move |this, cx| { loop {
+            cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+            match rx.try_recv() {
+                Ok(result) => { let _ = this.update_in(cx, |this, _, cx| {
+                    this.source_busy = false;
+                    match result {
+                        Err(error) => this.message = format!("Could not refresh @{handle}: {error}"),
+                        Ok(profile) => {
+                            let mut updated = this.settings.clone();
+                            if let Some(source) = updated.projects.iter_mut().find(|p| p.id == project_id).and_then(|p| p.sources.iter_mut().find(|s| s.provider == provider && s.handle.eq_ignore_ascii_case(&handle))) {
+                                source.refresh_from_fetched(profile);
+                                match settings::save(&updated) {
+                                    Ok(()) => { this.settings = updated; this.projects = this.settings.projects.clone(); this.workspace_revision = this.workspace_revision.wrapping_add(1); this.git_statuses.clear(); this.release_state = Default::default(); this.message = format!("Refreshed @{handle}; your selections were kept."); }
+                                    Err(error) => this.message = error,
+                                }
+                            } else { this.message = format!("@{handle} was removed while refreshing."); }
+                        }
+                    } cx.notify();
+                }); return; }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => { let _ = this.update_in(cx, |this, _, cx| { this.source_busy = false; this.message = "Source refresh stopped unexpectedly.".into(); cx.notify(); }); return; }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }}).detach();
     }
 
     fn remove_source(&mut self, source_index: usize, cx: &mut Context<Self>) {
+        self.source_dialog = views::project_sources::SourceDialog::Closed;
         self.change_selected_project(
             |project| {
                 if source_index < project.sources.len() {
@@ -1193,6 +1513,35 @@ impl ReleaseDesk {
             },
             cx,
         );
+    }
+
+    fn open_source_url(&mut self, url: &str, cx: &mut Context<Self>) {
+        let safe = url::Url::parse(url).is_ok_and(|parsed| {
+            parsed.scheme() == "https"
+                && parsed.host_str().is_some()
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+        });
+        if !safe {
+            self.message = "Could not open this provider link safely.".into();
+            cx.notify();
+            return;
+        }
+        cx.open_url(url);
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(url).spawn();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "start", "", url])
+                .spawn();
+        }
     }
 
     fn toggle_source_repo(
@@ -1213,10 +1562,6 @@ impl ReleaseDesk {
             },
             cx,
         );
-    }
-
-    fn set_repository_list_mode(&mut self, mode: RepositoryListMode, cx: &mut Context<Self>) {
-        self.change_selected_project(|project| project.repository_list_mode = mode, cx);
     }
 
     fn preview_app_action(&mut self, id: String, cx: &mut Context<Self>) {
@@ -1250,28 +1595,430 @@ impl ReleaseDesk {
         cx.notify();
     }
 
-    fn select_all_source_repos(
-        &mut self,
-        source_index: usize,
-        select: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.change_selected_project(
-            |project| {
-                if let Some(source) = project.sources.get_mut(source_index) {
-                    for repo in &mut source.repositories {
-                        repo.selected = select;
+    fn refresh_releases(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.release_busy {
+            return;
+        }
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+        else {
+            return;
+        };
+        let project_id = project.id;
+        let revision = self.workspace_revision;
+        let token = match project_auth_token(project, &self.secret_store) {
+            Ok(token) => token,
+            Err(error) => {
+                self.message = error;
+                cx.notify();
+                return;
+            }
+        };
+        let jobs: Vec<_> = project
+            .sources
+            .iter()
+            .flat_map(|source| {
+                source
+                    .repositories
+                    .iter()
+                    .filter(|r| r.selected)
+                    .map(|repo| {
+                        (
+                            source.provider.clone(),
+                            repo_manager::repository_git::repository_owner(source, repo)
+                                .to_string(),
+                            repo.name.clone(),
+                            if source.provider == project.provider.as_str() {
+                                token.clone()
+                            } else {
+                                None
+                            },
+                        )
+                    })
+            })
+            .collect();
+        self.release_busy = true;
+        self.release_state = repo_manager::workspace_releases::ReleaseViewState::Loading;
+        cx.notify();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let results = jobs
+                .into_iter()
+                .map(|(provider, owner, name, token)| {
+                    let result = release_desk_store::workspace_releases::fetch_releases(
+                        &provider, &owner, &name, token,
+                    );
+                    repo_manager::workspace_releases::RepositoryReleases {
+                        provider,
+                        owner,
+                        repository: name,
+                        result,
                     }
+                })
+                .collect();
+            let _ = tx.send(results);
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match rx.try_recv() {
+                    Ok(results) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            this.release_busy = false;
+                            if this.selected_project_id == Some(project_id)
+                                && this.workspace_revision == revision
+                            {
+                                this.release_state =
+                                    repo_manager::workspace_releases::ReleaseViewState::Loaded(
+                                        results,
+                                    );
+                            }
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            this.release_busy = false;
+                            this.release_state = Default::default();
+                            this.message = "Release fetch stopped unexpectedly.".into();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 }
-            },
-            cx,
-        );
+            }
+        })
+        .detach();
     }
 
-    fn execute_clone_plan(&mut self, count: usize, cx: &mut Context<Self>) {
-        self.reviewing_clones = false;
-        self.message = format!("Cloning planned and staged for {count} repositories.");
+    #[allow(clippy::too_many_arguments)]
+    fn download_release(
+        &mut self,
+        provider: String,
+        owner: String,
+        repo: String,
+        tag: String,
+        name: String,
+        url: String,
+        size: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.release_busy {
+            return;
+        }
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+        else {
+            return;
+        };
+        let directory = project.directory.clone();
+        let private = project.sources.iter().any(|source| {
+            source.provider == provider
+                && source.repositories.iter().any(|item| {
+                    item.name == repo
+                        && item.is_private
+                        && repo_manager::repository_git::repository_owner(source, item)
+                            .eq_ignore_ascii_case(&owner)
+                })
+        });
+        let token = if private && project.provider.as_str() == provider {
+            match project_auth_token(project, &self.secret_store) {
+                Ok(token) => token,
+                Err(error) => {
+                    self.message = error;
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        if private && token.is_none() {
+            self.message =
+                format!("Connect a {provider} account with access to download this private asset.");
+            cx.notify();
+            return;
+        }
+        self.release_busy = true;
+        self.message = format!("Downloading {name}…");
         cx.notify();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = match (provider.as_str(), token) {
+                ("github", Some(token)) => {
+                    release_desk_store::workspace_releases::download_github_asset(
+                        &directory, &owner, &repo, &tag, &name, size, &token,
+                    )
+                }
+                ("gitlab", Some(token)) => {
+                    release_desk_store::workspace_releases::download_gitlab_asset(
+                        &directory, &owner, &repo, &tag, &name, &url, size, &token,
+                    )
+                }
+                (_, Some(_)) => {
+                    Err("Private downloads are not supported for this provider.".into())
+                }
+                (_, None) => release_desk_store::workspace_releases::download_asset(
+                    &directory, &owner, &repo, &tag, &name, &url, size,
+                ),
+            };
+            let _ = tx.send(result);
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match rx.try_recv() {
+                    Ok(result) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            this.release_busy = false;
+                            this.message = match result {
+                                Ok(path) => format!("Downloaded to {}", path.display()),
+                                Err(error) => format!("Download failed: {error}"),
+                            };
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            this.release_busy = false;
+                            this.message = "Download stopped unexpectedly.".into();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn check_repository_updates(
+        &mut self,
+        update: Option<(usize, usize)>,
+        local_only: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.git_busy {
+            return;
+        }
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+        else {
+            return;
+        };
+        let project_id = project.id;
+        let revision = self.workspace_revision;
+        let targets = match repo_manager::repository_git::targets(project) {
+            Ok(targets) => targets,
+            Err(error) => {
+                self.message = error;
+                cx.notify();
+                return;
+            }
+        };
+        self.git_busy = true;
+        self.message = if local_only {
+            "Inspecting local repositories…"
+        } else if update.is_some() {
+            "Updating repository…"
+        } else {
+            "Checking repositories for updates…"
+        }
+        .into();
+        cx.notify();
+        let previous_statuses = self.git_statuses.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut message = None;
+            let statuses = targets
+                .iter()
+                .map(|target| {
+                    if update == Some((target.source_index, target.repo_index)) {
+                        message = Some(match repo_manager::repository_git::update(target) {
+                            Ok(outcome) => format!(
+                                "{}: {}",
+                                target.name,
+                                match outcome {
+                                    release_desk_git::SyncOutcome::FastForwarded { .. } =>
+                                        "updated successfully".to_string(),
+                                    release_desk_git::SyncOutcome::AlreadyCurrent =>
+                                        "already up to date".to_string(),
+                                    release_desk_git::SyncOutcome::Skipped(state) =>
+                                        format!("not updated ({:?})", state.status),
+                                    release_desk_git::SyncOutcome::Cloned { .. } =>
+                                        "cloned".to_string(),
+                                }
+                            ),
+                            Err(error) => format!("{}: {error}", target.name),
+                        });
+                    }
+                    if local_only {
+                        repo_manager::repository_git::inspect(target)
+                    } else if update.is_none()
+                        || update == Some((target.source_index, target.repo_index))
+                    {
+                        repo_manager::repository_git::check_for_updates(target)
+                    } else {
+                        previous_statuses
+                            .iter()
+                            .find(|status| {
+                                status.source_index == target.source_index
+                                    && status.repo_index == target.repo_index
+                            })
+                            .cloned()
+                            .unwrap_or_else(|| repo_manager::repository_git::inspect(target))
+                    }
+                })
+                .collect::<Vec<_>>();
+            let _ = tx.send((statuses, message));
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                match rx.try_recv() {
+                    Ok((statuses, message)) => { let _ = this.update_in(cx, |this, _, cx| {
+                        this.git_busy = false;
+                        if this.selected_project_id == Some(project_id) && this.workspace_revision == revision {
+                            this.git_statuses = statuses;
+                            this.message = message.unwrap_or_else(|| if local_only { "Local repository inspection finished." } else { "Repository check finished. See each repository for its status." }.into());
+                        }
+                        cx.notify();
+                    }); return; }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => { let _ = this.update_in(cx, |this, _, cx| { this.git_busy = false; this.message = "Repository check stopped unexpectedly.".into(); cx.notify(); }); return; }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        }).detach();
+    }
+
+    fn execute_clone_plan(
+        &mut self,
+        source_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.git_busy {
+            return;
+        }
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .cloned()
+        else {
+            return;
+        };
+        let targets = match repo_manager::repository_git::targets(&project) {
+            Ok(targets) if !targets.is_empty() => targets
+                .into_iter()
+                .filter(|target| target.source_index == source_index && !target.path.exists())
+                .collect::<Vec<_>>(),
+            Ok(_) => {
+                self.message = "Select at least one repository first.".into();
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.message = error;
+                cx.notify();
+                return;
+            }
+        };
+        if targets.is_empty() {
+            self.message = "That repository is no longer selected.".into();
+            cx.notify();
+            return;
+        }
+        let project_id = project.id;
+        let revision = self.workspace_revision;
+        self.source_dialog = views::project_sources::SourceDialog::Closed;
+        self.project_section = ProjectSection::Repositories;
+        self.git_busy = true;
+        self.git_statuses.clear();
+        self.message = format!("Cloning {} repositories…", targets.len());
+        cx.notify();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut results = Vec::new();
+            for (index, target) in targets.iter().enumerate() {
+                let _ = tx.send((
+                    false,
+                    format!(
+                        "Cloning {} of {}: {}…",
+                        index + 1,
+                        targets.len(),
+                        target.name
+                    ),
+                ));
+                let result = repo_manager::repository_git::clone_selected(
+                    &project,
+                    target.source_index,
+                    target.repo_index,
+                );
+                results.push(format!(
+                    "{}: {}",
+                    target.name,
+                    match result {
+                        Ok(release_desk_git::SyncOutcome::Cloned { .. }) => "cloned".to_string(),
+                        Ok(release_desk_git::SyncOutcome::Skipped(state)) =>
+                            format!("clone needs attention ({:?})", state.status),
+                        Ok(_) => "clone completed with an unexpected outcome".to_string(),
+                        Err(error) => format!("not cloned: {error}"),
+                    }
+                ));
+            }
+            let _ = tx.send((true, results.join(" · ")));
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match rx.try_recv() {
+                    Ok((finished, message)) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            if finished {
+                                this.git_busy = false;
+                            }
+                            if this.selected_project_id == Some(project_id)
+                                && this.workspace_revision == revision
+                            {
+                                if finished {
+                                    this.git_statuses.clear();
+                                }
+                                this.message = message;
+                            }
+                            cx.notify();
+                        });
+                        if finished {
+                            return;
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            this.git_busy = false;
+                            this.message = "Clone operation stopped unexpectedly.".into();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        })
+        .detach();
     }
 }
 
@@ -1429,96 +2176,81 @@ impl Render for ReleaseDesk {
                     .and_then(|id| self.projects.iter().find(|project| project.id == id))
                 {
                     let section_content = match self.project_section {
-                        ProjectSection::Sources => {
-                            if self.reviewing_clones {
-                                let mut plans = Vec::new();
-                                for source in &project.sources {
-                                    for repo in &source.repositories {
-                                        if repo.selected {
-                                            let target_path =
-                                                project.disk_layout.compute_clone_path(
-                                                    &project.directory,
-                                                    &source.handle,
-                                                    &repo.name,
-                                                );
-                                            plans.push(
-                                                release_desk_application::use_case::profile_ingestion::RepoClonePlan {
-                                                    repo_name: repo.name.clone(),
-                                                    clone_url: format!(
-                                                        "https://{}/{}/{}.git",
-                                                        project.provider.label().to_lowercase(),
-                                                        source.handle,
-                                                        repo.name
-                                                    ),
-                                                    target_path,
-                                                },
-                                            );
-                                        }
-                                    }
-                                }
-                                let count = plans.len();
-                                Some(
-                                    views::render_clone_review_modal(
-                                        &project.name,
-                                        &project.directory,
-                                        project.disk_layout,
-                                        &plans,
-                                        cx,
-                                        move |this: &mut Self, cx| {
-                                            this.execute_clone_plan(count, cx)
-                                        },
-                                        |this: &mut Self, cx| {
-                                            this.reviewing_clones = false;
-                                            cx.notify();
-                                        },
-                                    )
-                                    .into_any_element(),
-                                )
-                            } else {
-                                Some(
-                                    views::render_project_sources(
-                                        &project.sources,
-                                        &self.source_input,
-                                        cx,
-                                        |this: &mut Self, cx| this.add_source(cx),
-                                        |index, this: &mut Self, cx| this.remove_source(index, cx),
-                                        |source, repo, this: &mut Self, cx| {
-                                            this.toggle_source_repo(source, repo, cx)
-                                        },
-                                        |source_index, select, this: &mut Self, cx| {
-                                            this.select_all_source_repos(source_index, select, cx);
-                                        },
-                                        |this: &mut Self, cx| {
-                                            this.reviewing_clones = true;
-                                            cx.notify();
-                                        },
-                                    )
-                                    .into_any_element(),
-                                )
-                            }
-                        }
-                        ProjectSection::Repositories => Some(
-                            views::render_project_repositories(
+                        ProjectSection::Sources => Some(
+                            views::render_project_sources(
                                 &project.sources,
-                                project.repository_list_mode,
+                                &project.directory,
+                                project.disk_layout,
+                                &self.source_input,
+                                &self.source_search,
+                                self.source_dialog,
+                                self.source_busy,
                                 cx,
-                                |mode, this: &mut Self, cx| this.set_repository_list_mode(mode, cx),
+                                |this: &mut Self, window, cx| this.add_source(window, cx),
+                                |index, this: &mut Self, cx| this.remove_source(index, cx),
+                                |index, this: &mut Self, window, cx| {
+                                    this.refresh_source(index, window, cx)
+                                },
+                                |source, repo, this: &mut Self, cx| {
+                                    this.toggle_source_repo(source, repo, cx)
+                                },
+                                |source, this: &mut Self, window, cx| {
+                                    this.execute_clone_plan(source, window, cx)
+                                },
+                                |dialog, this: &mut Self, cx| {
+                                    this.source_dialog = dialog;
+                                    cx.notify();
+                                },
+                                |url, this: &mut Self, cx| this.open_source_url(&url, cx),
+                            )
+                            .into_any_element(),
+                        ),
+                        ProjectSection::Repositories => Some(
+                            views::render_project_repository_status(
+                                project,
+                                &self.git_statuses,
+                                self.selected_repository,
+                                self.git_busy,
+                                cx,
+                                |this: &mut Self, window, cx| {
+                                    this.check_repository_updates(None, false, window, cx)
+                                },
+                                |source, repo, this: &mut Self, window, cx| {
+                                    this.check_repository_updates(
+                                        Some((source, repo)),
+                                        false,
+                                        window,
+                                        cx,
+                                    )
+                                },
+                                |source, repo, this: &mut Self, cx| {
+                                    this.selected_repository = Some((source, repo));
+                                    cx.notify();
+                                },
+                                |url, this: &mut Self, cx| this.open_source_url(&url, cx),
                             )
                             .into_any_element(),
                         ),
                         ProjectSection::Releases => Some(
-                            views::render_project_releases(
-                                project,
-                                self.selected_platform,
+                            views::render_live_releases(
+                                &self.release_state,
+                                &project.directory,
+                                self.release_busy,
                                 cx,
-                                |platform, this: &mut Self, cx| {
-                                    this.selected_platform = platform;
-                                    cx.notify();
-                                },
-                                |asset_name, this: &mut Self, cx| {
-                                    this.message =
-                                        format!("Staged {asset_name} in .release-desk/installers/");
-                                    cx.notify();
+                                |this: &mut Self, window, cx| this.refresh_releases(window, cx),
+                                |provider,
+                                 owner,
+                                 repo,
+                                 tag,
+                                 name,
+                                 url,
+                                 size,
+                                 this: &mut Self,
+                                 window,
+                                 cx| {
+                                    this.download_release(
+                                        provider, owner, repo, tag, name, url, size, window, cx,
+                                    )
                                 },
                             )
                             .into_any_element(),
@@ -1531,9 +2263,22 @@ impl Render for ReleaseDesk {
                         self.delete_confirm,
                         section_content,
                         cx,
-                        |section, this: &mut Self, cx| {
+                        |section, this: &mut Self, window, cx| {
                             this.project_section = section;
                             this.delete_confirm = false;
+                            if section == ProjectSection::Repositories
+                                && this.git_statuses.is_empty()
+                            {
+                                this.check_repository_updates(None, true, window, cx);
+                            }
+                            if section == ProjectSection::Releases
+                                && matches!(
+                                    this.release_state,
+                                    repo_manager::workspace_releases::ReleaseViewState::NotLoaded
+                                )
+                            {
+                                this.refresh_releases(window, cx);
+                            }
                             cx.notify();
                         },
                         |this: &mut Self, cx| {
@@ -1624,6 +2369,9 @@ impl Render for ReleaseDesk {
 }
 
 fn main() {
+    if let Some(code) = repo_manager::git_credential_helper::dispatch() {
+        std::process::exit(code);
+    }
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx| {

@@ -28,7 +28,7 @@ impl EventHandler {
     }
 
     /// Poll for the next event, respecting the tick rate timeout.
-    pub fn next(&mut self) -> io::Result<TuiEvent> {
+    pub fn next_event(&mut self) -> io::Result<TuiEvent> {
         let timeout = self
             .tick_rate
             .checked_sub(self.last_tick.elapsed())

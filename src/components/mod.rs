@@ -2,6 +2,7 @@
 
 pub mod app_icon;
 pub mod header;
+pub mod motion_button;
 pub mod provider_icon;
 pub mod sidebar;
 pub mod ui_icons;
@@ -9,7 +10,8 @@ pub mod ui_icons;
 pub use header::render_header;
 pub use sidebar::render_sidebar;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::ButtonVariants as _;
+use motion_button::Button;
 
 pub fn toggle_button(
     id: impl Into<gpui_kit::ElementId>,

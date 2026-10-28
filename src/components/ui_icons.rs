@@ -62,3 +62,38 @@ pub fn layers_icon() -> Icon {
     let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/></svg>"##;
     Icon::default().data(svg).w(px(15.)).h(px(15.))
 }
+
+pub fn repository_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h5"/></svg>"##;
+    Icon::default().data(svg).w(px(17.)).h(px(17.))
+}
+
+pub fn branch_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="4" r="2"/><circle cx="6" cy="20" r="2"/><circle cx="18" cy="6" r="2"/><path d="M6 6v12M18 8a7 7 0 0 1-7 7H6"/></svg>"##;
+    Icon::default().data(svg).w(px(15.)).h(px(15.))
+}
+
+pub fn star_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="m12 2 3 6.3 7 1-5 4.9 1.2 6.8L12 17.8 5.8 21 7 14.2 2 9.3l7-1L12 2Z"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}
+
+pub fn fork_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="12" cy="19" r="2"/><path d="M6 7v4a5 5 0 0 0 5 5h2a5 5 0 0 0 5-5V7"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}
+
+pub fn refresh_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 0 0-14.7-4.4L3 9m0-5v5h5M4 13a8 8 0 0 0 14.7 4.4L21 15m0 5v-5h-5"/></svg>"##;
+    Icon::default().data(svg).w(px(15.)).h(px(15.))
+}
+
+pub fn trash_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5m4-5v5"/></svg>"##;
+    Icon::default().data(svg).w(px(15.)).h(px(15.))
+}
+
+pub fn lock_icon() -> Icon {
+    let svg = br##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>"##;
+    Icon::default().data(svg).w(px(14.)).h(px(14.))
+}

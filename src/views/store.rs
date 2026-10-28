@@ -1,10 +1,11 @@
 //! App Store grid and full detail page for the desktop design preview.
 
 use crate::components::app_icon::app_icon;
+use crate::components::motion_button::Button;
 use crate::components::ui_icons::{layers_icon, store_icon};
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     Context, InteractiveElement as _, IntoElement, ParentElement as _,
@@ -66,7 +67,7 @@ pub fn render_store<
                     div()
                         .text_size(px(13.))
                         .text_color(cx.theme().muted_foreground)
-                        .child("Installable releases across all your selected repositories appear together here. Install with one click, update as new tags arrive, and launch directly."),
+                        .child("The application catalogue is not connected yet. Browse a project’s Releases to see available assets."),
                 ),
         )
         // Store Content: Featured Banner + Empty Board or Grid
@@ -109,7 +110,7 @@ pub fn render_store<
                                     div()
                                         .text_size(px(12.))
                                         .text_color(gpui_kit::hsla(232. / 360., 0.6, 0.9, 0.9))
-                                        .child("Applications built and published across your projects install into ~/Applications with one click. Upstream releases are monitored with automatic update notifications."),
+                                        .child("Automatic installation and update notifications are not available yet."),
                                 ),
                         )
                         .child(
@@ -154,14 +155,14 @@ pub fn render_store<
                                 .text_size(px(17.))
                                 .font_bold()
                                 .text_color(cx.theme().foreground)
-                                .child("No Applications Discovered Yet"),
+                                .child("Application catalogue unavailable"),
                         )
                         .child(
                             div()
                                 .max_w(px(460.))
                                 .text_size(px(12.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Create a project and select repositories with published release assets (DMGs, installers, archives) to install and launch them here."),
+                                .child("Open a project to browse repositories and their releases."),
                         )
                         .child(
                             div()

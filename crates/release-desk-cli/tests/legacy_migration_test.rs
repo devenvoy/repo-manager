@@ -206,7 +206,7 @@ REPOS="engine audio-driver"
         "Local backup snapshot must be written to clone directory"
     );
 
-    let backup_manager = ProjectSnapshotManager::default();
+    let backup_manager = ProjectSnapshotManager;
     let read_backup = backup_manager.read_backup_snapshot(&clone_root).unwrap();
     assert!(read_backup.is_some(), "Backup snapshot must be readable");
     let snap: Snapshot = read_backup.unwrap();

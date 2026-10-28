@@ -212,32 +212,42 @@ impl GitHubGateway for HttpGitHubGateway {
     }
 
     fn fetch_releases(&self, repo: &RepositoryIdentity) -> Result<Vec<Release>, DomainError> {
-        let url = format!(
-            "{}/repos/{}/{}/releases?per_page=50",
-            self.base_url,
-            repo.owner.as_str(),
-            repo.name.as_str()
-        );
-
-        let resp = self
-            .request(&url)
-            .send()
-            .map_err(|e| DomainError::PortFailure {
+        let mut gh_releases = Vec::new();
+        let mut page = 1;
+        loop {
+            let url = format!(
+                "{}/repos/{}/{}/releases?per_page=100&page={page}",
+                self.base_url,
+                repo.owner.as_str(),
+                repo.name.as_str()
+            );
+            let resp = self
+                .request(&url)
+                .send()
+                .map_err(|e| DomainError::PortFailure {
+                    port: "GitHub",
+                    message: format!("HTTP error fetching releases: {e}"),
+                })?;
+            if !resp.status().is_success() {
+                return Err(DomainError::PortFailure {
+                    port: "GitHub",
+                    message: format!(
+                        "Release listing returned HTTP status {} on page {page}",
+                        resp.status()
+                    ),
+                });
+            }
+            let current: Vec<GhRelease> = resp.json().map_err(|e| DomainError::PortFailure {
                 port: "GitHub",
-                message: format!("HTTP error: {e}"),
+                message: format!("Could not parse release page {page}: {e}"),
             })?;
-
-        if !resp.status().is_success() {
-            return Err(DomainError::PortFailure {
-                port: "GitHub",
-                message: format!("API returned HTTP status {}: {}", resp.status(), url),
-            });
+            let done = current.len() < 100;
+            gh_releases.extend(current);
+            if done {
+                break;
+            }
+            page += 1;
         }
-
-        let gh_releases: Vec<GhRelease> = resp.json().map_err(|e| DomainError::PortFailure {
-            port: "GitHub",
-            message: format!("JSON parse error: {e}"),
-        })?;
 
         let mut releases = Vec::with_capacity(gh_releases.len());
         for rel in gh_releases {

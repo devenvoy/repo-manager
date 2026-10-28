@@ -1,12 +1,14 @@
 //! OS secure credential store adapter.
 //!
 //! Implements `SecretStorePort` using macOS Keychain / platform credential management
-//! with a secure fallback for automated test environments.
+//! and a process-local fallback only on platforms without a Keychain adapter.
 
 use release_desk_core::error::DomainError;
 use release_desk_core::port::SecretStorePort;
+#[cfg(not(target_os = "macos"))]
 use std::collections::HashMap;
 use std::process::Command;
+#[cfg(not(target_os = "macos"))]
 use std::sync::RwLock;
 
 const SERVICE_NAME: &str = "Release Desk";
@@ -14,6 +16,7 @@ const SERVICE_NAME: &str = "Release Desk";
 /// OS-backed secret store for GitHub tokens and sensitive credentials.
 #[derive(Debug, Default)]
 pub struct OsSecretStore {
+    #[cfg(not(target_os = "macos"))]
     fallback: RwLock<HashMap<String, String>>,
 }
 
@@ -90,20 +93,19 @@ impl OsSecretStore {
 
     #[cfg(target_os = "macos")]
     fn get_macos_keychain(&self, key: &str) -> Result<Option<String>, DomainError> {
-        let output = Command::new("security")
-            .args(["find-generic-password", "-s", SERVICE_NAME, "-a", key, "-w"])
-            .output()
-            .map_err(|e| DomainError::PortFailure {
+        use security_framework::passwords::get_generic_password;
+        match get_generic_password(SERVICE_NAME, key) {
+            Ok(bytes) => String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| DomainError::PortFailure {
+                    port: "Keychain",
+                    message: "stored credential is not valid UTF-8".into(),
+                }),
+            Err(error) if error.code() == -25300 => Ok(None),
+            Err(error) => Err(DomainError::PortFailure {
                 port: "Keychain",
-                message: format!("cannot execute security tool: {e}"),
-            })?;
-
-        if output.status.success() {
-            let secret = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Ok(Some(secret))
-        } else {
-            // Not found in keychain, check fallback
-            Ok(self.fallback.read().unwrap().get(key).cloned())
+                message: format!("cannot read credential: {error}"),
+            }),
         }
     }
 
@@ -114,30 +116,11 @@ impl OsSecretStore {
 
     #[cfg(target_os = "macos")]
     fn set_macos_keychain(&self, key: &str, secret: &str) -> Result<(), DomainError> {
-        let output = Command::new("security")
-            .args([
-                "add-generic-password",
-                "-s",
-                SERVICE_NAME,
-                "-a",
-                key,
-                "-w",
-                secret,
-                "-U",
-            ])
-            .output();
-
-        match output {
-            Ok(out) if out.status.success() => Ok(()),
-            _ => {
-                // If keychain write fails (e.g., sandbox, non-interactive CI), store in fallback
-                self.fallback
-                    .write()
-                    .unwrap()
-                    .insert(key.to_string(), secret.to_string());
-                Ok(())
-            }
-        }
+        security_framework::passwords::set_generic_password(SERVICE_NAME, key, secret.as_bytes())
+            .map_err(|error| DomainError::PortFailure {
+                port: "Keychain",
+                message: format!("cannot save credential: {error}"),
+            })
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -151,11 +134,14 @@ impl OsSecretStore {
 
     #[cfg(target_os = "macos")]
     fn delete_macos_keychain(&self, key: &str) -> Result<(), DomainError> {
-        let _ = Command::new("security")
-            .args(["delete-generic-password", "-s", SERVICE_NAME, "-a", key])
-            .output();
-        self.fallback.write().unwrap().remove(key);
-        Ok(())
+        match security_framework::passwords::delete_generic_password(SERVICE_NAME, key) {
+            Ok(()) => Ok(()),
+            Err(error) if error.code() == -25300 => Ok(()),
+            Err(error) => Err(DomainError::PortFailure {
+                port: "Keychain",
+                message: format!("cannot delete credential: {error}"),
+            }),
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -179,7 +165,7 @@ impl SecretStorePort for OsSecretStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::*;
 

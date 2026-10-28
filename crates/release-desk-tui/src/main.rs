@@ -74,7 +74,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     while !state.should_quit {
         terminal.draw(|f| render_ui(f, &state))?;
 
-        match events.next()? {
+        match events.next_event()? {
             TuiEvent::Key(key) => {
                 if state.handle_key(key) {
                     break;

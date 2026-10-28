@@ -1,10 +1,11 @@
 //! Navigation sidebar component for Release Desk matching the modern design prototype.
 
+use crate::components::motion_button::Button;
 use crate::components::ui_icons::{brand_logo, grid_icon, settings_icon, store_icon};
 use crate::state::WorkspaceTab;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, div, px};
 
 pub fn render_sidebar<T: 'static>(

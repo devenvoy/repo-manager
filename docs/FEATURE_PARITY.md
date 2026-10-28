@@ -1,5 +1,8 @@
 # Release Desk Feature Parity Matrix
 
+> **Historical planning document (superseded 2026-10-28).** Completion and OAuth success claims below do not describe the current desktop product. See [CURRENT_STATUS.md](CURRENT_STATUS.md) and [ROADMAP.md](../.planning/ROADMAP.md) for verified status and remaining work.
+
+
 > **Requirement**: PAR-01  
 > **Source References**:
 > - `/Volumes/Devansh2/codes/ArtCraft/release-desk.html` (68 cataloged items, `HTML-001` to `HTML-068`)
@@ -14,7 +17,7 @@
 | Legacy ID | Legacy Feature | Legacy Status | Req ID | Domain Rule / Entity | Application Use Case | CLI Command | TUI Location | GUI Location | Test / Verification | Intentional Corrections & Architectural Notes |
 |---|---|---|---|---|---|---|---|---|---|---|
 | **HTML-001** | Org input field (`#org`) | Active | PROJ-01 | `AccountLogin`, `AccountIdentity` | `CreateProject`, `UpdateProjectAccount` | `release-desk project create --account <org>` | Project Modal / Config | Project Wizard / Settings | `test_account_login_validation` | Legacy assumed single org in localStorage; new architecture supports multiple projects for orgs or personal users. |
-| **HTML-002** | Token input field (`#token`) | Active | AUTH-01 | `CredentialRef`, `SecretStorePort`, `GitProviderKind`, `AuthMethod` | `AuthenticateProvider`, `StoreCredential` | `release-desk auth login [--token <pat> / --browser]` | Credentials Menu | Settings → Accounts & Keys | `test_multi_host_auth` | Supports multiple Git hosts (GitHub, GitLab, Bitbucket, Atlassian). Supports direct token entry or browser login with automatic modal webview fallback (see `docs/AUTH_AND_PROVIDERS.md`). |
+| **HTML-002** | Token input field (`#token`) | Active | AUTH-01 | `CredentialRef`, `SecretStorePort`, `GitProviderKind`, `AuthMethod` | `AuthenticateProvider`, `StoreCredential` | `release-desk auth login [--token-stdin / --browser]` | Credentials Menu | Settings → Accounts & Keys | `test_multi_host_auth` | Supports multiple Git hosts (GitHub, GitLab, Bitbucket, Atlassian). Supports direct token entry or browser login with automatic modal webview fallback (see `docs/AUTH_AND_PROVIDERS.md`). |
 | **HTML-027** | Setup Card (guide when no data) | Active | GUI-01, PROJ-02 | `LinkedSnapshotSource`, `ProjectIdentity` | `InitializeFirstRun`, `LinkLegacySnapshot` | `release-desk init --link-snapshot <path>` | First-run Dialog | Splash / Welcome Wizard | `test_first_run_flow` | New native wizard replaces HTML setup card with native directory pickers and auto-detection of ArtCraft `.release-desk/data.json`. |
 | **HTML-062** | LocalStorage settings (`loadSettings`) | Active | ARC-01 | `AppSettings`, `ProjectSettings` | `LoadSettings`, `SaveSettings` | `release-desk config set <key> <val>` | Settings Screen | Global & Project Settings | `test_settings_precedence` | Configuration follows strict hierarchy: CLI flags > Env vars > Config file > Defaults. Stored in SQLite/config.json. |
 | **SH-019** | `STORYTOLD_ORG` env variable | Active | PROJ-01, CLI-01 | `AccountLogin` | `ResolveProjectContext` | `--project` / `--account` flag | Status Header | Project Selector | `test_cli_env_overrides` | Env var overrides default account during CLI execution; per-project account stored in DB. |

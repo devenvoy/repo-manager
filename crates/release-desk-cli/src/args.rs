@@ -155,9 +155,9 @@ pub enum AuthSubcommand {
         /// Git provider (github, gitlab, bitbucket).
         #[arg(long, default_value = "github")]
         provider: String,
-        /// Authenticate directly using a Personal Access Token.
+        /// Read a Personal Access Token from standard input.
         #[arg(long)]
-        token: Option<String>,
+        token_stdin: bool,
         /// Authenticate via system browser with automatic webview modal fallback.
         #[arg(long)]
         browser: bool,

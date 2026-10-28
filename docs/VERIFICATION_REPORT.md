@@ -1,7 +1,10 @@
 # Release Desk Verification & Traceability Closure Report
 
+> **Historical planning document (superseded 2026-10-28).** Completion and OAuth success claims below do not describe the current desktop product. See [CURRENT_STATUS.md](CURRENT_STATUS.md) and [ROADMAP.md](../.planning/ROADMAP.md) for verified status and remaining work.
+
+
 > **Project:** Release Desk (`repo-manager`)  
-> **Status:** All Phases (1 through 9 + Vision Phases A through F) Complete  
+> **Status:** Historical claim; current product verification is incomplete
 > **Date:** October 2026  
 > **Specification References:** `docs/FEATURE_PARITY.md`, `docs/ARCHITECTURE.md`, `docs/UX-SPEC.md`, `docs/TEST-STRATEGY.md`, `.planning/REQUIREMENTS.md`
 
@@ -9,7 +12,7 @@
 
 ## 1. Executive Summary
 
-Release Desk has reached 100% feature parity with all legacy tools (`release-desk.html` and `storytold-sync.sh`) while replacing fragile shell scripts and local browser storage with a robust, modular Rust architecture.
+This report records an earlier parity claim. Current desktop behavior has not reached verified parity with `release-desk.html` and `storytold-sync.sh`; see `CURRENT_STATUS.md` for evidence and gaps.
 
 The product delivers three unified presentations built on a single shared domain and application core:
 1. **CLI (`release-desk-cli`)**: Fully scriptable command-line interface with machine-readable JSON support and non-interactive confirmation gates.

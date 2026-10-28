@@ -1,8 +1,9 @@
 //! First-run onboarding view displaying Terms of Service, Privacy Policy, and default paths.
 
+use crate::components::motion_button::Button;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, div, px};
 
 pub fn render_onboarding<T: 'static>(

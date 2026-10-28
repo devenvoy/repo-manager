@@ -131,23 +131,14 @@ impl AuthenticateProviderUseCase {
 
                 match browser_result {
                     Ok(()) => {
-                        // System browser launched successfully
-                        let token = format!(
-                            "oauth_token_{}_{}",
-                            cmd.provider.as_str(),
-                            cmd.account_login.as_str()
-                        );
-                        self.secret_store.set_secret(&cred_key, &token)?;
-
-                        self.events.broadcast(AppEvent::AuthSucceeded {
+                        let error = "Browser opened, but OAuth code exchange is not configured. Use device sign-in or a personal access token.".to_string();
+                        self.events.broadcast(AppEvent::AuthFailed {
                             provider: provider_str,
-                            account: account_str,
+                            error: error.clone(),
                         });
-
-                        Ok(AuthResult::Success {
+                        Ok(AuthResult::Failed {
                             provider: cmd.provider,
-                            account: cmd.account_login,
-                            credential_ref: cred_key,
+                            error,
                         })
                     }
                     Err(e) => {
@@ -165,19 +156,15 @@ impl AuthenticateProviderUseCase {
 
                         let webview_outcome = self.webview.open_auth_window(&spec)?;
                         match webview_outcome {
-                            AuthCallbackStatus::Success { code } => {
-                                let token = format!("oauth_token_from_code_{code}");
-                                self.secret_store.set_secret(&cred_key, &token)?;
-
-                                self.events.broadcast(AppEvent::AuthSucceeded {
+                            AuthCallbackStatus::Success { .. } => {
+                                let error = "Authorization code received, but OAuth token exchange is not configured. Use device sign-in or a personal access token.".to_string();
+                                self.events.broadcast(AppEvent::AuthFailed {
                                     provider: provider_str,
-                                    account: account_str,
+                                    error: error.clone(),
                                 });
-
-                                Ok(AuthResult::Success {
+                                Ok(AuthResult::Failed {
                                     provider: cmd.provider,
-                                    account: cmd.account_login,
-                                    credential_ref: cred_key,
+                                    error,
                                 })
                             }
                             AuthCallbackStatus::Failure { error } => {
@@ -219,19 +206,15 @@ impl AuthenticateProviderUseCase {
 
                 let webview_outcome = self.webview.open_auth_window(&spec)?;
                 match webview_outcome {
-                    AuthCallbackStatus::Success { code } => {
-                        let token = format!("oauth_token_from_code_{code}");
-                        self.secret_store.set_secret(&cred_key, &token)?;
-
-                        self.events.broadcast(AppEvent::AuthSucceeded {
+                    AuthCallbackStatus::Success { .. } => {
+                        let error = "Authorization code received, but OAuth token exchange is not configured. Use device sign-in or a personal access token.".to_string();
+                        self.events.broadcast(AppEvent::AuthFailed {
                             provider: provider_str,
-                            account: account_str,
+                            error: error.clone(),
                         });
-
-                        Ok(AuthResult::Success {
+                        Ok(AuthResult::Failed {
                             provider: cmd.provider,
-                            account: cmd.account_login,
-                            credential_ref: cred_key,
+                            error,
                         })
                     }
                     AuthCallbackStatus::Failure { error } => {
@@ -366,18 +349,15 @@ mod tests {
         };
 
         let res = uc.execute(cmd).unwrap();
-        match res {
-            AuthResult::Success {
-                provider,
-                account,
-                credential_ref,
-            } => {
-                assert_eq!(provider, GitProviderKind::Bitbucket);
-                assert_eq!(account.as_str(), "atlassian-team");
-                assert!(store.get_secret(&credential_ref).unwrap().is_some());
-            }
-            _ => panic!("expected success via webview fallback"),
-        }
+        assert!(
+            matches!(res, AuthResult::Failed { provider: GitProviderKind::Bitbucket, error } if error.contains("exchange"))
+        );
+        assert!(
+            store
+                .get_secret("release_desk_bitbucket_atlassian-team")
+                .unwrap()
+                .is_none()
+        );
 
         // Verify webview window was opened and automatically closed
         assert!(*webview.window_opened.lock().unwrap());

@@ -312,6 +312,7 @@ fn test_provider_choice_conversion_and_str() {
 #[test]
 fn test_oauth_auth_use_case_with_browser_and_webview_fallback() {
     use release_desk_application::event::EventBroadcaster;
+    use release_desk_application::testing::FakeSecretStore;
     use release_desk_application::use_case::auth::{
         AuthResult, AuthenticateCommand, AuthenticateProviderUseCase, OAuthConfig,
     };
@@ -319,10 +320,9 @@ fn test_oauth_auth_use_case_with_browser_and_webview_fallback() {
     use release_desk_core::project::AccountLogin;
     use release_desk_core::provider::{AuthMethod, GitProviderKind};
     use release_desk_store::auth::{ModalWebviewAuthPort, SystemBrowserAuthPort};
-    use release_desk_store::credentials::OsSecretStore;
     use std::sync::Arc;
 
-    let secret_store = Arc::new(OsSecretStore::new());
+    let secret_store = Arc::new(FakeSecretStore::new());
     // SystemBrowserAuthPort::new_simulating_missing() ensures fallback to ModalWebviewAuthPort!
     let browser = Arc::new(SystemBrowserAuthPort::new_simulating_missing());
     let webview = Arc::new(ModalWebviewAuthPort::new());
@@ -344,22 +344,12 @@ fn test_oauth_auth_use_case_with_browser_and_webview_fallback() {
         oauth_config: Some(oauth),
     };
 
-    let result = auth_uc.execute(cmd).expect("auth execution should succeed");
-    match result {
-        AuthResult::Success {
-            credential_ref,
-            account,
-            ..
-        } => {
-            assert_eq!(account.as_str(), "octocat");
-            assert_eq!(credential_ref, "release_desk_github_octocat");
-            // Verify secret was written to secret store!
-            let stored = secret_store
-                .get_secret(&credential_ref)
-                .unwrap()
-                .expect("secret should exist in secret store");
-            assert!(!stored.is_empty());
-        }
-        other => panic!("expected AuthResult::Success, got: {other:?}"),
-    }
+    let result = auth_uc.execute(cmd).expect("auth execution should return");
+    assert!(matches!(result, AuthResult::Failed { error, .. } if error.contains("exchange")));
+    assert!(
+        secret_store
+            .get_secret("release_desk_github_octocat")
+            .unwrap()
+            .is_none()
+    );
 }

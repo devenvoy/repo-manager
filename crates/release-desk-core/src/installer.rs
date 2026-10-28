@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn extension_normalization() {
         assert_eq!(InstallerExtension::new(".DMG").unwrap().as_str(), "dmg");
-        assert_eq!(InstallerExtension::new("tar.gz").is_err(), true);
+        assert!(InstallerExtension::new("tar.gz").is_err());
     }
 
     #[test]

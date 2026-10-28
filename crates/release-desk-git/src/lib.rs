@@ -1,7 +1,7 @@
 //! System Git adapter for inspecting and updating managed repository clones.
 //!
 //! Every Git invocation passes separate arguments to [`Command`], never a shell.
-//! Authentication is delegated to the user's existing Git credential setup.
+//! Project credentials are supplied by a narrowly scoped, per-command helper.
 
 pub mod adapter;
 pub use adapter::SystemGitPort;
@@ -97,10 +97,81 @@ impl Error for GitError {
     }
 }
 
+/// Non-secret metadata used by the per-command credential helper.
+#[derive(Clone, Debug)]
+pub struct GitCredentialContext {
+    helper_executable: std::path::PathBuf,
+    credential_ref: String,
+    host: String,
+    path: String,
+    username: String,
+    remote_url: String,
+}
+
+impl GitCredentialContext {
+    /// Scope a Keychain reference to one HTTPS GitHub or GitLab repository.
+    pub fn new(
+        helper_executable: std::path::PathBuf,
+        credential_ref: String,
+        remote_url: &str,
+    ) -> Result<Self, GitError> {
+        if !helper_executable.is_absolute()
+            || helper_executable.to_str().is_none()
+            || credential_ref.is_empty()
+            || credential_ref.chars().any(char::is_control)
+        {
+            return Err(GitError::InvalidInput(
+                "invalid credential helper configuration",
+            ));
+        }
+        let rest = remote_url
+            .strip_prefix("https://")
+            .ok_or(GitError::InvalidInput(
+                "project credentials require an HTTPS remote",
+            ))?;
+        let (host, path) = rest
+            .split_once('/')
+            .ok_or(GitError::InvalidInput("remote has no repository path"))?;
+        let username = match host {
+            "github.com" => "x-access-token",
+            "gitlab.com" => "oauth2",
+            _ => {
+                return Err(GitError::InvalidInput(
+                    "project credentials are not supported for this host",
+                ));
+            }
+        };
+        if path.is_empty()
+            || path.starts_with('/')
+            || path
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '?' | '#' | '\\' | '@'))
+            || path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err(GitError::InvalidInput("invalid HTTPS repository path"));
+        }
+        Ok(Self {
+            helper_executable,
+            credential_ref,
+            host: host.into(),
+            path: path.into(),
+            username: username.into(),
+            remote_url: remote_url.into(),
+        })
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// Runs system Git without a shell or command-line credentials.
 #[derive(Clone, Debug)]
 pub struct GitClient {
     executable: std::ffi::OsString,
+    credential: Option<GitCredentialContext>,
 }
 
 impl Default for GitClient {
@@ -113,7 +184,27 @@ impl GitClient {
     pub fn new() -> Self {
         Self {
             executable: "git".into(),
+            credential: None,
         }
+    }
+
+    /// Use a selected credential for this exact remote; no token is stored here.
+    pub fn with_credential(mut self, credential: GitCredentialContext) -> Self {
+        self.credential = Some(credential);
+        self
+    }
+
+    fn validate_credential_remote(&self, remote_url: &str) -> Result<(), GitError> {
+        if self
+            .credential
+            .as_ref()
+            .is_some_and(|credential| credential.remote_url != remote_url)
+        {
+            return Err(GitError::InvalidInput(
+                "credential is scoped to a different remote",
+            ));
+        }
+        Ok(())
     }
 
     /// Inspect a clone without fetching or changing its working tree.
@@ -199,8 +290,40 @@ impl GitClient {
 
     /// Fetch `origin` while leaving the working tree unchanged.
     pub fn fetch(&self, path: &Path) -> Result<(), GitError> {
+        if self.credential.is_some() {
+            return Err(GitError::InvalidInput(
+                "credentialed fetch requires remote verification",
+            ));
+        }
+        self.fetch_origin(path)
+    }
+
+    fn fetch_origin(&self, path: &Path) -> Result<(), GitError> {
         let output = self.run(Some(path), "fetch", ["fetch", "--prune", "origin"])?;
         success("fetch", output).map(|_| ())
+    }
+
+    /// Fetch only after verifying that this directory is the expected checkout.
+    pub fn fetch_verified(
+        &self,
+        remote_url: &str,
+        path: &Path,
+        default_branch: &str,
+    ) -> Result<CloneState, GitError> {
+        self.validate_credential_remote(remote_url)?;
+        let state = self.inspect(path, default_branch)?;
+        if matches!(state.status, CloneStatus::NotCloned | CloneStatus::Error) {
+            return Ok(state);
+        }
+        let origin = self.run(Some(path), "read origin", ["remote", "get-url", "origin"])?;
+        if !origin.status.success() || stdout(&origin) != remote_url {
+            let mut rejected = state;
+            rejected.status = CloneStatus::Error;
+            rejected.message = Some("Clone origin does not match the expected remote".into());
+            return Ok(rejected);
+        }
+        self.fetch_origin(path)?;
+        self.inspect(path, default_branch)
     }
 
     /// Clone when absent, or fetch and fast-forward a clean default-branch checkout.
@@ -213,7 +336,85 @@ impl GitClient {
         path: &Path,
         default_branch: &str,
     ) -> Result<SyncOutcome, GitError> {
+        self.sync_inner(remote_url, path, default_branch, true)
+    }
+
+    /// Clone into a newly reserved directory, never fetching or updating an existing path.
+    pub fn clone_only(
+        &self,
+        remote_url: &str,
+        path: &Path,
+        default_branch: &str,
+    ) -> Result<SyncOutcome, GitError> {
         validate_branch(default_branch)?;
+        self.validate_credential_remote(remote_url)?;
+        if remote_url.is_empty()
+            || remote_url.starts_with('-')
+            || remote_url.chars().any(char::is_control)
+            || has_embedded_credentials(remote_url)
+        {
+            return Err(GitError::InvalidInput("remote URL is empty or unsafe"));
+        }
+        let parent = path
+            .parent()
+            .ok_or(GitError::InvalidInput("clone path has no parent"))?;
+        fs::create_dir_all(parent).map_err(|source| GitError::Io {
+            operation: "create clone parent",
+            source,
+        })?;
+        // create_dir is atomic and fails for every existing path, including an empty directory.
+        fs::create_dir(path).map_err(|source| GitError::Io {
+            operation: "reserve clone destination",
+            source,
+        })?;
+        let output = self.run(
+            None,
+            "clone",
+            [
+                OsStr::new("clone"),
+                OsStr::new("--branch"),
+                OsStr::new(default_branch),
+                OsStr::new("--"),
+                OsStr::new(remote_url),
+                path.as_os_str(),
+            ],
+        );
+        match output.and_then(|output| success("clone", output)) {
+            Ok(_) => {}
+            Err(error) => {
+                // Remove only an empty reservation. Never delete files left by Git or another process.
+                let _ = fs::remove_dir(path);
+                return Err(error);
+            }
+        }
+        let state = self.inspect(path, default_branch)?;
+        match state.local_revision.clone() {
+            Some(revision) if state.status == CloneStatus::Current => {
+                Ok(SyncOutcome::Cloned { revision })
+            }
+            _ => Ok(SyncOutcome::Skipped(state)),
+        }
+    }
+
+    /// Fetch and update an existing checkout; never create a missing checkout.
+    pub fn sync_existing(
+        &self,
+        remote_url: &str,
+        path: &Path,
+        default_branch: &str,
+    ) -> Result<SyncOutcome, GitError> {
+        self.sync_inner(remote_url, path, default_branch, false)
+    }
+
+    fn sync_inner(
+        &self,
+        remote_url: &str,
+        path: &Path,
+        default_branch: &str,
+        allow_clone: bool,
+    ) -> Result<SyncOutcome, GitError> {
+        validate_branch(default_branch)?;
+        self.validate_credential_remote(remote_url)?;
         if remote_url.is_empty()
             || remote_url.starts_with('-')
             || remote_url.chars().any(char::is_control)
@@ -222,6 +423,11 @@ impl GitClient {
             return Err(GitError::InvalidInput("remote URL is empty or unsafe"));
         }
         if !path.exists() {
+            if !allow_clone {
+                return Ok(SyncOutcome::Skipped(CloneState::new(
+                    CloneStatus::NotCloned,
+                )));
+            }
             let parent = path
                 .parent()
                 .ok_or(GitError::InvalidInput("clone path has no parent"))?;
@@ -262,7 +468,7 @@ impl GitClient {
             state.message = Some("Clone origin does not match the expected remote".into());
             return Ok(SyncOutcome::Skipped(state));
         }
-        self.fetch(path)?;
+        self.fetch_origin(path)?;
         let state = self.inspect(path, default_branch)?;
         match state.status {
             CloneStatus::Current => Ok(SyncOutcome::AlreadyCurrent),
@@ -316,6 +522,52 @@ impl GitClient {
         S: AsRef<OsStr>,
     {
         let mut command = Command::new(&self.executable);
+        if let Some(credential) = &self.credential {
+            let helper = format!(
+                "!{} --git-credential-helper",
+                shell_quote(
+                    credential
+                        .helper_executable
+                        .to_str()
+                        .ok_or(GitError::InvalidInput("invalid helper path"))?
+                )
+            );
+            command
+                .args([
+                    "-c",
+                    "credential.helper=",
+                    "-c",
+                    &format!("credential.helper={helper}"),
+                    "-c",
+                    "credential.useHttpPath=true",
+                    "-c",
+                    "http.followRedirects=false",
+                    "http.extraHeader=",
+                    "credential.interactive=never",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .env("REPO_MANAGER_CREDENTIAL_REF", &credential.credential_ref)
+                .env("REPO_MANAGER_CREDENTIAL_HOST", &credential.host)
+                .env("REPO_MANAGER_CREDENTIAL_PATH", &credential.path)
+                .env("REPO_MANAGER_CREDENTIAL_USERNAME", &credential.username)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env_remove("GIT_CONFIG_COUNT")
+                .env("GIT_ASKPASS", "")
+                .env("SSH_ASKPASS", "");
+            for key in [
+                "GIT_TRACE",
+                "GIT_TRACE_CURL",
+                "GIT_TRACE_CURL_NO_DATA",
+                "GIT_TRACE_PACKET",
+                "GIT_TRACE2",
+                "GIT_TRACE2_EVENT",
+                "GIT_TRACE2_PERF",
+            ] {
+                command.env_remove(key);
+            }
+        }
         command
             .args(args)
             .stdin(Stdio::null())
@@ -606,6 +858,39 @@ mod tests {
     }
 
     #[test]
+    fn project_credentials_are_scoped_to_one_https_remote() {
+        let executable = std::env::current_exe().expect("test executable");
+        let context = GitCredentialContext::new(
+            executable.clone(),
+            "saved-account".into(),
+            "https://github.com/owner/repo.git",
+        )
+        .expect("valid credential scope");
+        let client = GitClient::new().with_credential(context);
+        assert!(
+            client
+                .validate_credential_remote("https://github.com/owner/repo.git")
+                .is_ok()
+        );
+        assert!(
+            client
+                .validate_credential_remote("https://github.com/other/repo.git")
+                .is_err()
+        );
+        for remote in [
+            "http://github.com/owner/repo.git",
+            "https://user@github.com/owner/repo.git",
+            "https://github.com/../repo.git",
+            "https://evil.example/owner/repo.git",
+        ] {
+            assert!(
+                GitCredentialContext::new(executable.clone(), "saved-account".into(), remote)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn rejects_unrelated_directory_and_unsafe_branch() {
         let fixture = Fixture::new();
         let unrelated = fixture.root.join("unrelated");
@@ -647,6 +932,86 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn verified_fetch_checks_origin_and_reports_behind_without_updating() {
+        let fixture = Fixture::new();
+        fixture.clone();
+        fixture.push_new_commit();
+        let client = GitClient::new();
+        let bad = client
+            .fetch_verified("/wrong", &fixture.clone, "main")
+            .expect("verify");
+        assert_eq!(bad.status, CloneStatus::Error);
+        let state = client
+            .fetch_verified(
+                fixture.remote.to_str().expect("path"),
+                &fixture.clone,
+                "main",
+            )
+            .expect("fetch");
+        assert_eq!(state.status, CloneStatus::Behind);
+        assert!(!fixture.clone.join("remote.txt").exists());
+    }
+
+    #[test]
+    fn clone_only_refuses_existing_checkout_and_empty_directory() {
+        let fixture = Fixture::new();
+        fixture.clone();
+        fixture.push_new_commit();
+        let client = GitClient::new();
+        assert!(
+            client
+                .clone_only(
+                    fixture.remote.to_str().expect("path"),
+                    &fixture.clone,
+                    "main"
+                )
+                .is_err()
+        );
+        assert!(!fixture.clone.join("remote.txt").exists());
+        let empty = fixture.root.join("empty");
+        fs::create_dir(&empty).expect("empty directory");
+        assert!(
+            client
+                .clone_only(fixture.remote.to_str().expect("path"), &empty, "main")
+                .is_err()
+        );
+        assert!(empty.is_dir());
+    }
+
+    #[test]
+    fn clone_only_creates_new_checkout() {
+        let fixture = Fixture::new();
+        let result = GitClient::new()
+            .clone_only(
+                fixture.remote.to_str().expect("path"),
+                &fixture.clone,
+                "main",
+            )
+            .expect("clone");
+        assert!(matches!(result, SyncOutcome::Cloned { .. }));
+    }
+
+    #[test]
+    fn sync_existing_does_not_clone_missing_directory() {
+        let fixture = Fixture::new();
+        let outcome = GitClient::new()
+            .sync_existing(
+                fixture.remote.to_str().expect("path"),
+                &fixture.clone,
+                "main",
+            )
+            .expect("sync");
+        assert!(matches!(
+            outcome,
+            SyncOutcome::Skipped(CloneState {
+                status: CloneStatus::NotCloned,
+                ..
+            })
+        ));
+        assert!(!fixture.clone.exists());
     }
 
     #[test]

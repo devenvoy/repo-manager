@@ -2,6 +2,7 @@
 
 use release_desk_application::event::{AppEvent, EventBroadcaster};
 use release_desk_application::provider_registry::ProviderRegistry;
+use release_desk_application::testing::FakeSecretStore;
 use release_desk_application::use_case::auth::{
     AuthResult, AuthenticateCommand, AuthenticateProviderUseCase, OAuthConfig,
 };
@@ -10,7 +11,6 @@ use release_desk_core::project::AccountLogin;
 use release_desk_core::provider::{AuthCallbackStatus, AuthMethod, GitProviderKind};
 use release_desk_store::auth::{ModalWebviewAuthPort, SystemBrowserAuthPort};
 use release_desk_store::bitbucket_client::HttpBitbucketGateway;
-use release_desk_store::credentials::OsSecretStore;
 use release_desk_store::github_client::HttpGitHubGateway;
 use release_desk_store::gitlab_client::HttpGitLabGateway;
 use std::sync::Arc;
@@ -45,7 +45,7 @@ fn multi_host_provider_registry_integration() {
 
 #[test]
 fn token_authentication_for_multiple_hosts() {
-    let secret_store = Arc::new(OsSecretStore::new());
+    let secret_store = Arc::new(FakeSecretStore::new());
     let browser = Arc::new(SystemBrowserAuthPort::new());
     let webview = Arc::new(ModalWebviewAuthPort::new());
     let events = EventBroadcaster::new(32);
@@ -118,7 +118,7 @@ fn token_authentication_for_multiple_hosts() {
 
 #[test]
 fn browser_auth_with_automatic_webview_fallback_when_browser_missing() {
-    let secret_store = Arc::new(OsSecretStore::new());
+    let secret_store = Arc::new(FakeSecretStore::new());
     // Simulate system browser missing / not found
     let browser = Arc::new(SystemBrowserAuthPort::new_simulating_missing());
     let webview = Arc::new(ModalWebviewAuthPort::with_simulated_outcome(
@@ -147,21 +147,18 @@ fn browser_auth_with_automatic_webview_fallback_when_browser_missing() {
         })
         .unwrap();
 
-    assert!(matches!(res, AuthResult::Success { .. }));
-    // Verify window was automatically closed upon success
+    assert!(matches!(res, AuthResult::Failed { error, .. } if error.contains("exchange")));
     assert!(webview.was_window_closed());
-
-    // Verify token was persisted
     assert!(
         secret_store
             .get_secret("release_desk_github_dev-user")
             .unwrap()
-            .is_some()
+            .is_none()
     );
 
     // Verify fallback event was emitted
     let mut saw_fallback = false;
-    let mut saw_success = false;
+    let mut saw_failure = false;
     while let Ok(event) = rx.try_recv() {
         match event {
             AppEvent::AuthFallbackToWebview { provider, reason } => {
@@ -169,21 +166,21 @@ fn browser_auth_with_automatic_webview_fallback_when_browser_missing() {
                 assert!(reason.contains("browser unavailable") || reason.contains("browser"));
                 saw_fallback = true;
             }
-            AppEvent::AuthSucceeded { provider, account } => {
+            AppEvent::AuthFailed { provider, error } => {
                 assert_eq!(provider, "github");
-                assert_eq!(account, "dev-user");
-                saw_success = true;
+                assert!(error.contains("exchange"));
+                saw_failure = true;
             }
             _ => {}
         }
     }
     assert!(saw_fallback, "expected AuthFallbackToWebview event");
-    assert!(saw_success, "expected AuthSucceeded event");
+    assert!(saw_failure, "expected AuthFailed event");
 }
 
 #[test]
 fn webview_window_closes_on_auth_failure() {
-    let secret_store = Arc::new(OsSecretStore::new());
+    let secret_store = Arc::new(FakeSecretStore::new());
     let browser = Arc::new(SystemBrowserAuthPort::new_simulating_missing());
     // Simulate user access denied in webview
     let webview = Arc::new(ModalWebviewAuthPort::with_simulated_outcome(

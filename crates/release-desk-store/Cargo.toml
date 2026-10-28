@@ -23,3 +23,6 @@ tempfile = "3"
 
 [lints.rust]
 unsafe_code = "warn"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"

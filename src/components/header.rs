@@ -1,9 +1,10 @@
 //! Workspace topbar header with clickable breadcrumbs, back/forward history navigation, and status.
 
+use crate::components::motion_button::Button;
 use crate::components::ui_icons::{arrow_left_icon, arrow_right_icon};
 use gpui_kit::base::{Disableable as _, StyledExt};
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::{
     Context, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, div, px,

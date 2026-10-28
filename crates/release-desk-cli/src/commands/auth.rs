@@ -31,7 +31,7 @@ pub fn handle_auth(
     match subcommand {
         AuthSubcommand::Login {
             provider,
-            token,
+            token_stdin,
             browser,
         } => {
             let provider_kind = match provider.to_lowercase().as_str() {
@@ -42,8 +42,24 @@ pub fn handle_auth(
 
             let default_login = AccountLogin::new("default-user").map_err(DomainError::from)?;
 
-            let (method, oauth_config) = if let Some(t) = token {
-                (AuthMethod::Token { secret: t }, None)
+            let (method, oauth_config) = if token_stdin {
+                use std::io::Read as _;
+                let mut secret = String::new();
+                std::io::stdin()
+                    .take(16_385)
+                    .read_to_string(&mut secret)
+                    .map_err(|error| DomainError::PortFailure {
+                        port: "Auth",
+                        message: format!("Cannot read token from standard input: {error}"),
+                    })?;
+                if secret.len() > 16_384 {
+                    return Err(DomainError::PortFailure {
+                        port: "Auth",
+                        message: "Token is too large".into(),
+                    });
+                }
+                let secret = secret.trim_end_matches(['\r', '\n']).to_owned();
+                (AuthMethod::Token { secret }, None)
             } else if browser {
                 let oauth = OAuthConfig {
                     client_id: "release-desk-app".into(),
@@ -62,7 +78,7 @@ pub fn handle_auth(
             } else {
                 return Err(DomainError::PortFailure {
                     port: "Auth",
-                    message: "Please specify either --token <TOKEN> or --browser".into(),
+                    message: "Please specify either --token-stdin or --browser".into(),
                 });
             };
 

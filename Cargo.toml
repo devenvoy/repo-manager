@@ -18,9 +18,11 @@ members = [
 gpui-kit = "0.7"
 release-desk-application = { path = "crates/release-desk-application" }
 release-desk-core = { path = "crates/release-desk-core" }
+release-desk-git = { path = "crates/release-desk-git" }
 release-desk-store = { path = "crates/release-desk-store" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

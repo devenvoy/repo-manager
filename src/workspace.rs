@@ -51,6 +51,20 @@ impl ProjectSection {
 }
 
 impl ProviderChoice {
+    pub fn from_source_provider(provider: &str) -> Self {
+        match provider {
+            "github" => Self::GitHub,
+            "gitlab" => Self::GitLab,
+            "bitbucket" => Self::Bitbucket,
+            "azure_devops" => Self::AzureDevOps,
+            "gitea" => Self::Gitea,
+            "forgejo" => Self::Forgejo,
+            "codeberg" => Self::Codeberg,
+            "aws_codecommit" => Self::AwsCodeCommit,
+            _ => Self::Custom,
+        }
+    }
+
     pub const ALL: [Self; 9] = [
         Self::GitHub,
         Self::GitLab,

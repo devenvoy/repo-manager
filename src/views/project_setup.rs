@@ -1,11 +1,12 @@
 //! Three-step project setup shared by new and edited projects.
 
+use crate::components::motion_button::Button;
 use crate::components::provider_icon::provider_icon;
 use crate::components::toggle_button;
 use crate::workspace::{AuthModeChoice, ProviderChoice, SavedAccountInfo};
-use gpui_kit::base::StyledExt;
+use gpui_kit::base::{Disableable as _, StyledExt};
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::form::{Field, Form};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -74,9 +75,8 @@ pub fn render_project_setup<T: 'static>(
         on_open_token_url,
     } = actions;
     let title = match props.step {
-        0 => "Name and folder",
-        1 => "Git Provider & API Access",
-        _ => "Workspace preferences",
+        0 => "Project name & storage layout",
+        _ => "Git Provider & API Access",
     };
     let mut content = div().flex().flex_col().gap_5();
 
@@ -88,33 +88,107 @@ pub fn render_project_setup<T: 'static>(
                         .child(Field::new().label("Project name").child(Input::new(props.name)))
                         .child(Field::new().label("Directory on disk").child(Input::new(props.directory))),
                 )
-                .child(Button::new("browse-directory").label("Choose folder…").on_click(cx.listener(move |this, _, window, cx| on_browse(this, window, cx))))
-                .child(div().text_size(px(11.)).text_color(cx.theme().muted_foreground).child("Choose an existing directory. Each project can use a different disk or folder."));
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            Button::new("browse-directory")
+                                .label("Choose folder…")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_browse(this, window, cx)
+                                })),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Each project points to an independent directory on disk."),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .mt_2()
+                        .p_4()
+                        .rounded_lg()
+                        .bg(cx.theme().secondary)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            div()
+                                .font_bold()
+                                .text_size(px(13.))
+                                .child("On-Disk Repository Organization"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(
+                                    "Choose how cloned repository folders will be structured on disk inside this project:",
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_3()
+                                .mt_1()
+                                .child(
+                                    toggle_button(
+                                        "layout-grouped",
+                                        "Grouped · owner / repository",
+                                        props.disk_layout == DiskLayout::Grouped,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        on_layout(this, DiskLayout::Grouped, cx)
+                                    })),
+                                )
+                                .child(
+                                    toggle_button(
+                                        "layout-flat",
+                                        "Flat · repository",
+                                        props.disk_layout == DiskLayout::Flat,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        on_layout(this, DiskLayout::Flat, cx)
+                                    })),
+                                ),
+                        ),
+                );
         }
-        1 => {
+        _ => {
             content = content.child(
                 div()
                     .text_size(px(12.))
                     .text_color(cx.theme().muted_foreground)
-                    .child("Select the Git provider for this project. Authenticating raises your API rate limit (from 60/hr to 5,000/hr) so Release Desk won't be blocked when fetching user repositories. You will add specific users and repositories to clone in the project workspace after creating it."),
+                    .child("Choose a provider, then add users or organizations after creating the project. GitHub and GitLab source discovery are available; other providers are not connected yet."),
             );
 
             // Provider switcher
             let mut providers = div().flex().flex_wrap().gap_2();
             for provider in ProviderChoice::ALL {
                 let selected = props.provider == provider;
+                let supported = matches!(provider, ProviderChoice::GitHub | ProviderChoice::GitLab);
+                let label = if supported {
+                    provider.label().to_string()
+                } else {
+                    format!("{} · unavailable", provider.label())
+                };
                 let mut btn = Button::new(format!("provider-{provider:?}"))
-                    .label(provider.label().to_string())
+                    .label(label)
                     .icon(provider_icon(provider));
                 if selected {
                     btn = btn.primary();
                 } else {
                     btn = btn.ghost();
                 }
-                providers =
-                    providers.child(btn.on_click(cx.listener(move |this, _, window, cx| {
-                        on_provider(this, provider, window, cx)
-                    })));
+                providers = providers.child(btn.disabled(!supported).on_click(
+                    cx.listener(move |this, _, window, cx| on_provider(this, provider, window, cx)),
+                ));
             }
             content = content.child(providers);
 
@@ -584,38 +658,9 @@ pub fn render_project_setup<T: 'static>(
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
                     .child(
-                        "Note: Authentication is optional. You can click Continue to use public access (60 requests/hr). Upstream users and repositories to clone are added inside the project workspace.",
+                        "Note: Authentication is optional. You can create the project and connect credentials later. Upstream users and repositories to clone are added inside the project workspace.",
                     ),
             );
-        }
-        _ => {
-            content = content
-                .child(div().text_size(px(12.)).child("Choose where cloned repositories will be placed. This does not control how the app lists them."))
-                .child(
-                    div()
-                        .flex()
-                        .gap_3()
-                        .child(
-                            toggle_button(
-                                "layout-grouped",
-                                "Grouped · owner / repository",
-                                props.disk_layout == DiskLayout::Grouped,
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                on_layout(this, DiskLayout::Grouped, cx)
-                            })),
-                        )
-                        .child(
-                            toggle_button(
-                                "layout-flat",
-                                "Flat · repository",
-                                props.disk_layout == DiskLayout::Flat,
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                on_layout(this, DiskLayout::Flat, cx)
-                            })),
-                        ),
-                );
         }
     }
 
@@ -641,7 +686,7 @@ pub fn render_project_setup<T: 'static>(
                         .font_bold()
                         .text_color(cx.theme().primary)
                         .child(format!(
-                            "{} · STEP {} OF 3",
+                            "{} · STEP {} OF 2",
                             if props.editing {
                                 "EDIT PROJECT"
                             } else {
@@ -663,7 +708,7 @@ pub fn render_project_setup<T: 'static>(
                         )
                         .child(
                             Button::new("setup-next")
-                                .label(if props.step == 2 {
+                                .label(if props.step == 1 {
                                     if props.editing {
                                         "Save project"
                                     } else {

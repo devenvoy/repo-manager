@@ -98,7 +98,7 @@ fn real_sqlite_and_storage_lifecycle_integration() {
     };
 
     store
-        .save_pull_requests(repo_id, &[pr.clone()])
+        .save_pull_requests(repo_id, std::slice::from_ref(&pr))
         .expect("save PR");
     let prs = store.get_pull_requests(repo_id).expect("get PRs");
     assert_eq!(prs.len(), 1);

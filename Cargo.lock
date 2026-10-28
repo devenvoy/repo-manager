@@ -5884,6 +5884,7 @@ dependencies = [
  "release-desk-core",
  "reqwest",
  "rusqlite",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5921,10 +5922,12 @@ dependencies = [
  "gpui-kit",
  "release-desk-application",
  "release-desk-core",
+ "release-desk-git",
  "release-desk-store",
  "serde",
  "serde_json",
  "tempfile",
+ "url",
 ]
 
 [[package]]

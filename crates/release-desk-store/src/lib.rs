@@ -15,6 +15,7 @@ pub mod legacy_scanner;
 pub mod migration;
 pub mod project_backup;
 pub mod scheduler;
+pub mod source_fetcher;
 pub mod sqlite_store;
 
 pub use archive::TarGzArchivePort;
@@ -31,6 +32,9 @@ pub use legacy_scanner::{SystemLegacyScanner, compute_source_fingerprint, scan_l
 pub use migration::{MigrationError, migrate as run_migrations};
 pub use project_backup::{MismatchReport, ProjectSnapshotManager, RevisionMismatch};
 pub use scheduler::OsSchedulerPort;
+pub use source_fetcher::{
+    FetchedProfile, FetchedRepo, fetch_profile_and_repos, parse_input_target,
+};
 pub use sqlite_store::SqliteStore;
 
 use release_desk_core::{
@@ -465,3 +469,5 @@ mod tests {
         );
     }
 }
+
+pub mod workspace_releases;

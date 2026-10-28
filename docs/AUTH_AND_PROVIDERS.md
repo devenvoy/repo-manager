@@ -1,18 +1,11 @@
 # Multi-Host Git Providers & Authentication Architecture
 
+> **Historical planning document (superseded 2026-10-28).** Completion and OAuth success claims below do not describe the current desktop product. See [CURRENT_STATUS.md](CURRENT_STATUS.md) and [ROADMAP.md](../.planning/ROADMAP.md) for verified status and remaining work.
+
+
 ## Overview
 
-Release Desk supports seamless connectivity across multiple Git hosting providers and flexible authentication modes:
-
-1. **Multi-Host Git Providers**:
-   - **GitHub** (`github.com` & GitHub Enterprise)
-   - **GitLab** (`gitlab.com` & self-hosted GitLab instances)
-   - **Atlassian Bitbucket** (`bitbucket.org` & Bitbucket Data Center)
-   - **Custom / Self-Hosted** Git hosts
-
-2. **Dual Authentication Mechanisms**:
-   - **Browser-Based OAuth / Web Login**: Automatically launches the system default browser. If no browser is found or if the browser fails to open, it automatically falls back to a custom embedded modal webview window panel that completes authentication and automatically closes on success or failure.
-   - **Personal Access Token (PAT) / App Password**: Direct token input for any supported Git host, validated and stored securely in the OS Keychain.
+The current desktop workflow implements GitHub and GitLab source discovery. Other providers are unavailable in project setup. A selected personal access token or device flow can provide a credential for supported hosts. Browser and webview OAuth can obtain an authorization code, but token exchange is not implemented; these paths report an error and never store a fabricated token. macOS credentials use the native Keychain API. The architecture details below are historical design notes, not verified product behavior.
 
 ---
 

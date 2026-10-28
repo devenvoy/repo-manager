@@ -1,11 +1,12 @@
 //! Project hub: the starting point for all independent workspaces.
 
+use crate::components::motion_button::Button;
 use crate::components::provider_icon::provider_icon;
 use crate::components::ui_icons::folder_icon;
 use crate::workspace::WorkspaceProject;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     Context, InteractiveElement as _, IntoElement, ParentElement as _,

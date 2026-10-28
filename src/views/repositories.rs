@@ -1,7 +1,7 @@
 //! Master-detail repository browser view.
 
+use crate::components::motion_button::Button;
 use gpui_kit::base::StyledExt;
-use gpui_kit::component::button::Button;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{Context, IntoElement, ParentElement as _, Styled as _, div, px};
 use release_desk_core::latest_installer;
