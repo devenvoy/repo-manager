@@ -1,13 +1,13 @@
 //! Shared button surface with directional light, cursor tracking, and spring press motion.
 
-use gpui_kit::base::Disableable;
+use gpui_kit::base::{Disableable, StyledExt as _};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Icon;
-use gpui_kit::component::button::{Button as KitButton, ButtonVariant, ButtonVariants};
+use gpui_kit::component::button::{ButtonVariant, ButtonVariants};
 use gpui_kit::{
-    Animation, AnimationExt as _, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, linear_color_stop, linear_gradient, px,
+    Animation, AnimationExt as _, App, BoxShadow, ClickEvent, ElementId, InteractiveElement as _,
+    IntoElement, ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, linear_color_stop, linear_gradient, point, px,
 };
 use std::rc::Rc;
 use std::time::Duration;
@@ -27,7 +27,10 @@ type ButtonClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 #[derive(IntoElement)]
 pub struct Button {
     id: ElementId,
-    inner: KitButton,
+    label: Option<SharedString>,
+    icon: Option<Icon>,
+    tooltip: Option<SharedString>,
+    loading: bool,
     variant: ButtonVariant,
     is_outline: bool,
     disabled: bool,
@@ -36,10 +39,12 @@ pub struct Button {
 
 impl Button {
     pub fn new(id: impl Into<ElementId>) -> Self {
-        let id = id.into();
         Self {
-            inner: KitButton::new(id.clone()),
-            id,
+            id: id.into(),
+            label: None,
+            icon: None,
+            tooltip: None,
+            loading: false,
             variant: ButtonVariant::Default,
             is_outline: false,
             disabled: false,
@@ -48,28 +53,27 @@ impl Button {
     }
 
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
-        self.inner = self.inner.label(label);
+        self.label = Some(label.into());
         self
     }
 
     pub fn icon(mut self, icon: Icon) -> Self {
-        self.inner = self.inner.icon(icon);
+        self.icon = Some(icon);
         self
     }
 
     pub fn outline(mut self) -> Self {
         self.is_outline = true;
-        self.inner = self.inner.outline();
         self
     }
 
     pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
-        self.inner = self.inner.tooltip(tooltip);
+        self.tooltip = Some(tooltip.into());
         self
     }
 
     pub fn loading(mut self, loading: bool) -> Self {
-        self.inner = self.inner.loading(loading);
+        self.loading = loading;
         self
     }
 
@@ -85,7 +89,6 @@ impl Button {
 impl ButtonVariants for Button {
     fn with_variant(mut self, variant: ButtonVariant) -> Self {
         self.variant = variant;
-        self.inner = self.inner.with_variant(variant);
         self
     }
 }
@@ -93,7 +96,6 @@ impl ButtonVariants for Button {
 impl Disableable for Button {
     fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
-        self.inner = self.inner.disabled(disabled);
         self
     }
 }
@@ -107,119 +109,350 @@ impl RenderOnce for Button {
         let hovered = state.hovered && !self.disabled;
         let presses = state.presses;
 
+        let is_dark = cx.theme().background.l < 0.5;
         let is_ghost = self.variant == ButtonVariant::Ghost;
         let is_primary = self.variant == ButtonVariant::Primary;
         let is_danger = self.variant == ButtonVariant::Danger;
 
-        let base_bg = if is_ghost {
-            if hovered {
-                cx.theme().secondary.opacity(0.4)
+        let text_color: gpui_kit::Hsla = if is_primary || is_danger {
+            gpui_kit::white()
+        } else if is_ghost || self.is_outline {
+            cx.theme().foreground
+        } else if is_dark {
+            gpui_kit::rgb(0xF8FAFC).into()
+        } else {
+            gpui_kit::rgb(0x0F172A).into()
+        };
+
+        let (top_bg, bottom_bg, border_color, shadows, spotlight_color) = if is_ghost {
+            let bg = if hovered {
+                cx.theme().secondary.opacity(0.25)
             } else {
                 cx.theme().transparent
-            }
+            };
+            (
+                bg,
+                bg,
+                cx.theme().transparent,
+                vec![],
+                cx.theme().transparent,
+            )
         } else if is_primary {
-            cx.theme().primary
-        } else if is_danger {
-            cx.theme().danger
-        } else if self.is_outline {
-            if hovered {
-                cx.theme().secondary.opacity(0.5)
+            let (t, b) = if hovered {
+                (gpui_kit::rgb(0x4087F8), gpui_kit::rgb(0x2154DD))
             } else {
-                cx.theme().secondary.opacity(0.2)
-            }
-        } else {
-            cx.theme().secondary
-        };
-
-        let top_edge = if is_ghost {
-            cx.theme().transparent
-        } else if is_primary {
-            gpui_kit::white().opacity(if hovered { 0.42 } else { 0.26 })
+                (gpui_kit::rgb(0x3B82F6), gpui_kit::rgb(0x1D4ED8))
+            };
+            let border = gpui_kit::rgb(0x1D4ED8).opacity(0.85);
+            let s = vec![
+                BoxShadow {
+                    color: gpui_kit::rgb(0x2563EB)
+                        .opacity(if hovered { 0.46 } else { 0.38 })
+                        .into(),
+                    offset: point(px(0.), px(4.)),
+                    blur_radius: px(14.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
+                BoxShadow {
+                    color: gpui_kit::black().opacity(0.20),
+                    offset: point(px(0.), px(1.5)),
+                    blur_radius: px(3.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
+                BoxShadow {
+                    color: gpui_kit::white().opacity(if hovered { 0.52 } else { 0.45 }),
+                    offset: point(px(0.), px(1.2)),
+                    blur_radius: px(0.6),
+                    spread_radius: px(0.),
+                    inset: true,
+                },
+                BoxShadow {
+                    color: gpui_kit::black().opacity(0.35),
+                    offset: point(px(0.), px(-1.2)),
+                    blur_radius: px(0.6),
+                    spread_radius: px(0.),
+                    inset: true,
+                },
+            ];
+            (
+                t.into(),
+                b.into(),
+                border.into(),
+                s,
+                gpui_kit::white().opacity(0.10),
+            )
         } else if is_danger {
-            gpui_kit::white().opacity(if hovered { 0.38 } else { 0.22 })
+            let (t, b) = if hovered {
+                (gpui_kit::rgb(0xF24E4E), gpui_kit::rgb(0xBD2020))
+            } else {
+                (gpui_kit::rgb(0xEF4444), gpui_kit::rgb(0xB91C1C))
+            };
+            let border = gpui_kit::rgb(0xB91C1C).opacity(0.85);
+            let s = vec![
+                BoxShadow {
+                    color: gpui_kit::rgb(0xEF4444)
+                        .opacity(if hovered { 0.45 } else { 0.38 })
+                        .into(),
+                    offset: point(px(0.), px(4.)),
+                    blur_radius: px(14.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
+                BoxShadow {
+                    color: gpui_kit::black().opacity(0.20),
+                    offset: point(px(0.), px(1.5)),
+                    blur_radius: px(3.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
+                BoxShadow {
+                    color: gpui_kit::white().opacity(if hovered { 0.50 } else { 0.45 }),
+                    offset: point(px(0.), px(1.2)),
+                    blur_radius: px(0.6),
+                    spread_radius: px(0.),
+                    inset: true,
+                },
+                BoxShadow {
+                    color: gpui_kit::black().opacity(0.35),
+                    offset: point(px(0.), px(-1.2)),
+                    blur_radius: px(0.6),
+                    spread_radius: px(0.),
+                    inset: true,
+                },
+            ];
+            (
+                t.into(),
+                b.into(),
+                border.into(),
+                s,
+                gpui_kit::white().opacity(0.10),
+            )
+        } else if self.is_outline {
+            let bg = cx
+                .theme()
+                .secondary
+                .opacity(if hovered { 0.22 } else { 0.12 });
+            let border = cx.theme().border;
+            let s = vec![BoxShadow {
+                color: gpui_kit::black().opacity(if is_dark { 0.20 } else { 0.05 }),
+                offset: point(px(0.), px(1.)),
+                blur_radius: px(2.),
+                spread_radius: px(0.),
+                inset: false,
+            }];
+            (
+                bg,
+                bg,
+                border,
+                s,
+                gpui_kit::white().opacity(if is_dark { 0.08 } else { 0.15 }),
+            )
+        } else if is_dark {
+            let (t, b) = if hovered {
+                (gpui_kit::rgb(0x2C324A), gpui_kit::rgb(0x1A1D2D))
+            } else {
+                (gpui_kit::rgb(0x282D42), gpui_kit::rgb(0x181A28))
+            };
+            let border = gpui_kit::white().opacity(if hovered { 0.16 } else { 0.12 });
+            let s = vec![
+                BoxShadow {
+                    color: gpui_kit::black().opacity(if hovered { 0.48 } else { 0.42 }),
+                    offset: point(px(0.), px(4.)),
+                    blur_radius: px(10.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
+                BoxShadow {
+                    color: gpui_kit::black().opacity(0.30),
+                    offset: point(px(0.), px(1.)),
+                    blur_radius: px(2.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
+                BoxShadow {
+                    color: gpui_kit::white().opacity(if hovered { 0.22 } else { 0.18 }),
+                    offset: point(px(0.), px(1.0)),
+                    blur_radius: px(0.6),
+                    spread_radius: px(0.),
+                    inset: true,
+                },
+                BoxShadow {
+                    color: gpui_kit::black().opacity(0.40),
+                    offset: point(px(0.), px(-1.0)),
+                    blur_radius: px(0.6),
+                    spread_radius: px(0.),
+                    inset: true,
+                },
+            ];
+            (
+                t.into(),
+                b.into(),
+                border,
+                s,
+                gpui_kit::white().opacity(0.08),
+            )
         } else {
-            gpui_kit::white().opacity(if hovered { 0.26 } else { 0.16 })
-        };
-
-        let bottom_edge = if is_ghost {
-            cx.theme().transparent
-        } else if is_primary {
-            gpui_kit::black().opacity(if hovered { 0.65 } else { 0.45 })
-        } else if is_danger {
-            gpui_kit::black().opacity(0.60)
-        } else {
-            gpui_kit::black().opacity(if hovered { 0.70 } else { 0.50 })
-        };
-
-        let side_edge = if is_ghost {
-            cx.theme().transparent
-        } else if is_primary {
-            cx.theme().primary.opacity(0.85)
-        } else if is_danger {
-            cx.theme().danger.opacity(0.85)
-        } else {
-            cx.theme().border.opacity(if hovered { 0.55 } else { 0.35 })
+            let (t, b) = if hovered {
+                (gpui_kit::rgb(0xFFFFFF), gpui_kit::rgb(0xEDF0F5))
+            } else {
+                (gpui_kit::rgb(0xFFFFFF), gpui_kit::rgb(0xF2F4F7))
+            };
+            let border = gpui_kit::black().opacity(0.12);
+            let s = vec![
+                BoxShadow {
+                    color: gpui_kit::black().opacity(if hovered { 0.08 } else { 0.06 }),
+                    offset: point(px(0.), px(3.)),
+                    blur_radius: px(8.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
+                BoxShadow {
+                    color: gpui_kit::black().opacity(0.04),
+                    offset: point(px(0.), px(1.)),
+                    blur_radius: px(2.),
+                    spread_radius: px(0.),
+                    inset: false,
+                },
+                BoxShadow {
+                    color: gpui_kit::white().opacity(0.95),
+                    offset: point(px(0.), px(1.0)),
+                    blur_radius: px(0.5),
+                    spread_radius: px(0.),
+                    inset: true,
+                },
+                BoxShadow {
+                    color: gpui_kit::black().opacity(0.05),
+                    offset: point(px(0.), px(-1.0)),
+                    blur_radius: px(0.5),
+                    spread_radius: px(0.),
+                    inset: true,
+                },
+            ];
+            (
+                t.into(),
+                b.into(),
+                border,
+                s,
+                gpui_kit::white().opacity(0.14),
+            )
         };
 
         let rel_x = (state.cursor_x - state.anchor_x.unwrap_or(state.cursor_x)).clamp(-20.0, 360.0);
         let rel_y = (state.cursor_y - state.anchor_y.unwrap_or(state.cursor_y)).clamp(-15.0, 70.0);
 
-        let spotlight_color = if is_primary {
-            gpui_kit::white().opacity(0.32)
-        } else if is_danger {
-            gpui_kit::white().opacity(0.28)
-        } else {
-            cx.theme().primary.opacity(0.22)
-        };
-
         let surface_id: SharedString = format!("btn-surf-{:?}", self.id).into();
         let click_handler = self.on_click.clone();
 
-        // Inner div with bottom and side borders, background, cursor spotlight, and button contents
-        let mut inner_surface = div()
+        let mut surface = div()
+            .id(ElementId::Name(surface_id))
             .relative()
-            .w_full()
-            .h_full()
-            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .min_h(px(38.))
+            .min_w(px(38.))
+            .rounded(px(14.))
             .overflow_hidden()
-            .border_b_1()
-            .border_color(bottom_edge)
-            .border_l_1()
-            .border_r_1()
-            .border_color(side_edge)
-            .bg(base_bg);
+            .border_1()
+            .border_color(border_color)
+            .shadow(shadows);
 
+        if self.disabled {
+            surface = surface.opacity(0.45).cursor_not_allowed();
+        } else {
+            surface = surface.cursor_pointer();
+        }
+
+        if is_ghost || self.is_outline {
+            surface = surface.bg(top_bg);
+        } else {
+            surface = surface.bg(linear_gradient(
+                180.,
+                linear_color_stop(top_bg, 0.),
+                linear_color_stop(bottom_bg, 1.),
+            ));
+        }
+
+        // Very dim, soft lighting gleam tracking the cursor
         if hovered && !is_ghost {
-            inner_surface = inner_surface.child(
+            surface = surface.child(
                 div()
                     .absolute()
-                    .left(px(rel_x - 45.0))
-                    .top(px(rel_y - 45.0))
-                    .w(px(90.0))
-                    .h(px(90.0))
+                    .left(px(rel_x - 70.0))
+                    .top(px(rel_y - 70.0))
+                    .w(px(140.0))
+                    .h(px(140.0))
                     .rounded_full()
                     .bg(linear_gradient(
                         135.,
                         linear_color_stop(spotlight_color, 0.),
-                        linear_color_stop(cx.theme().transparent, 0.75),
+                        linear_color_stop(cx.theme().transparent, 0.40),
                     )),
             );
         }
 
-        inner_surface = inner_surface.child(
-            self.inner
-                .bg(cx.theme().transparent)
-                .border_color(cx.theme().transparent),
-        );
-
-        // Outer div with thin light border on top corner edge
-        let surface = div()
-            .id(ElementId::Name(surface_id))
+        // Clean typography and icon layout with no external background overrides
+        let has_label = self.label.is_some();
+        let mut content = div()
             .relative()
-            .rounded_md()
-            .border_t_1()
-            .border_color(top_edge)
-            .child(inner_surface)
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .py_2()
+            .text_color(text_color)
+            .font_semibold()
+            .text_size(px(14.));
+
+        if has_label {
+            content = content.px_4();
+        } else {
+            content = content.px_2p5();
+        }
+
+        if let Some(icon) = self.icon {
+            content = content.child(icon);
+        }
+
+        if let Some(label) = self.label {
+            content = content.child(label);
+        }
+
+        surface = surface.child(content);
+
+        // Optional floating tooltip on hover
+        if hovered {
+            if let Some(tooltip_text) = &self.tooltip {
+                surface = surface.child(
+                    div()
+                        .absolute()
+                        .bottom(px(42.))
+                        .px_2p5()
+                        .py_1()
+                        .rounded_md()
+                        .bg(if is_dark {
+                            gpui_kit::rgb(0x1E293B)
+                        } else {
+                            gpui_kit::rgb(0x0F172A)
+                        })
+                        .text_color(gpui_kit::white())
+                        .text_size(px(11.))
+                        .shadow(vec![BoxShadow {
+                            color: gpui_kit::black().opacity(0.25),
+                            offset: point(px(0.), px(2.)),
+                            blur_radius: px(4.),
+                            spread_radius: px(0.),
+                            inset: false,
+                        }])
+                        .child(tooltip_text.clone()),
+                );
+            }
+        }
+
+        surface = surface
             .on_hover({
                 let visual = visual.clone();
                 move |hovered, _, cx| {
@@ -251,7 +484,11 @@ impl RenderOnce for Button {
             })
             .on_click({
                 let visual = visual.clone();
+                let disabled = self.disabled;
                 move |event, window, cx| {
+                    if disabled {
+                        return;
+                    }
                     visual.update(cx, |state, cx| {
                         state.presses = state.presses.wrapping_add(1);
                         cx.notify();
