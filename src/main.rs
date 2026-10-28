@@ -2021,6 +2021,273 @@ impl ReleaseDesk {
         })
         .detach();
     }
+
+    fn clone_single_repository(
+        &mut self,
+        source_index: usize,
+        repo_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.git_busy {
+            return;
+        }
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .cloned()
+        else {
+            return;
+        };
+        let targets = match repo_manager::repository_git::targets(&project) {
+            Ok(targets) => targets,
+            Err(error) => {
+                self.message = error;
+                cx.notify();
+                return;
+            }
+        };
+        let Some(target) = targets
+            .into_iter()
+            .find(|t| t.source_index == source_index && t.repo_index == repo_index)
+        else {
+            self.message = "Repository is no longer selected.".into();
+            cx.notify();
+            return;
+        };
+        if target.path.exists() {
+            self.message = format!("{}: already exists on disk.", target.name);
+            cx.notify();
+            return;
+        }
+        let project_id = project.id;
+        let revision = self.workspace_revision;
+        self.git_busy = true;
+        self.message = format!("Cloning {}…", target.name);
+        cx.notify();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result =
+                repo_manager::repository_git::clone_selected(&project, source_index, repo_index);
+            let outcome_msg = match result {
+                Ok(release_desk_git::SyncOutcome::Cloned { .. }) => {
+                    format!("{}: cloned successfully.", target.name)
+                }
+                Ok(release_desk_git::SyncOutcome::Skipped(state)) => {
+                    format!("{}: clone skipped ({:?}).", target.name, state.status)
+                }
+                Ok(_) => format!("{}: clone finished.", target.name),
+                Err(error) => format!("{}: clone failed: {error}", target.name),
+            };
+            let status = repo_manager::repository_git::inspect(&target);
+            let _ = tx.send((status, outcome_msg));
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match rx.try_recv() {
+                    Ok((status, outcome_msg)) => {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.git_busy = false;
+                            if this.selected_project_id == Some(project_id)
+                                && this.workspace_revision == revision
+                            {
+                                if let Some(existing) = this.git_statuses.iter_mut().find(|s| {
+                                    s.source_index == status.source_index
+                                        && s.repo_index == status.repo_index
+                                }) {
+                                    *existing = status;
+                                } else {
+                                    this.git_statuses.push(status);
+                                }
+                                this.message = outcome_msg;
+                                this.check_repository_updates(None, true, window, cx);
+                            }
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            this.git_busy = false;
+                            this.message = "Clone operation stopped unexpectedly.".into();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn clone_all_missing_repositories(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.git_busy {
+            return;
+        }
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .cloned()
+        else {
+            return;
+        };
+        let targets = match repo_manager::repository_git::targets(&project) {
+            Ok(targets) => targets
+                .into_iter()
+                .filter(|target| !target.path.exists())
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                self.message = error;
+                cx.notify();
+                return;
+            }
+        };
+        if targets.is_empty() {
+            self.message = "All selected repositories are already cloned.".into();
+            cx.notify();
+            return;
+        }
+        let project_id = project.id;
+        let revision = self.workspace_revision;
+        self.git_busy = true;
+        self.message = format!("Cloning {} missing repositories…", targets.len());
+        cx.notify();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut results = Vec::new();
+            for (index, target) in targets.iter().enumerate() {
+                let _ = tx.send((
+                    false,
+                    format!(
+                        "Cloning {} of {}: {}…",
+                        index + 1,
+                        targets.len(),
+                        target.name
+                    ),
+                ));
+                let result = repo_manager::repository_git::clone_selected(
+                    &project,
+                    target.source_index,
+                    target.repo_index,
+                );
+                results.push(format!(
+                    "{}: {}",
+                    target.name,
+                    match result {
+                        Ok(release_desk_git::SyncOutcome::Cloned { .. }) => "cloned".to_string(),
+                        Ok(release_desk_git::SyncOutcome::Skipped(state)) => {
+                            format!("skipped ({:?})", state.status)
+                        }
+                        Ok(_) => "done".to_string(),
+                        Err(error) => format!("failed: {error}"),
+                    }
+                ));
+            }
+            let _ = tx.send((true, results.join(" · ")));
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match rx.try_recv() {
+                    Ok((finished, message)) => {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            if finished {
+                                this.git_busy = false;
+                                if this.selected_project_id == Some(project_id)
+                                    && this.workspace_revision == revision
+                                {
+                                    this.check_repository_updates(None, true, window, cx);
+                                }
+                            }
+                            if this.selected_project_id == Some(project_id)
+                                && this.workspace_revision == revision
+                            {
+                                this.message = message;
+                            }
+                            cx.notify();
+                        });
+                        if finished {
+                            return;
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            this.git_busy = false;
+                            this.message = "Clone operation stopped unexpectedly.".into();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn import_local_repositories(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .cloned()
+        else {
+            return;
+        };
+
+        let discovered_sources =
+            repo_manager::workspace_sources::scan_local_repositories(&project.directory);
+        let discovered_repos_count: usize = discovered_sources
+            .iter()
+            .map(|s| s.repositories.len())
+            .sum();
+
+        if discovered_repos_count == 0 {
+            self.message = format!(
+                "No Git repositories found in project folder ({}). Place repository folders inside or configure the project directory in Settings.",
+                project.directory.display()
+            );
+            cx.notify();
+            return;
+        }
+
+        self.change_selected_project(
+            |p| {
+                for new_source in discovered_sources {
+                    if let Some(existing) =
+                        p.sources.iter_mut().find(|s| s.handle == new_source.handle)
+                    {
+                        for repo in new_source.repositories {
+                            if let Some(existing_repo) = existing
+                                .repositories
+                                .iter_mut()
+                                .find(|r| r.name == repo.name)
+                            {
+                                existing_repo.selected = true;
+                            } else {
+                                existing.repositories.push(repo);
+                            }
+                        }
+                    } else {
+                        p.sources.push(new_source);
+                    }
+                }
+            },
+            cx,
+        );
+
+        self.message = format!(
+            "Imported {discovered_repos_count} local repositories from {}.",
+            project.directory.display()
+        );
+        self.check_repository_updates(None, true, window, cx);
+        cx.notify();
+    }
 }
 
 impl Render for ReleaseDesk {
@@ -2224,11 +2491,21 @@ impl Render for ReleaseDesk {
                                         cx,
                                     )
                                 },
+                                |source, repo, this: &mut Self, window, cx| {
+                                    this.clone_single_repository(source, repo, window, cx)
+                                },
+                                |this: &mut Self, window, cx| {
+                                    this.clone_all_missing_repositories(window, cx)
+                                },
                                 |source, repo, this: &mut Self, cx| {
                                     this.selected_repository = Some((source, repo));
                                     cx.notify();
                                 },
                                 |url, this: &mut Self, cx| this.open_source_url(&url, cx),
+                                |this: &mut Self, _window, cx| {
+                                    this.project_section = ProjectSection::Sources;
+                                    cx.notify();
+                                },
                             )
                             .into_any_element(),
                         ),
@@ -2289,6 +2566,7 @@ impl Render for ReleaseDesk {
                             this.begin_setup(this.selected_project_id, window, cx)
                         },
                         |this: &mut Self, cx| this.delete_selected_project(cx),
+                        |this: &mut Self, window, cx| this.import_local_repositories(window, cx),
                     )
                     .into_any_element()
                 } else {

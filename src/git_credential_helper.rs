@@ -59,7 +59,12 @@ pub fn dispatch() -> Option<i32> {
     let stdout = io::stdout();
     let store = OsSecretStore::new();
     let result = respond(&operation, &scope, stdin.lock(), stdout.lock(), |key| {
-        store.get_secret(key).ok().flatten()
+        store
+            .get_secret(key)
+            .ok()
+            .flatten()
+            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+            .or_else(|| std::env::var("GH_TOKEN").ok())
     });
     Some(if result.is_ok() { 0 } else { 1 })
 }
@@ -105,9 +110,16 @@ fn respond<R: BufRead, W: Write>(
             return Err(io::Error::other("duplicate credential attribute"));
         }
     }
+    let path_matches = match path.as_deref() {
+        Some(p) => {
+            p == scope.path.as_str()
+                || p.trim_end_matches(".git") == scope.path.trim_end_matches(".git")
+        }
+        None => false,
+    };
     if protocol.as_deref() != Some("https")
         || host.as_deref() != Some(scope.host.as_str())
-        || path.as_deref() != Some(scope.path.as_str())
+        || !path_matches
         || username
             .as_deref()
             .is_some_and(|value| value != scope.username)

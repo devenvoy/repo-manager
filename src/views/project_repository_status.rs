@@ -110,8 +110,11 @@ pub fn render_project_repository_status<
     T: 'static,
     FCheck: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FUpdate: Fn(usize, usize, &mut T, &mut Window, &mut Context<T>) + Copy + 'static,
+    FClone: Fn(usize, usize, &mut T, &mut Window, &mut Context<T>) + Copy + 'static,
+    FCloneAll: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FSelect: Fn(usize, usize, &mut T, &mut Context<T>) + Copy + 'static,
     FOpen: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
+    FBrowseSources: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
 >(
     project: &WorkspaceProject,
     statuses: &[RepositoryStatus],
@@ -120,11 +123,15 @@ pub fn render_project_repository_status<
     cx: &Context<T>,
     on_check: FCheck,
     on_update: FUpdate,
+    on_clone: FClone,
+    on_clone_all: FCloneAll,
     on_select: FSelect,
     on_open: FOpen,
+    on_browse_sources: FBrowseSources,
 ) -> impl IntoElement {
     use crate::components::ui_icons::{
-        branch_icon, fork_icon, lock_icon, refresh_icon, repository_icon, star_icon,
+        branch_icon, download_icon, fork_icon, grid_icon, lock_icon, refresh_icon, repository_icon,
+        star_icon,
     };
 
     let repositories: Vec<_> = project
@@ -152,6 +159,52 @@ pub fn render_project_repository_status<
     } else {
         "repositories"
     };
+
+    let uncloned_count = repositories
+        .iter()
+        .filter(|(s_idx, r_idx, s, r)| {
+            let status = statuses
+                .iter()
+                .find(|item| item.source_index == *s_idx && item.repo_index == *r_idx);
+            let not_cloned_status = status
+                .and_then(|item| item.state.as_ref().ok())
+                .is_some_and(|st| st.status == CloneStatus::NotCloned);
+            let owner = crate::repository_git::repository_owner(s, r);
+            let target_path = crate::repository_git::resolve_target_path(
+                &project.directory,
+                project.disk_layout,
+                owner,
+                &r.name,
+            );
+            not_cloned_status || !target_path.exists()
+        })
+        .count();
+
+    let mut header_actions = div().flex().items_center().gap_3();
+
+    if uncloned_count > 0 {
+        header_actions = header_actions.child(
+            Button::new("git-clone-all-missing")
+                .icon(download_icon())
+                .label(format!("Clone all missing ({uncloned_count})"))
+                .primary()
+                .disabled(busy)
+                .on_click(cx.listener(move |this, _, window, cx| on_clone_all(this, window, cx))),
+        );
+    }
+
+    header_actions = header_actions.child(
+        Button::new("git-check-updates")
+            .icon(refresh_icon())
+            .label(if busy {
+                "Checking…"
+            } else {
+                "Check for updates"
+            })
+            .outline()
+            .disabled(busy || repositories.is_empty())
+            .on_click(cx.listener(move |this, _, window, cx| on_check(this, window, cx))),
+    );
 
     let header = div()
         .flex()
@@ -188,27 +241,25 @@ pub fn render_project_repository_status<
                         )),
                 ),
         )
-        .child(
-            Button::new("git-check-updates")
-                .icon(refresh_icon())
-                .label(if busy {
-                    "Checking…"
-                } else {
-                    "Check for updates"
-                })
-                .outline()
-                .disabled(busy || repositories.is_empty())
-                .on_click(cx.listener(move |this, _, window, cx| on_check(this, window, cx))),
-        );
+        .child(header_actions);
 
     if repositories.is_empty() {
         return div().flex().flex_col().gap_5().min_h(px(540.))
             .child(header)
             .child(div().flex_1().p_6().rounded_xl().border_1().border_color(cx.theme().border)
-                .flex().flex_col().items_center().justify_center().gap_3()
-                                .child(div().text_size(px(20.)).font_bold().child("Choose repositories to manage"))
-                .child(div().max_w(px(420.)).text_size(px(13.)).text_color(cx.theme().muted_foreground)
-                    .child("Open Sources to browse the live catalogue. Select repositories there and they will appear in this workspace.")))
+                .flex().flex_col().items_center().justify_center().gap_4()
+                .child(div().text_size(px(20.)).font_bold().child("Choose repositories to manage"))
+                .child(div().max_w(px(460.)).text_size(px(13.)).text_color(cx.theme().muted_foreground).text_center()
+                    .child("Select repositories from remote sources, or scan your project folder in Settings to import existing local Git repositories."))
+                .child(div().flex().gap_3().items_center()
+                    .child(
+                        Button::new("empty-browse-sources")
+                            .icon(grid_icon())
+                            .label("Browse sources")
+                            .primary()
+                            .on_click(cx.listener(move |this, _, window, cx| on_browse_sources(this, window, cx)))
+                    )
+                ))
             .into_any_element();
     }
 
@@ -372,8 +423,9 @@ pub fn render_project_repository_status<
             repo.name
         ))
     });
-    let clone_path = project.disk_layout.compute_clone_path(
+    let clone_path = crate::repository_git::resolve_target_path(
         &project.directory,
+        project.disk_layout,
         crate::repository_git::repository_owner(source, repo),
         &repo.name,
     );
@@ -886,12 +938,43 @@ pub fn render_project_repository_status<
                 .child(repo_metadata_card)
                 .child(git_status_card),
         );
-    if can_update && !busy {
+
+    let is_not_cloned = !is_cloned
+        || status
+            .and_then(|item| item.state.as_ref().ok())
+            .is_some_and(|st| st.status == CloneStatus::NotCloned);
+
+    if is_not_cloned {
+        detail_panel = detail_panel.child(
+            div().px_6().pb_6().child(
+                Button::new("git-clone-selected")
+                    .icon(download_icon())
+                    .label(if busy {
+                        "Cloning…"
+                    } else {
+                        "Clone repository"
+                    })
+                    .primary()
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        on_clone(source_index, repo_index, this, window, cx)
+                    })),
+            ),
+        );
+    } else {
         detail_panel = detail_panel.child(
             div().px_6().pb_6().child(
                 Button::new("git-update-selected")
-                    .label("Update repository")
+                    .icon(refresh_icon())
+                    .label(if busy {
+                        "Updating…"
+                    } else if can_update {
+                        "Pull updates"
+                    } else {
+                        "Update repository"
+                    })
                     .primary()
+                    .disabled(busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         on_update(source_index, repo_index, this, window, cx)
                     })),

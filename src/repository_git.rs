@@ -51,6 +51,35 @@ fn safe_namespace(value: &str) -> bool {
     !value.is_empty() && value.split('/').all(safe_component)
 }
 
+/// Resolve the on-disk location of a repository, respecting existing local repositories
+/// whether they are at the root project directory, directly in the project directory,
+/// or organized in a grouped subdirectory. Falls back to the project's disk layout.
+pub fn resolve_target_path(
+    project_root: &Path,
+    disk_layout: release_desk_core::project::DiskLayout,
+    owner: &str,
+    repo_name: &str,
+) -> PathBuf {
+    if repo_name
+        == project_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+        && project_root.join(".git").exists()
+    {
+        return project_root.to_path_buf();
+    }
+    let direct = project_root.join(repo_name);
+    if direct.join(".git").exists() {
+        return direct;
+    }
+    let grouped = project_root.join(owner).join(repo_name);
+    if grouped.join(".git").exists() {
+        return grouped;
+    }
+    disk_layout.compute_clone_path(project_root, owner, repo_name)
+}
+
 /// Resolve selected repositories, rejecting paths that could escape the project.
 pub fn targets(project: &WorkspaceProject) -> Result<Vec<RepositoryTarget>, String> {
     let mut result = Vec::new();
@@ -67,9 +96,7 @@ pub fn targets(project: &WorkspaceProject) -> Result<Vec<RepositoryTarget>, Stri
                 return Err(format!("Invalid repository path for {}", repo.name));
             }
             let path =
-                project
-                    .disk_layout
-                    .compute_clone_path(&project.directory, owner, &repo.name);
+                resolve_target_path(&project.directory, project.disk_layout, owner, &repo.name);
             if !destinations.insert(path.clone()) {
                 return Err(format!("More than one repository uses {}", path.display()));
             }

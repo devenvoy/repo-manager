@@ -367,7 +367,7 @@ impl GitClient {
             operation: "reserve clone destination",
             source,
         })?;
-        let output = self.run(
+        let mut output = self.run(
             None,
             "clone",
             [
@@ -379,6 +379,23 @@ impl GitClient {
                 path.as_os_str(),
             ],
         );
+        if output.as_ref().is_err_and(|_| true)
+            || output.as_ref().is_ok_and(|o| !o.status.success())
+        {
+            // If clone with specific --branch failed, retry without --branch to let git resolve remote HEAD
+            let _ = fs::remove_dir(path);
+            let _ = fs::create_dir(path);
+            output = self.run(
+                None,
+                "clone",
+                [
+                    OsStr::new("clone"),
+                    OsStr::new("--"),
+                    OsStr::new(remote_url),
+                    path.as_os_str(),
+                ],
+            );
+        }
         match output.and_then(|output| success("clone", output)) {
             Ok(_) => {}
             Err(error) => {
@@ -387,9 +404,23 @@ impl GitClient {
                 return Err(error);
             }
         }
-        let state = self.inspect(path, default_branch)?;
+        let detected_branch = self
+            .run(
+                Some(path),
+                "read branch",
+                ["symbolic-ref", "--quiet", "--short", "HEAD"],
+            )
+            .ok()
+            .and_then(|out| out.status.success().then(|| stdout(&out)))
+            .unwrap_or_else(|| default_branch.to_string());
+        let state = self.inspect(path, &detected_branch)?;
         match state.local_revision.clone() {
-            Some(revision) if state.status == CloneStatus::Current => {
+            Some(revision)
+                if matches!(
+                    state.status,
+                    CloneStatus::Current | CloneStatus::OtherBranch
+                ) =>
+            {
                 Ok(SyncOutcome::Cloned { revision })
             }
             _ => Ok(SyncOutcome::Skipped(state)),
@@ -542,7 +573,9 @@ impl GitClient {
                     "credential.useHttpPath=true",
                     "-c",
                     "http.followRedirects=false",
+                    "-c",
                     "http.extraHeader=",
+                    "-c",
                     "credential.interactive=never",
                     "-c",
                     "core.hooksPath=/dev/null",

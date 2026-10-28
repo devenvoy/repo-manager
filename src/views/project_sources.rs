@@ -2,7 +2,7 @@
 
 use crate::components::motion_button::Button;
 use crate::components::toggle_button;
-use crate::components::ui_icons::{branch_icon, fork_icon, star_icon, trash_icon};
+use crate::components::ui_icons::{branch_icon, fork_icon, plus_icon, star_icon, trash_icon};
 use crate::workspace_sources::{RepositoryListMode, SourceRepository, WorkspaceSource};
 use gpui_kit::base::{Disableable as _, StyledExt};
 use gpui_kit::component::ActiveTheme as _;
@@ -304,11 +304,39 @@ pub fn render_project_sources<
         );
     }
     if sources.is_empty() {
-        people = people.child(div().p_6().rounded_xl().border_1().border_color(cx.theme().border)
-            .flex().flex_col().gap_2()
-            .child(div().font_bold().text_size(px(16.)).child("No sources yet"))
-            .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground)
-                .child("Add a person or organization, then choose the repositories you want to track.")));
+        people = people.child(
+            div()
+                .p_6()
+                .rounded_xl()
+                .border_1()
+                .border_color(cx.theme().border)
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(div().font_bold().text_size(px(16.)).child("No sources yet"))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Add a person or organization, then choose the repositories you want to track."),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap_3()
+                        .items_center()
+                        .pt_2()
+                        .child(
+                            Button::new("empty-sources-add")
+                                .icon(plus_icon())
+                                .label("Add source")
+                                .primary()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    on_dialog(SourceDialog::Add, this, cx)
+                                })),
+                        ),
+                ),
+        );
     }
     let content = div()
         .flex()
@@ -340,6 +368,7 @@ pub fn render_project_sources<
                 )
                 .child(
                     Button::new("show-add-source")
+                        .icon(plus_icon())
                         .label("Add source")
                         .primary()
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -391,8 +420,9 @@ pub fn render_project_sources<
                 let mut actionable_count = 0;
                 for (repo_index, repo) in source.repositories.iter().enumerate() {
                     let selected = repo.selected;
-                    let clone_path = disk_layout.compute_clone_path(
+                    let clone_path = crate::repository_git::resolve_target_path(
                         project_directory,
+                        disk_layout,
                         crate::repository_git::repository_owner(source, repo),
                         &repo.name,
                     );
@@ -599,8 +629,12 @@ pub fn render_project_sources<
             let mut count = 0;
             for repo in &source.repositories {
                 if !repo.selected { continue; }
-                let target = disk_layout.compute_clone_path(project_directory,
-                    crate::repository_git::repository_owner(source, repo), &repo.name);
+                let target = crate::repository_git::resolve_target_path(
+                    project_directory,
+                    disk_layout,
+                    crate::repository_git::repository_owner(source, repo),
+                    &repo.name,
+                );
                 if std::fs::symlink_metadata(&target).is_ok() { continue; }
                 count += 1;
                 plans = plans.child(div().p_3().rounded_lg().border_1().border_color(cx.theme().border)

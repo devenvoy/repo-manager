@@ -225,6 +225,134 @@ impl WorkspaceSource {
     }
 }
 
+/// Discover local git repositories within a project directory (either the root directory itself,
+/// direct child directories, or grouped two-level child directories).
+pub fn scan_local_repositories(project_dir: &std::path::Path) -> Vec<WorkspaceSource> {
+    let mut discovered: Vec<SourceRepository> = Vec::new();
+
+    let inspect_dir = |dir: &std::path::Path| -> Option<SourceRepository> {
+        let git_dir = dir.join(".git");
+        if !git_dir.exists() {
+            return None;
+        }
+
+        let name = dir.file_name()?.to_string_lossy().to_string();
+        if name.is_empty() {
+            return None;
+        }
+
+        let default_branch = std::fs::read_to_string(git_dir.join("HEAD"))
+            .ok()
+            .and_then(|head| {
+                head.trim()
+                    .strip_prefix("ref: refs/heads/")
+                    .map(|b| b.to_string())
+            })
+            .unwrap_or_else(|| "main".to_string());
+
+        let mut clone_url = String::new();
+        if let Ok(config) = std::fs::read_to_string(git_dir.join("config")) {
+            let mut in_remote_origin = false;
+            for line in config.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('[') {
+                    in_remote_origin = trimmed.contains("remote \"origin\"");
+                } else if in_remote_origin && trimmed.starts_with("url =") {
+                    if let Some((_, url)) = trimmed.split_once('=') {
+                        clone_url = url.trim().to_string();
+                        break;
+                    }
+                }
+            }
+            if clone_url.is_empty() {
+                for line in config.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("url =") {
+                        if let Some((_, url)) = trimmed.split_once('=') {
+                            clone_url = url.trim().to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let full_name = if !clone_url.is_empty() {
+            if let Some(pos) = clone_url.find("github.com/") {
+                clone_url[pos + 11..].trim_end_matches(".git").to_string()
+            } else if let Some(pos) = clone_url.find("github.com:") {
+                clone_url[pos + 11..].trim_end_matches(".git").to_string()
+            } else if let Some(pos) = clone_url.find("gitlab.com/") {
+                clone_url[pos + 11..].trim_end_matches(".git").to_string()
+            } else if let Some(pos) = clone_url.find("gitlab.com:") {
+                clone_url[pos + 11..].trim_end_matches(".git").to_string()
+            } else {
+                format!("local/{name}")
+            }
+        } else {
+            format!("local/{name}")
+        };
+
+        Some(SourceRepository {
+            name,
+            full_name,
+            description: Some("Imported local repository".to_string()),
+            stars: 0,
+            forks: 0,
+            primary_language: None,
+            is_private: false,
+            is_fork: false,
+            clone_url,
+            default_branch,
+            selected: true,
+        })
+    };
+
+    if let Some(root_repo) = inspect_dir(project_dir) {
+        discovered.push(root_repo);
+    }
+
+    if let Ok(entries) = std::fs::read_dir(project_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && !path.file_name().is_some_and(|n| n == ".git") {
+                if let Some(repo) = inspect_dir(&path) {
+                    if !discovered.iter().any(|r| r.name == repo.name) {
+                        discovered.push(repo);
+                    }
+                } else if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                    for sub_entry in sub_entries.flatten() {
+                        let sub_path = sub_entry.path();
+                        if sub_path.is_dir() && !sub_path.file_name().is_some_and(|n| n == ".git") {
+                            if let Some(repo) = inspect_dir(&sub_path) {
+                                if !discovered.iter().any(|r| r.name == repo.name) {
+                                    discovered.push(repo);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if discovered.is_empty() {
+        return Vec::new();
+    }
+
+    vec![WorkspaceSource {
+        handle: "local".to_string(),
+        display_name: Some("Local Repositories".to_string()),
+        avatar_url: None,
+        bio: Some(format!(
+            "Discovered {} local repositories in project folder",
+            discovered.len()
+        )),
+        provider: "local".to_string(),
+        repositories: discovered,
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +460,49 @@ mod tests {
         );
         assert!(WorkspaceSource::extract_handle("https://github.com/", "github").is_err());
         assert!(WorkspaceSource::extract_handle(" ", "github").is_err());
+    }
+
+    #[test]
+    fn scan_local_repositories_discovers_git_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_a = temp.path().join("repo-a");
+        let repo_b = temp.path().join("group").join("repo-b");
+        std::fs::create_dir_all(repo_a.join(".git")).unwrap();
+        std::fs::create_dir_all(repo_b.join(".git")).unwrap();
+        std::fs::write(repo_a.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            repo_b.join(".git").join("HEAD"),
+            "ref: refs/heads/develop\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo_a.join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = https://github.com/my-org/repo-a.git\n",
+        )
+        .unwrap();
+
+        let sources = scan_local_repositories(temp.path());
+        assert_eq!(sources.len(), 1);
+        let local_source = &sources[0];
+        assert_eq!(local_source.handle, "local");
+        assert_eq!(local_source.repositories.len(), 2);
+
+        let a = local_source
+            .repositories
+            .iter()
+            .find(|r| r.name == "repo-a")
+            .unwrap();
+        assert_eq!(a.full_name, "my-org/repo-a");
+        assert_eq!(a.default_branch, "main");
+        assert!(a.selected);
+
+        let b = local_source
+            .repositories
+            .iter()
+            .find(|r| r.name == "repo-b")
+            .unwrap();
+        assert_eq!(b.full_name, "local/repo-b");
+        assert_eq!(b.default_branch, "develop");
+        assert!(b.selected);
     }
 }

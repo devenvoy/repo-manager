@@ -11,13 +11,14 @@ use gpui_kit::{
     AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div, px,
 };
 
-#[allow(clippy::too_many_arguments)] // One renderer boundary carries the selected project and four UI actions.
+#[allow(clippy::too_many_arguments)] // One renderer boundary carries the selected project and UI actions.
 pub fn render_project_workspace<
     T: 'static,
     FSection: Fn(ProjectSection, &mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FBack: Fn(&mut T, &mut Context<T>) + Copy + 'static,
     FEdit: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FDelete: Fn(&mut T, &mut Context<T>) + Copy + 'static,
+    FImport: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
 >(
     project: &WorkspaceProject,
     section: ProjectSection,
@@ -28,6 +29,7 @@ pub fn render_project_workspace<
     on_back: FBack,
     on_edit: FEdit,
     on_delete: FDelete,
+    on_import: FImport,
 ) -> impl IntoElement {
     let mut tabs = div()
         .flex()
@@ -86,6 +88,31 @@ pub fn render_project_workspace<
             .child(detail_row("Provider", project.provider.label(), cx))
             .child(detail_row("Account", &project.account, cx))
             .child(Button::new("edit-project").label("Edit project setup").primary().on_click(cx.listener(move |this, _, window, cx| on_edit(this, window, cx))))
+            .child(
+                div()
+                    .pt_4()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(div().text_size(px(16.)).font_bold().child("Import Existing Repositories"))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Scan your project folder to discover and import existing local Git repositories (such as ArtCraft or local working projects)."),
+                    )
+                    .child(
+                        Button::new("settings-import-local-repos")
+                            .icon(crate::components::ui_icons::repository_icon())
+                            .label("Scan project folder for repos")
+                            .outline()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                on_import(this, window, cx)
+                            })),
+                    ),
+            )
             .child(div().pt_4().border_t_1().border_color(cx.theme().border).text_size(px(16.)).font_bold().child("Delete project"))
             .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child("Remove this project from Release Desk. The directory and its files stay on disk."))
             .child(Button::new("delete-project").label(if delete_confirm { "Confirm: remove project" } else { "Delete project" }).on_click(cx.listener(move |this, _, _, cx| on_delete(this, cx))))
