@@ -82,6 +82,7 @@ struct ReleaseDesk {
     device_flow_verification_uri: Option<String>,
     device_flow_canceller: Option<Arc<std::sync::atomic::AtomicBool>>,
     active_webview_child: Option<std::process::Child>,
+    last_browser_open: Option<(String, std::time::Instant)>,
 }
 
 fn project_auth_token(
@@ -201,6 +202,7 @@ impl ReleaseDesk {
             device_flow_verification_uri: None,
             device_flow_canceller: None,
             active_webview_child: None,
+            last_browser_open: None,
         };
         app.apply_appearance(window, cx);
         let avatar_requests: Vec<_> = app
@@ -1527,22 +1529,19 @@ impl ReleaseDesk {
             cx.notify();
             return;
         }
+
+        let now = std::time::Instant::now();
+        if let Some((last_url, last_time)) = &self.last_browser_open {
+            if last_url == url
+                && now.duration_since(*last_time) < std::time::Duration::from_millis(1000)
+            {
+                return;
+            }
+        }
+        self.last_browser_open = Some((url.to_string(), now));
+
         self.message = format!("Opening {url} in browser…");
         cx.open_url(url);
-        #[cfg(target_os = "macos")]
-        {
-            let _ = std::process::Command::new("open").arg(url).spawn();
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let _ = std::process::Command::new("cmd")
-                .args(["/C", "start", "", url])
-                .spawn();
-        }
         cx.notify();
     }
 
