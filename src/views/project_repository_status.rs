@@ -294,10 +294,14 @@ pub(crate) fn status_text(status: Option<&RepositoryStatus>) -> (&'static str, S
             Ok(state) => {
                 let label = match state.status {
                     CloneStatus::NotCloned => "Not cloned",
+                    CloneStatus::Current if state.local_revision.is_none() && status.fetched => {
+                        "No commits published"
+                    }
+                    CloneStatus::Current if state.local_revision.is_none() => "No local commits",
                     CloneStatus::Current if status.fetched => "Up to date",
-                    CloneStatus::Current => "Locally current",
+                    CloneStatus::Current => "Check for updates",
                     CloneStatus::Behind if status.fetched => "Update available",
-                    CloneStatus::Behind => "Behind last fetched version",
+                    CloneStatus::Behind => "Update shown at last check",
                     CloneStatus::Ahead => "Local commits ahead",
                     CloneStatus::Diverged => "Branches diverged",
                     CloneStatus::Dirty => "Uncommitted changes",
@@ -351,6 +355,7 @@ pub(crate) fn can_review_clone(status: Option<&RepositoryStatus>) -> bool {
 pub fn render_project_repository_status<
     T: 'static,
     FCheck: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
+    FCheckSelected: Fn(usize, usize, &mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FUpdate: Fn(usize, usize, &mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FPullAll: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FClone: Fn(usize, usize, &mut T, &mut Window, &mut Context<T>) + Copy + 'static,
@@ -381,6 +386,7 @@ pub fn render_project_repository_status<
     editor_menu_open: bool,
     cx: &Context<T>,
     on_check: FCheck,
+    on_check_selected: FCheckSelected,
     on_update: FUpdate,
     on_pull_all: FPullAll,
     on_clone: FClone,
@@ -454,9 +460,9 @@ pub fn render_project_repository_status<
     let pull_count = all_repositories
         .iter()
         .filter(|(source_index, repo_index, _, _)| {
-            presentations
+            status_by_repo
                 .get(&(*source_index, *repo_index))
-                .is_some_and(|presentation| presentation.present)
+                .is_some_and(|status| crate::repository_git::can_pull(status))
         })
         .count();
 
@@ -471,13 +477,13 @@ pub fn render_project_repository_status<
         );
     }
 
-    if all_repositories.len() > 1 {
+    if pull_count > 0 {
         header_actions = header_actions.child(
             Button::new("git-pull-all-updates")
                 .icon(download_icon())
-                .label(format!("Pull all cloned ({pull_count})"))
+                .label(format!("Pull available updates ({pull_count})"))
                 .primary()
-                .disabled(busy || pull_count == 0)
+                .disabled(busy)
                 .on_click(cx.listener(move |this, _, window, cx| on_pull_all(this, window, cx))),
         );
     }
@@ -1294,6 +1300,16 @@ pub fn render_project_repository_status<
                             false,
                             false,
                         ),
+                        CloneStatus::Current if state.local_revision.is_none() => (
+                            if st.fetched { "No commits published" } else { "No local commits" },
+                            if st.fetched {
+                                "The online repository has no commits yet. Check again after its first commit is published.".to_string()
+                            } else {
+                                state.message.clone().unwrap_or_else(|| "Check for updates to see whether the online repository has a first commit.".to_string())
+                            },
+                            false,
+                            false,
+                        ),
                         CloneStatus::Current if st.fetched => (
                             "Up to date",
                             "Git working tree is in sync with latest tracked upstream commits.".to_string(),
@@ -1301,8 +1317,8 @@ pub fn render_project_repository_status<
                             false,
                         ),
                         CloneStatus::Current => (
-                            "Locally current",
-                            "Working tree is clean. Fetch origin to check if remote updates are available.".to_string(),
+                            "Update check needed",
+                            "Your local copy is ready. Check for updates to compare it with the online repository.".to_string(),
                             false,
                             false,
                         ),
@@ -1404,6 +1420,11 @@ pub fn render_project_repository_status<
                         .child(status_desc),
                 );
 
+            let can_repair = status.is_some_and(|status| {
+                status.state.as_ref().is_ok_and(|state| {
+                    state.local_revision.is_none() && state.remote_revision.is_some()
+                })
+            });
             let action_btn = if is_behind {
                 Button::new("git-update-selected")
                     .icon(download_icon())
@@ -1416,11 +1437,19 @@ pub fn render_project_repository_status<
             } else if is_error {
                 Button::new("git-update-selected")
                     .icon(refresh_icon())
-                    .label("Retry update")
+                    .label(if can_repair {
+                        "Fix local copy"
+                    } else {
+                        "Check again"
+                    })
                     .danger()
                     .disabled(busy)
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        on_update(source_index, repo_index, this, window, cx)
+                        if can_repair {
+                            on_update(source_index, repo_index, this, window, cx)
+                        } else {
+                            on_check_selected(source_index, repo_index, this, window, cx)
+                        }
                     }))
             } else {
                 Button::new("git-update-selected")
@@ -1428,7 +1457,9 @@ pub fn render_project_repository_status<
                     .label("Check for updates")
                     .outline()
                     .disabled(busy)
-                    .on_click(cx.listener(move |this, _, window, cx| on_check(this, window, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        on_check_selected(source_index, repo_index, this, window, cx)
+                    }))
             };
 
             div()
@@ -1987,8 +2018,8 @@ mod tests {
             state: Ok(CloneState {
                 status: state,
                 branch: None,
-                local_revision: None,
-                remote_revision: None,
+                local_revision: Some("local".into()),
+                remote_revision: Some("remote".into()),
                 message: None,
             }),
             fetched,
@@ -2019,7 +2050,7 @@ mod tests {
     fn local_and_fetched_states_have_distinct_labels() {
         assert_eq!(
             status_text(Some(&status(CloneStatus::Current, false))).0,
-            "Locally current"
+            "Check for updates"
         );
         assert_eq!(
             status_text(Some(&status(CloneStatus::Current, true))).0,
@@ -2027,8 +2058,13 @@ mod tests {
         );
         assert_eq!(
             status_text(Some(&status(CloneStatus::Behind, false))).0,
-            "Behind last fetched version"
+            "Update shown at last check"
         );
+        let mut empty = status(CloneStatus::Current, true);
+        empty.state.as_mut().unwrap().local_revision = None;
+        assert_eq!(status_text(Some(&empty)).0, "No commits published");
+        empty.fetched = false;
+        assert_eq!(status_text(Some(&empty)).0, "No local commits");
     }
 
     #[test]

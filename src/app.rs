@@ -68,6 +68,9 @@ pub struct ReleaseDesk {
     pub(crate) store_sort: crate::controllers::store_controller::StoreSort,
     pub(crate) store_busy: bool,
     pub(crate) store_revision: u64,
+    pub(crate) store_install_states:
+        std::collections::HashMap<String, release_desk_core::app_catalog::AppActionState>,
+    pub(crate) store_probe_revision: u64,
     pub(crate) store_activities:
         std::collections::HashMap<String, crate::controllers::store_controller::StoreActivity>,
     pub(crate) git_statuses: Vec<crate::repository_git::RepositoryStatus>,
@@ -91,10 +94,14 @@ pub struct ReleaseDesk {
     pub(crate) git_busy: bool,
     pub(crate) project_cache_status: Option<crate::controllers::git_controller::ProjectCacheStatus>,
     pub(crate) workspace_revision: u64,
+    pub(crate) workspace_cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) icon_revision: u64,
     pub(crate) release_state: crate::workspace_releases::ReleaseViewState,
     pub(crate) release_busy: bool,
     pub(crate) release_type_busy: bool,
     pub(crate) release_type_menu_open: bool,
+    pub(crate) release_scroll_handle: gpui_kit::ScrollHandle,
+    pub(crate) release_scroll_generation: std::rc::Rc<std::cell::Cell<u64>>,
     pub(crate) message: String,
     last_notified_message: String,
     pub(crate) nav_history: Vec<NavLocation>,
@@ -107,6 +114,7 @@ pub struct ReleaseDesk {
     pub(crate) auth_mode_choice: AuthModeChoice,
     pub(crate) auth_status_message: Option<String>,
     pub(crate) detected_system_credential: Option<(String, String)>,
+    pub(crate) credential_discovery_revision: u64,
     pub(crate) local_oauth_server: Option<LocalOAuthServer>,
     pub(crate) device_flow_user_code: Option<String>,
     pub(crate) device_flow_verification_uri: Option<String>,
@@ -148,6 +156,29 @@ pub(crate) fn find_webview_binary() -> Option<std::path::PathBuf> {
         return Some(target);
     }
     None
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ProjectLoadAction {
+    None,
+    Inspect,
+    Releases,
+}
+
+fn project_load_action(
+    section: ProjectSection,
+    git_busy: bool,
+    no_status: bool,
+    release_busy: bool,
+    releases_not_loaded: bool,
+) -> ProjectLoadAction {
+    match section {
+        ProjectSection::Repositories if !git_busy && no_status => ProjectLoadAction::Inspect,
+        ProjectSection::Releases if !release_busy && releases_not_loaded => {
+            ProjectLoadAction::Releases
+        }
+        _ => ProjectLoadAction::None,
+    }
 }
 
 impl ReleaseDesk {
@@ -206,14 +237,42 @@ impl ReleaseDesk {
         let catalog_path = crate::store_catalog::catalog_path(&crate::workspace::expand_directory(
             &settings.library_dir,
         ));
-        let mut store_items = match crate::store_catalog::load(&catalog_path) {
+        let store_items = match crate::store_catalog::load_for_startup(&catalog_path) {
             Ok(items) => items,
             Err(error) => {
                 message = error;
                 Vec::new()
             }
         };
-        crate::store_catalog::refresh_local_artwork(&mut store_items, &projects);
+        let store_projects = projects.clone();
+        let mut artwork_items = store_items.clone();
+        let (store_tx, store_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            crate::store_catalog::validate_cached_artwork(&mut artwork_items);
+            crate::store_catalog::refresh_local_artwork(&mut artwork_items, &store_projects);
+            let _ = store_tx.send(artwork_items);
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match store_rx.try_recv() {
+                    Ok(items) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            if this.store_revision == 0 {
+                                this.store_items = items;
+                                cx.notify();
+                            }
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        })
+        .detach();
         let app = Self {
             settings,
             projects,
@@ -247,6 +306,8 @@ impl ReleaseDesk {
             store_sort: Default::default(),
             store_busy: false,
             store_revision: 0,
+            store_install_states: Default::default(),
+            store_probe_revision: 0,
             store_activities: Default::default(),
             git_statuses: Vec::new(),
             git_check_completed: 0,
@@ -263,10 +324,14 @@ impl ReleaseDesk {
             git_busy: false,
             project_cache_status: None,
             workspace_revision: 0,
+            workspace_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            icon_revision: 0,
             release_state: Default::default(),
             release_busy: false,
             release_type_busy: false,
             release_type_menu_open: false,
+            release_scroll_handle: gpui_kit::ScrollHandle::new(),
+            release_scroll_generation: std::rc::Rc::new(std::cell::Cell::new(0)),
             message,
             last_notified_message: String::new(),
             nav_history: vec![initial_loc],
@@ -278,6 +343,7 @@ impl ReleaseDesk {
             auth_mode_choice: AuthModeChoice::OAuthBrowser,
             auth_status_message: None,
             detected_system_credential: None,
+            credential_discovery_revision: 0,
             local_oauth_server: None,
             device_flow_user_code: None,
             device_flow_verification_uri: None,
@@ -287,6 +353,10 @@ impl ReleaseDesk {
             import_dialog: None,
         };
         app.apply_appearance(window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let _ = this.update_in(cx, |this, _, cx| this.refresh_store_install_states(cx));
+        })
+        .detach();
         let download_requests: Vec<(String, std::path::PathBuf)> = app
             .projects
             .iter()
@@ -340,6 +410,9 @@ impl ReleaseDesk {
         };
         let project_changed = next_project != self.selected_project_id;
         if project_changed {
+            self.workspace_cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            self.workspace_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
             self.workspace_revision = self.workspace_revision.wrapping_add(1);
             self.git_statuses.clear();
             self.git_check_completed = 0;
@@ -355,6 +428,10 @@ impl ReleaseDesk {
             self.release_busy = false;
             self.release_type_busy = false;
             self.release_type_menu_open = false;
+            self.release_scroll_handle
+                .set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.)));
+            self.release_scroll_generation
+                .set(self.release_scroll_generation.get().wrapping_add(1));
             self.source_dialog = views::project_sources::SourceDialog::Closed;
         }
         match loc {
@@ -370,11 +447,13 @@ impl ReleaseDesk {
                 self.setup_active = false;
             }
             NavLocation::AppStore => {
+                self.selected_project_id = None;
                 self.tab = WorkspaceTab::AppStore;
                 self.selected_app_id = None;
                 self.selected_store_release = None;
             }
             NavLocation::AppDetail(id) => {
+                self.selected_project_id = None;
                 self.tab = WorkspaceTab::AppStore;
                 if self.selected_app_id.as_deref() != Some(id.as_str()) {
                     self.selected_store_release = None;
@@ -382,14 +461,15 @@ impl ReleaseDesk {
                 self.selected_app_id = Some(id);
             }
             NavLocation::Settings => {
+                self.selected_project_id = None;
                 self.tab = WorkspaceTab::Settings;
                 self.setup_active = false;
             }
         }
-        if project_changed {
-            if let Some(project_id) = self.selected_project_id {
-                self.prefetch_project_data(project_id, cx);
-            }
+        if let Some(project_id) = self.selected_project_id {
+            self.prefetch_project_data(project_id, cx);
+        } else if self.tab == WorkspaceTab::AppStore {
+            self.refresh_store_install_states(cx);
         }
     }
 
@@ -397,11 +477,19 @@ impl ReleaseDesk {
         if self.selected_project_id != Some(project_id) {
             return;
         }
-        if !self.git_busy {
-            self.check_repository_updates(None, true, cx);
-        }
-        if !self.release_busy {
-            self.refresh_releases(cx);
+        match project_load_action(
+            self.project_section,
+            self.git_busy,
+            self.git_statuses.is_empty(),
+            self.release_busy,
+            matches!(
+                self.release_state,
+                crate::workspace_releases::ReleaseViewState::NotLoaded
+            ),
+        ) {
+            ProjectLoadAction::Inspect => self.check_repository_updates(None, true, cx),
+            ProjectLoadAction::Releases => self.refresh_releases(cx),
+            ProjectLoadAction::None => {}
         }
     }
 
@@ -547,7 +635,7 @@ impl Render for ReleaseDesk {
                 &self.store_category,
                 self.store_filter,
                 self.store_sort,
-                &crate::workspace::expand_directory(&self.settings.applications_dir),
+                &self.store_install_states,
                 self.store_busy,
                 &self.store_activities,
                 cx,
@@ -742,6 +830,9 @@ impl Render for ReleaseDesk {
                                     this.check_repository_updates(None, false, cx)
                                 },
                                 |source, repo, this: &mut Self, _window, cx| {
+                                    this.check_one_repository(source, repo, cx)
+                                },
+                                |source, repo, this: &mut Self, _window, cx| {
                                     this.check_repository_updates(Some((source, repo)), false, cx)
                                 },
                                 |this: &mut Self, _window, cx| this.pull_all_updates(cx),
@@ -794,6 +885,8 @@ impl Render for ReleaseDesk {
                                     busy: self.release_busy || self.release_type_busy,
                                     extension: &self.settings.installer_extension,
                                     type_menu_open: self.release_type_menu_open,
+                                    scroll_handle: &self.release_scroll_handle,
+                                    scroll_generation: &self.release_scroll_generation,
                                 },
                                 cx,
                                 |this: &mut Self, _window, cx| this.refresh_releases(cx),
@@ -832,6 +925,9 @@ impl Render for ReleaseDesk {
                         cx,
                         |section, this: &mut Self, _window, cx| {
                             this.project_section = section;
+                            if let Some(project_id) = this.selected_project_id {
+                                this.prefetch_project_data(project_id, cx);
+                            }
                             this.delete_confirm = false;
                             if section != ProjectSection::Releases {
                                 this.release_type_menu_open = false;
@@ -943,7 +1039,6 @@ impl Render for ReleaseDesk {
             .and_then(|id| self.store_items.iter().find(|item| item.key == id))
             .zip(self.selected_store_image)
             && let Some(path) = item.images.get(index)
-            && path.is_file()
         {
             root = root.child(views::store::render_store_preview(
                 path,
@@ -959,5 +1054,43 @@ impl Render for ReleaseDesk {
         }
 
         root
+    }
+}
+
+#[cfg(test)]
+mod project_loading_tests {
+    use super::{ProjectLoadAction, project_load_action};
+    use crate::workspace::ProjectSection;
+
+    #[test]
+    fn only_opened_sections_start_their_missing_work() {
+        assert_eq!(
+            project_load_action(ProjectSection::Overview, false, true, false, true),
+            ProjectLoadAction::None
+        );
+        assert_eq!(
+            project_load_action(ProjectSection::Repositories, false, true, false, true),
+            ProjectLoadAction::Inspect
+        );
+        assert_eq!(
+            project_load_action(ProjectSection::Repositories, true, true, false, true),
+            ProjectLoadAction::None
+        );
+        assert_eq!(
+            project_load_action(ProjectSection::Repositories, false, false, false, true),
+            ProjectLoadAction::None
+        );
+        assert_eq!(
+            project_load_action(ProjectSection::Releases, false, true, false, true),
+            ProjectLoadAction::Releases
+        );
+        assert_eq!(
+            project_load_action(ProjectSection::Releases, false, true, true, true),
+            ProjectLoadAction::None
+        );
+        assert_eq!(
+            project_load_action(ProjectSection::Releases, false, true, false, false),
+            ProjectLoadAction::None
+        );
     }
 }

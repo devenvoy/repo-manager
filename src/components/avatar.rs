@@ -2,7 +2,7 @@
 
 use crate::colors::rgb;
 use gpui_kit::base::StyledExt as _;
-use gpui_kit::component::{Icon, Theme};
+use gpui_kit::component::Theme;
 use gpui_kit::{
     IntoElement, ObjectFit, ParentElement as _, Styled as _, StyledImage as _, div, img, px, white,
 };
@@ -132,37 +132,23 @@ pub fn repo_icon_with_provider(
     let radius = (size_px * 0.24).round();
 
     if let Some(path) = icon_path {
-        if path.is_file() {
-            if path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
-                && let Ok(bytes) = std::fs::read(path)
-                && bytes.len() <= 8_000_000
-            {
-                return div()
-                    .w(px(size_px))
-                    .h(px(size_px))
-                    .rounded(px(radius))
-                    .flex_shrink_0()
-                    .overflow_hidden()
-                    .child(Icon::default().data(&bytes).w(px(size_px)).h(px(size_px)))
-                    .into_any_element();
-            }
-
-            return div()
-                .w(px(size_px))
-                .h(px(size_px))
-                .rounded(px(radius))
-                .flex_shrink_0()
-                .overflow_hidden()
-                .shadow_sm()
-                .child(
-                    img(path.to_path_buf())
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                )
-                .into_any_element();
-        }
+        let fallback_name = name.to_string();
+        return div()
+            .w(px(size_px))
+            .h(px(size_px))
+            .rounded(px(radius))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .shadow_sm()
+            .child(
+                img(path.to_path_buf())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+                    .with_fallback(move || {
+                        repo_initials_badge(&fallback_name, size_px).into_any_element()
+                    }),
+            )
+            .into_any_element();
     }
 
     // Default when no icon image is available: show initials without gradient background

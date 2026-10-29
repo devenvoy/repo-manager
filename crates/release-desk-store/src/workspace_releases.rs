@@ -593,7 +593,11 @@ pub fn local_archived_files(
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() {
+                if path.is_file()
+                    && path
+                        .canonicalize()
+                        .is_ok_and(|actual| actual.starts_with(&root))
+                {
                     let file_name = entry.file_name().to_string_lossy().to_string();
                     let lower_file = file_name.to_lowercase();
                     let same_shelf = selected.is_none_or(|selected| {
@@ -601,15 +605,21 @@ pub fn local_archived_files(
                             .is_some_and(|kind| kind.folder == selected.folder)
                     });
                     if same_shelf && lower_file.contains(&lower_repo) {
-                        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                        results.push((file_name, len));
+                        let metadata = entry.metadata().ok();
+                        let len = metadata.as_ref().map_or(0, |m| m.len());
+                        let modified = metadata.and_then(|m| m.modified().ok());
+                        results.push((modified, file_name, len));
                     }
                 }
             }
         }
     }
 
+    results.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
     results
+        .into_iter()
+        .map(|(_, name, size)| (name, size))
+        .collect()
 }
 
 fn comparable_utc_timestamp(value: &str) -> bool {

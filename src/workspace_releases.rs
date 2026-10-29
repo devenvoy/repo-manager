@@ -1,7 +1,7 @@
 //! Release data shown in a project workspace.
 use release_desk_store::workspace_releases::{
     LocalAssetState, WorkspaceAsset, WorkspaceRelease, local_archived_files, local_asset_state,
-    newer_release_with_local_older, release_asset_type, release_asset_type_for_extension,
+    release_asset_type, release_asset_type_for_extension,
 };
 use std::path::{Path, PathBuf};
 
@@ -21,10 +21,18 @@ pub struct ReleasePresentation {
     pub latest_tag: Option<String>,
     pub published_at: Option<String>,
     pub asset: Option<WorkspaceAsset>,
-    pub pkg_kind: String,
+    pub downloaded: Option<DownloadedRelease>,
     pub local_state: LocalAssetState,
-    pub newer_update: Option<(String, String)>,
+    pub update_available: bool,
     pub archived_file: Option<(String, u64)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DownloadedRelease {
+    pub tag: String,
+    pub name: String,
+    pub size: Option<u64>,
+    pub published_at: Option<String>,
 }
 
 impl Default for ReleasePresentation {
@@ -34,9 +42,9 @@ impl Default for ReleasePresentation {
             latest_tag: None,
             published_at: None,
             asset: None,
-            pkg_kind: String::new(),
+            downloaded: None,
             local_state: LocalAssetState::Missing,
-            newer_update: None,
+            update_available: false,
             archived_file: None,
         }
     }
@@ -54,9 +62,6 @@ pub fn build_release_presentations(
         .to_ascii_lowercase();
     let selected_kind = release_asset_type_for_extension(&extension);
     let selected_extension = selected_kind.map(|kind| kind.extension);
-    let pkg_kind = selected_kind
-        .map(|kind| kind.label.to_string())
-        .unwrap_or_else(|| "Package".to_string());
 
     crate::modules::parallel::map_bounded(
         repositories,
@@ -72,24 +77,31 @@ pub fn build_release_presentations(
             let Ok(releases) = &repository.result else {
                 return ReleasePresentation {
                     icon_path,
-                    pkg_kind: pkg_kind.clone(),
                     ..Default::default()
                 };
             };
 
-            let latest_release = releases.iter().find(|release| !release.is_draft);
-            let target_asset = latest_release.and_then(|release| {
-                release
-                    .assets
-                    .iter()
-                    .find(|asset| match selected_extension {
-                        Some(expected) => release_asset_type(&asset.name)
-                            .is_some_and(|kind| kind.extension == expected),
-                        None => asset
-                            .name
-                            .to_ascii_lowercase()
-                            .ends_with(&format!(".{extension}")),
-                    })
+            let matches_format = |asset: &WorkspaceAsset| match selected_extension {
+                Some(expected) => {
+                    release_asset_type(&asset.name).is_some_and(|kind| kind.extension == expected)
+                }
+                None => asset
+                    .name
+                    .to_ascii_lowercase()
+                    .ends_with(&format!(".{extension}")),
+            };
+            let latest = releases
+                .iter()
+                .filter(|release| !release.is_draft)
+                .find_map(|release| {
+                    release
+                        .assets
+                        .iter()
+                        .find(|asset| matches_format(asset))
+                        .map(|asset| (release, asset))
+                });
+            let (latest_release, target_asset) = latest.map_or((None, None), |(release, asset)| {
+                (Some(release), Some(asset))
             });
             let local_state = match (latest_release, target_asset) {
                 (Some(release), Some(asset)) => local_asset_state(
@@ -102,14 +114,37 @@ pub fn build_release_presentations(
                 ),
                 _ => LocalAssetState::Missing,
             };
-            let newer_update = latest_release.and_then(|_| {
-                newer_release_with_local_older(
-                    project_directory,
-                    &repository.owner,
-                    &repository.repository,
-                    releases,
-                )
-            });
+            let downloaded = releases
+                .iter()
+                .filter(|release| !release.is_draft)
+                .find_map(|release| {
+                    release
+                        .assets
+                        .iter()
+                        .filter(|asset| matches_format(asset))
+                        .find_map(|asset| {
+                            matches!(
+                                local_asset_state(
+                                    project_directory,
+                                    &repository.owner,
+                                    &repository.repository,
+                                    &release.tag_name,
+                                    &asset.name,
+                                    asset.size
+                                ),
+                                LocalAssetState::SizeMatches | LocalAssetState::PresentSizeUnknown
+                            )
+                            .then(|| DownloadedRelease {
+                                tag: release.tag_name.clone(),
+                                name: asset.name.clone(),
+                                size: asset.size,
+                                published_at: release.published_at.clone(),
+                            })
+                        })
+                });
+            let update_available = latest_release
+                .zip(downloaded.as_ref())
+                .is_some_and(|(latest, current)| latest.tag_name != current.tag);
             let archived_file =
                 local_archived_files(project_directory, &repository.repository, &extension)
                     .into_iter()
@@ -120,10 +155,9 @@ pub fn build_release_presentations(
                 latest_tag: latest_release.map(|release| release.tag_name.clone()),
                 published_at: latest_release.and_then(|release| release.published_at.clone()),
                 asset: target_asset.cloned(),
-                pkg_kind: pkg_kind.clone(),
+                downloaded,
                 local_state,
-                newer_update: newer_update
-                    .map(|(latest, older)| (latest.to_string(), older.to_string())),
+                update_available,
                 archived_file,
             }
         },
@@ -208,7 +242,6 @@ mod tests {
         assert_eq!(presentations.len(), 1);
         let presentation = &presentations[0];
         assert_eq!(presentation.latest_tag.as_deref(), Some("v2"));
-        assert_eq!(presentation.pkg_kind, "ZIP");
         assert_eq!(
             presentation.asset.as_ref().map(|asset| asset.name.as_str()),
             Some("repo-v2.zip")
@@ -216,10 +249,38 @@ mod tests {
         assert_eq!(presentation.local_state, LocalAssetState::SizeMatches);
         assert_eq!(
             presentation
+                .downloaded
+                .as_ref()
+                .map(|item| item.tag.as_str()),
+            Some("v2")
+        );
+        assert_eq!(
+            presentation
                 .archived_file
                 .as_ref()
                 .map(|(name, _)| name.as_str()),
             Some("repo-v1.zip")
+        );
+    }
+
+    #[test]
+    fn selected_format_uses_latest_release_that_has_a_download() {
+        let directory = tempfile::tempdir().unwrap();
+        let repositories = vec![repository(Ok(vec![
+            release("v3", "2026-01-03T00:00:00Z", vec![asset("repo-v3.zip", 3)]),
+            release("v2", "2026-01-02T00:00:00Z", vec![asset("repo-v2.dmg", 4)]),
+        ]))];
+
+        let presentation = &build_release_presentations(directory.path(), &repositories, "dmg")[0];
+        assert_eq!(presentation.latest_tag.as_deref(), Some("v2"));
+        assert_eq!(
+            presentation.asset.as_ref().map(|asset| asset.name.as_str()),
+            Some("repo-v2.dmg")
+        );
+        assert!(
+            build_release_presentations(directory.path(), &repositories, "apk")[0]
+                .asset
+                .is_none()
         );
     }
 
@@ -233,7 +294,6 @@ mod tests {
         );
 
         assert_eq!(presentations.len(), 1);
-        assert_eq!(presentations[0].pkg_kind, "DMG");
         assert!(presentations[0].latest_tag.is_none());
         assert!(presentations[0].asset.is_none());
         assert_eq!(presentations[0].local_state, LocalAssetState::Missing);

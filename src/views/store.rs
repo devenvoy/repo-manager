@@ -37,7 +37,7 @@ pub fn render_store<
     category: &str,
     filter: StoreFilter,
     sort: StoreSort,
-    applications_dir: &Path,
+    install_states: &HashMap<String, AppActionState>,
     busy: bool,
     activities: &HashMap<String, StoreActivity>,
     cx: &Context<T>,
@@ -58,7 +58,7 @@ pub fn render_store<
         return render_detail(
             item,
             selected_release,
-            applications_dir,
+            install_states.get(&item.key),
             activities.get(&item.key).copied(),
             cx,
             on_action,
@@ -77,10 +77,17 @@ pub fn render_store<
             (category == "All" || item.display_category() == category)
                 && match filter {
                     StoreFilter::All => true,
-                    StoreFilter::Installed => item.state(applications_dir).is_installed(),
-                    StoreFilter::Updates => item.state(applications_dir).requires_update(),
+                    StoreFilter::Installed => install_states
+                        .get(&item.key)
+                        .is_some_and(AppActionState::is_installed),
+                    StoreFilter::Updates => install_states
+                        .get(&item.key)
+                        .is_some_and(AppActionState::requires_update),
                     StoreFilter::Available => {
-                        matches!(item.state(applications_dir), AppActionState::Installable)
+                        matches!(
+                            install_states.get(&item.key),
+                            Some(AppActionState::Installable)
+                        )
                     }
                 }
                 && (query.is_empty()
@@ -107,11 +114,19 @@ pub fn render_store<
     });
     let updates = listings
         .iter()
-        .filter(|item| item.state(applications_dir).requires_update())
+        .filter(|item| {
+            install_states
+                .get(&item.key)
+                .is_some_and(AppActionState::requires_update)
+        })
         .count();
     let installed = listings
         .iter()
-        .filter(|item| item.state(applications_dir).is_installed())
+        .filter(|item| {
+            install_states
+                .get(&item.key)
+                .is_some_and(AppActionState::is_installed)
+        })
         .count();
     let mut status_tabs = div().flex().gap_2();
     for (choice, label) in [
@@ -156,7 +171,7 @@ pub fn render_store<
     for item in visible.iter().copied() {
         cards = cards.child(render_app_row(
             item,
-            applications_dir,
+            install_states.get(&item.key),
             activities.get(&item.key).copied(),
             cx,
             on_select,
@@ -214,7 +229,7 @@ pub fn render_store<
                     .map(|item| {
                         render_featured(
                             item,
-                            applications_dir,
+                            install_states.get(&item.key),
                             activities.get(&item.key).copied(),
                             cx,
                             on_select,
@@ -299,7 +314,7 @@ fn render_featured<
     FAction: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
 >(
     item: &StoreApp,
-    applications_dir: &Path,
+    state: Option<&AppActionState>,
     activity: Option<StoreActivity>,
     cx: &Context<T>,
     on_select: FSelect,
@@ -358,13 +373,13 @@ fn render_featured<
                 .child(
                     Button::new("featured-action")
                         .label(activity.map_or_else(
-                            || action_label(item, applications_dir).to_string(),
+                            || action_label(item, state).to_string(),
                             StoreActivity::label,
                         ))
                         .primary()
                         .disabled(
                             activity.is_some()
-                                || action_label(item, applications_dir) == "Unavailable",
+                                || matches!(action_label(item, state), "Unavailable" | "Checking…"),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -387,7 +402,7 @@ fn render_app_row<
     FAction: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
 >(
     item: &StoreApp,
-    applications_dir: &Path,
+    state: Option<&AppActionState>,
     activity: Option<StoreActivity>,
     cx: &Context<T>,
     on_select: FSelect,
@@ -449,12 +464,13 @@ fn render_app_row<
         .child(
             Button::new(format!("app-action-{action_key}"))
                 .label(activity.map_or_else(
-                    || action_label(item, applications_dir).to_string(),
+                    || action_label(item, state).to_string(),
                     StoreActivity::label,
                 ))
                 .primary()
                 .disabled(
-                    activity.is_some() || action_label(item, applications_dir) == "Unavailable",
+                    activity.is_some()
+                        || matches!(action_label(item, state), "Unavailable" | "Checking…"),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
@@ -473,7 +489,7 @@ fn render_detail<
 >(
     item: &StoreApp,
     selected_release: Option<&str>,
-    applications_dir: &Path,
+    state: Option<&AppActionState>,
     activity: Option<StoreActivity>,
     cx: &Context<T>,
     on_action: FAction,
@@ -545,22 +561,20 @@ fn render_detail<
     }
     let mut artwork = div().flex().flex_wrap().gap_3();
     for (index, path) in item.images.iter().enumerate() {
-        if path.is_file() {
-            artwork = artwork.child(
-                div()
-                    .id(format!("store-preview-{index}"))
-                    .cursor_pointer()
-                    .w(px(320.))
-                    .h(px(200.))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary)
-                    .overflow_hidden()
-                    .on_click(cx.listener(move |this, _, _, cx| on_preview(index, this, cx)))
-                    .child(img(path.clone()).size_full().object_fit(ObjectFit::Contain)),
-            );
-        }
+        artwork = artwork.child(
+            div()
+                .id(format!("store-preview-{index}"))
+                .cursor_pointer()
+                .w(px(320.))
+                .h(px(200.))
+                .rounded_xl()
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary)
+                .overflow_hidden()
+                .on_click(cx.listener(move |this, _, _, cx| on_preview(index, this, cx)))
+                .child(img(path.clone()).size_full().object_fit(ObjectFit::Contain)),
+        );
     }
     div()
         .flex()
@@ -613,13 +627,13 @@ fn render_detail<
                 .child(
                     Button::new("store-detail-action")
                         .label(activity.map_or_else(
-                            || action_label(item, applications_dir).to_string(),
+                            || action_label(item, state).to_string(),
                             StoreActivity::label,
                         ))
                         .primary()
                         .disabled(
                             activity.is_some()
-                                || action_label(item, applications_dir) == "Unavailable",
+                                || matches!(action_label(item, state), "Unavailable" | "Checking…"),
                         )
                         .on_click(
                             cx.listener(move |this, _, _, cx| on_action(key.clone(), this, cx)),
@@ -861,10 +875,11 @@ fn note_lines(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn action_label(item: &StoreApp, applications_dir: &Path) -> &'static str {
-    match item.state(applications_dir) {
-        AppActionState::UpToDate { .. } => "Open",
-        AppActionState::Installable | AppActionState::UpdateAvailable { .. } => {
+fn action_label(item: &StoreApp, state: Option<&AppActionState>) -> &'static str {
+    match state {
+        None => "Checking…",
+        Some(AppActionState::UpToDate { .. }) => "Open",
+        Some(AppActionState::Installable | AppActionState::UpdateAvailable { .. }) => {
             if item.platform_asset().is_none() {
                 "Unavailable"
             } else if cfg!(target_os = "macos")
@@ -872,7 +887,7 @@ fn action_label(item: &StoreApp, applications_dir: &Path) -> &'static str {
                     .platform_asset()
                     .is_some_and(|asset| asset.name.to_ascii_lowercase().ends_with(".dmg"))
             {
-                if item.state(applications_dir).is_installed() {
+                if state.is_some_and(AppActionState::is_installed) {
                     "Update"
                 } else {
                     "Install"

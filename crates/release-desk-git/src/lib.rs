@@ -291,7 +291,16 @@ impl GitClient {
             return Ok(state);
         }
         let (Some(local), Some(remote)) = (&state.local_revision, &state.remote_revision) else {
-            state.message = Some("Local or origin revision is unavailable".into());
+            if state.local_revision.is_none() && state.remote_revision.is_none() {
+                state.status = CloneStatus::Current;
+                state.message = Some("This local copy has no commits. Check for updates to see whether the online repository has a first commit.".into());
+            } else if state.local_revision.is_none() {
+                state.message = Some("The local copy has no commits, but the online repository does. Use Fix local copy to restore it.".into());
+            } else {
+                state.message = Some(format!(
+                    "The online branch {default_branch} is unavailable. Refresh this source or check its default branch."
+                ));
+            }
             return Ok(state);
         };
         if local == remote {
@@ -507,7 +516,9 @@ impl GitClient {
         }
         // Reject unrelated/non-repository directories before invoking fetch.
         let before = self.inspect(path, default_branch)?;
-        if before.status == CloneStatus::Error {
+        if before.status == CloneStatus::Error
+            && !(before.local_revision.is_none() && before.remote_revision.is_some())
+        {
             return Ok(SyncOutcome::Skipped(before));
         }
         let origin = self.run(Some(path), "read origin", ["remote", "get-url", "origin"])?;
@@ -519,6 +530,28 @@ impl GitClient {
         }
         self.fetch_origin(path)?;
         let state = self.inspect(path, default_branch)?;
+        if state.status == CloneStatus::Error
+            && state.local_revision.is_none()
+            && let Some(remote_revision) = state.remote_revision.as_ref()
+        {
+            let remote_ref = format!("origin/{default_branch}");
+            let output = self.run(
+                Some(path),
+                "set up local branch",
+                [
+                    "switch",
+                    "-C",
+                    default_branch,
+                    "--track",
+                    remote_ref.as_str(),
+                ],
+            )?;
+            success("set up local branch", output)?;
+            return Ok(SyncOutcome::FastForwarded {
+                from: String::new(),
+                to: remote_revision.clone(),
+            });
+        }
         match state.status {
             CloneStatus::Current => Ok(SyncOutcome::AlreadyCurrent),
             CloneStatus::Behind => {
@@ -1127,6 +1160,43 @@ mod tests {
             })
         ));
         assert!(!fixture.clone.exists());
+    }
+
+    #[test]
+    fn empty_checkout_is_not_an_update_error() {
+        let fixture = Fixture::new();
+        let empty = fixture.root.join("empty-checkout");
+        git(
+            &fixture.root,
+            &["init", "-b", "main", empty.to_str().unwrap()],
+        );
+        let state = GitClient::new().inspect(&empty, "main").unwrap();
+        assert_eq!(state.status, CloneStatus::Current);
+        assert!(state.local_revision.is_none());
+        assert!(state.message.unwrap().contains("no commits"));
+    }
+
+    #[test]
+    fn existing_unborn_branch_can_start_from_verified_origin() {
+        let fixture = Fixture::new();
+        let empty = fixture.root.join("empty-checkout");
+        git(
+            &fixture.root,
+            &["init", "-b", "main", empty.to_str().unwrap()],
+        );
+        git(
+            &empty,
+            &["remote", "add", "origin", fixture.remote.to_str().unwrap()],
+        );
+        let outcome = GitClient::new()
+            .sync_existing(fixture.remote.to_str().unwrap(), &empty, "main")
+            .unwrap();
+        assert!(matches!(outcome, SyncOutcome::FastForwarded { .. }));
+        assert_eq!(
+            GitClient::new().inspect(&empty, "main").unwrap().status,
+            CloneStatus::Current
+        );
+        assert!(empty.join("README.md").is_file());
     }
 
     #[test]

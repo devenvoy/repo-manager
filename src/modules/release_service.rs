@@ -9,12 +9,17 @@ use std::path::{Path, PathBuf};
 pub fn fetch_project_releases(
     project: &WorkspaceProject,
     token: Option<String>,
+    secret_store: &release_desk_store::OsSecretStore,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
 ) -> Vec<RepositoryReleases> {
     let mut jobs = Vec::new();
     let mut credentials = std::collections::HashMap::<String, Option<(String, String)>>::new();
 
     for source in &project.sources {
         for repo in source.repositories.iter().filter(|r| r.selected) {
+            if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+                return Vec::new();
+            }
             let effective_provider = if source.provider == "local" {
                 provider_from_clone_url(&repo.clone_url)
                     .unwrap_or("local")
@@ -56,9 +61,7 @@ pub fn fetch_project_releases(
                 let credential = credentials
                     .entry(credential_host.clone())
                     .or_insert_with(|| {
-                        release_desk_store::OsSecretStore::discover_system_git_credentials(
-                            &credential_host,
-                        )
+                        secret_store.discover_cached_system_git_credentials(&credential_host)
                     });
                 match credential {
                     Some((username, secret)) => (Some(secret.clone()), Some(username.clone())),
@@ -88,22 +91,33 @@ pub fn fetch_project_releases(
         &jobs,
         crate::modules::parallel::IO_WORKERS,
         |(provider, owner, name, repo_token, username, host, repo_dir)| {
-            let result = fetch_releases_with_project_host(
-                provider,
-                owner,
-                name,
-                repo_token.clone(),
-                Some(&project.directory),
-                host.as_deref(),
-                username.as_deref(),
-            )
-            .or_else(|fetch_error| {
-                match release_desk_store::provider_releases::load_declared_releases(repo_dir) {
-                    Ok(Some(releases)) => Ok(releases),
-                    Ok(None) => Err(fetch_error),
-                    Err(manifest_error) => Err(format!("{fetch_error}; {manifest_error}")),
-                }
-            });
+            let result = if cancelled
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                return RepositoryReleases {
+                    provider: provider.clone(),
+                    owner: owner.clone(),
+                    repository: name.clone(),
+                    result: Err("Release refresh cancelled".into()),
+                };
+            } else {
+                fetch_releases_with_project_host(
+                    provider,
+                    owner,
+                    name,
+                    repo_token.clone(),
+                    Some(&project.directory),
+                    host.as_deref(),
+                    username.as_deref(),
+                )
+                .or_else(|fetch_error| {
+                    match release_desk_store::provider_releases::load_declared_releases(repo_dir) {
+                        Ok(Some(releases)) => Ok(releases),
+                        Ok(None) => Err(fetch_error),
+                        Err(manifest_error) => Err(format!("{fetch_error}; {manifest_error}")),
+                    }
+                })
+            };
             RepositoryReleases {
                 provider: provider.clone(),
                 owner: owner.clone(),

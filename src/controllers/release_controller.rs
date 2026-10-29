@@ -17,6 +17,10 @@ impl ReleaseDesk {
             }
         }
         if changed && !self.release_busy {
+            self.release_scroll_handle
+                .set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.)));
+            self.release_scroll_generation
+                .set(self.release_scroll_generation.get().wrapping_add(1));
             self.refresh_release_presentations(cx);
         }
         cx.notify();
@@ -36,6 +40,7 @@ impl ReleaseDesk {
         let revision = self.workspace_revision;
         let project_clone = project.clone();
         let secret_store = self.secret_store.clone();
+        let cancelled = self.workspace_cancel.clone();
         let extension = self.settings.installer_extension.clone();
         self.release_busy = true;
         self.release_state = crate::workspace_releases::ReleaseViewState::Loading;
@@ -49,14 +54,22 @@ impl ReleaseDesk {
                     return;
                 }
             };
-            let repositories =
-                crate::modules::release_service::fetch_project_releases(&project_clone, token);
+            let repositories = crate::modules::release_service::fetch_project_releases(
+                &project_clone,
+                token,
+                &secret_store,
+                Some(&cancelled),
+            );
+            if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
             let presentations = crate::workspace_releases::build_release_presentations(
                 &project_clone.directory,
                 &repositories,
                 &extension,
             );
-            let _ = tx.send(Ok((repositories, presentations, extension)));
+            let store_apps = crate::store_catalog::apps_for_project(&project_clone, &repositories);
+            let _ = tx.send(Ok((repositories, presentations, extension, store_apps)));
         });
         cx.spawn(async move |this, cx| {
             loop {
@@ -64,12 +77,17 @@ impl ReleaseDesk {
                     .timer(std::time::Duration::from_millis(100))
                     .await;
                 match rx.try_recv() {
-                    Ok(Ok((repositories, presentations, extension))) => {
+                    Ok(Ok((repositories, presentations, extension, store_apps))) => {
                         if let Some(this) = this.upgrade() {
                             this.update(cx, |this, cx| {
                                 if this.workspace_revision == revision {
                                     this.release_busy = false;
-                                    this.remember_project_releases(project_id, &repositories);
+                                    this.remember_project_releases(
+                                        project_id,
+                                        &repositories,
+                                        store_apps,
+                                        cx,
+                                    );
                                     if this.selected_project_id == Some(project_id) {
                                         this.release_state =
                                             crate::workspace_releases::ReleaseViewState::Loaded {
@@ -77,7 +95,6 @@ impl ReleaseDesk {
                                                 presentations,
                                                 extension,
                                             };
-                                        this.refresh_project_icon_views(project_id);
                                     }
                                 }
                                 cx.notify();

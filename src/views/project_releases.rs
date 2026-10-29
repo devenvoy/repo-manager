@@ -10,8 +10,9 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, Window, deferred, div, px,
+    Animation, AnimationExt as _, Context, ElementId, InteractiveElement as _, IntoElement,
+    ParentElement as _, ScrollHandle, StatefulInteractiveElement as _, Styled as _, Window,
+    deferred, div, px,
 };
 use release_desk_core::app_catalog::find_known_app;
 use release_desk_store::workspace_releases::{
@@ -30,6 +31,9 @@ fn available_release_types(
                 continue;
             };
             for release in releases {
+                if release.is_draft {
+                    continue;
+                }
                 for asset in &release.assets {
                     if let Some(kind) = release_asset_type(&asset.name) {
                         if !available.iter().any(|existing: &&ReleaseAssetType| {
@@ -95,8 +99,58 @@ fn format_date(raw: Option<&str>) -> String {
             }
             d.to_string()
         }
-        None => "Recent".to_string(),
+        None => "Date unavailable".to_string(),
     }
+}
+
+fn detail_chip(
+    label: &'static str,
+    value: String,
+    theme: &gpui_kit::component::Theme,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .bg(theme.secondary.opacity(0.2))
+        .text_size(px(11.))
+        .child(div().text_color(theme.muted_foreground).child(label))
+        .child(div().font_medium().child(value))
+}
+
+fn release_detail_row(
+    label: &str,
+    version: &str,
+    published_at: Option<&str>,
+    size: Option<u64>,
+    filename: &str,
+    theme: &gpui_kit::component::Theme,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .flex_wrap()
+        .gap_2()
+        .child(
+            div()
+                .w(px(96.))
+                .text_size(px(11.))
+                .font_bold()
+                .text_color(theme.muted_foreground)
+                .child(label.to_string()),
+        )
+        .child(detail_chip("Version", version.to_string(), theme))
+        .child(detail_chip("Released", format_date(published_at), theme))
+        .child(detail_chip("Size", format_bytes(size), theme))
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(theme.muted_foreground)
+                .child(filename.to_string()),
+        )
 }
 
 #[derive(Clone, Copy)]
@@ -104,6 +158,8 @@ pub struct ReleaseShelfControls<'a> {
     pub busy: bool,
     pub extension: &'a str,
     pub type_menu_open: bool,
+    pub scroll_handle: &'a ScrollHandle,
+    pub scroll_generation: &'a std::rc::Rc<std::cell::Cell<u64>>,
 }
 
 /// Render the release shelf matching the ArtCraft Release Desk layout.
@@ -132,6 +188,8 @@ pub fn render_live_releases<T: 'static>(
         busy,
         extension,
         type_menu_open,
+        scroll_handle,
+        scroll_generation,
     } = controls;
     let available_types = available_release_types(state, extension);
     let selected_type = release_asset_type_for_extension(extension);
@@ -196,7 +254,7 @@ pub fn render_live_releases<T: 'static>(
                 .text_size(px(10.))
                 .font_bold()
                 .text_color(cx.theme().muted_foreground)
-                .child("FILE TYPE"),
+                .child("DOWNLOAD FORMAT"),
         )
         .child(
             div()
@@ -268,13 +326,17 @@ pub fn render_live_releases<T: 'static>(
         );
     }
 
+    let scroll_handle = scroll_handle.clone();
+    let _ = scroll_generation;
     let mut body = div()
+        .id("release-list-scroll")
         .flex()
         .flex_col()
         .flex_1()
         .min_h_0()
         .gap_5()
-        .overflow_y_scrollbar()
+        .overflow_y_scroll()
+        .track_scroll(&scroll_handle)
         .child(
             div()
                 .flex()
@@ -287,7 +349,7 @@ pub fn render_live_releases<T: 'static>(
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .child(div().css_section_eyebrow(cx.theme()).child("RELEASE SHELF"))
+                        .child(div().css_section_eyebrow(cx.theme()).child("DOWNLOADS"))
                         .child(div().css_heading_title().child("Releases & downloads"))
                         .child(div().css_body_muted(cx.theme()).child(
                             "Published releases and downloadable assets for your applications.",
@@ -303,9 +365,9 @@ pub fn render_live_releases<T: 'static>(
                             Button::new("refresh-releases")
                                 .icon(refresh_icon())
                                 .label(if busy || matches!(state, ReleaseViewState::Loading) {
-                                    "Fetching…"
+                                    "Checking…"
                                 } else {
-                                    "Refresh releases"
+                                    "Check releases"
                                 })
                                 .outline()
                                 .disabled(busy || matches!(state, ReleaseViewState::Loading))
@@ -325,19 +387,19 @@ pub fn render_live_releases<T: 'static>(
                         div()
                             .font_bold()
                             .text_size(px(16.))
-                            .child("Release shelf ready"),
+                            .child("Find available downloads"),
                     )
                     .child(
                         div()
                             .text_size(px(13.))
                             .text_color(cx.theme().muted_foreground)
                             .text_center()
-                            .child("Click Refresh releases above to fetch upstream versions and files for your repositories."),
+                            .child("Check releases to see available versions and files for your repositories."),
                     )
                     .child(
                         Button::new("shelf-initial-refresh")
                             .icon(refresh_icon())
-                            .label("Refresh releases now")
+                            .label("Check releases now")
                             .primary()
                             .on_click(cx.listener(move |this, _, window, cx| on_refresh(this, window, cx))),
                     ),
@@ -352,7 +414,7 @@ pub fn render_live_releases<T: 'static>(
                         div()
                             .text_size(px(14.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("Fetching release catalog and verifying local files…"),
+                            .child("Checking releases and downloaded files…"),
                     ),
             )
         }
@@ -381,8 +443,9 @@ pub fn render_live_releases<T: 'static>(
             presentations,
             extension: loaded_extension,
         } => {
-            let mut list = div().flex().flex_col().gap_4();
+            let mut list = div().flex().flex_col().gap_2();
             let mut matched_any = false;
+            let mut fetch_errors = 0;
 
             if loaded_extension != extension || presentations.len() != repositories.len() {
                 body = body.child(
@@ -396,378 +459,134 @@ pub fn render_live_releases<T: 'static>(
                                 .child(format!("Preparing {selected_label} shelf…")),
                         ),
                 );
-                return body;
+                return div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(body)
+                    .vertical_scrollbar(&scroll_handle);
             }
 
             for ((repo_index, repository), presentation) in
                 repositories.iter().enumerate().zip(presentations)
             {
-                let known = find_known_app(&repository.repository);
-                let display_title = known
-                    .as_ref()
-                    .map(|k| k.name.clone())
-                    .unwrap_or_else(|| repository.repository.clone());
-                let category_name = known
-                    .as_ref()
-                    .map(|k| k.category_name.clone())
-                    .unwrap_or_else(|| "Desktop App".to_string());
-
-                let icon_path = presentation.icon_path.as_deref();
-
-                if let Err(err) = &repository.result {
-                    list = list.child(
-                            div()
-                                .p_5()
-                                .rounded_xl()
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().background)
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_3()
-                                        .child(repo_icon_with_provider(
-                                            &repository.repository,
-                                            36.,
-                                            icon_path,
-                                            Some(&repository.provider),
-                                        ))
-                                        .child(
-                                            div()
-                                                .font_bold()
-                                                .text_size(px(15.))
-                                                .child(display_title),
-                                        )
-                                        .child(
-                                            div()
-                                                .px_2()
-                                                .py_0p5()
-                                                .rounded_md()
-                                                .bg(cx.theme().danger.opacity(0.1))
-                                                .text_color(cx.theme().danger)
-                                                .text_size(px(11.))
-                                                .font_bold()
-                                                .child("Sync Error"),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .text_color(cx.theme().danger)
-                                        .child(format!("Could not check releases: {err}")),
-                                ),
-                    );
+                let Some(asset) = presentation.asset.as_ref() else {
+                    if repository.result.is_err() {
+                        fetch_errors += 1;
+                    }
                     continue;
-                }
-
-                let latest_tag = presentation.latest_tag.as_deref();
-                let latest_published_at = presentation.published_at.as_deref();
-                let target_asset = presentation.asset.as_ref();
-                let pkg_kind = presentation.pkg_kind.as_str();
-                matched_any |= target_asset.is_some();
-
-                let local_state = presentation.local_state;
-                let is_up_to_date = matches!(
-                    local_state,
+                };
+                matched_any = true;
+                let known = find_known_app(&repository.repository);
+                let title = known
+                    .as_ref()
+                    .map(|app| app.name.clone())
+                    .unwrap_or_else(|| repository.repository.clone());
+                let latest_tag = presentation.latest_tag.as_deref().unwrap_or("Version unavailable");
+                let current = presentation.downloaded.as_ref();
+                let up_to_date = matches!(
+                    presentation.local_state,
                     LocalAssetState::SizeMatches | LocalAssetState::PresentSizeUnknown
                 );
-
-                let newer_update = presentation.newer_update.as_ref();
-
-                let status_chip = if is_up_to_date {
-                    div()
-                        .px_2p5()
-                        .py_1()
-                        .rounded_full()
-                        .bg(cx.theme().success.opacity(0.12))
-                        .text_color(cx.theme().success)
-                        .text_size(px(11.))
-                        .font_bold()
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .child(check_icon().w(px(11.)).h(px(11.)))
-                        .child("Up to date")
-                } else if newer_update.is_some() {
-                    div()
-                        .px_2p5()
-                        .py_1()
-                        .rounded_full()
-                        .bg(cx.theme().warning.opacity(0.12))
-                        .text_color(cx.theme().warning)
-                        .text_size(px(11.))
-                        .font_bold()
-                        .child("Update available")
-                } else if target_asset.is_some() {
-                    div()
-                        .px_2p5()
-                        .py_1()
-                        .rounded_full()
-                        .bg(cx.theme().primary.opacity(0.12))
-                        .text_color(cx.theme().primary)
-                        .text_size(px(11.))
-                        .font_bold()
-                        .child(format!("{pkg_kind} ready"))
+                let status_text = if up_to_date {
+                    "Latest downloaded"
+                } else if presentation.update_available {
+                    "New version available"
                 } else {
-                    div()
-                        .px_2p5()
-                        .py_1()
-                        .rounded_full()
-                        .bg(cx.theme().secondary.opacity(0.2))
-                        .text_color(cx.theme().muted_foreground)
-                        .text_size(px(11.))
-                        .font_bold()
-                        .child(format!("No {pkg_kind}"))
+                    "Ready to download"
                 };
+                let status_color = if up_to_date {
+                    cx.theme().success
+                } else if presentation.update_available {
+                    cx.theme().warning
+                } else {
+                    cx.theme().primary
+                };
+                let provider = repository.provider.clone();
+                let owner = repository.owner.clone();
+                let repo = repository.repository.clone();
+                let tag = latest_tag.to_string();
+                let name = asset.name.clone();
+                let url = asset.download_url.clone();
+                let size = asset.size;
+                let button_label = if up_to_date { "Download again" } else { "Download latest" };
 
-                let mut card_header_actions = div().flex().items_center().gap_2();
-
-                if let (Some(tag), Some(asset)) = (latest_tag, target_asset) {
-                    let provider = repository.provider.clone();
-                    let owner = repository.owner.clone();
-                    let repo = repository.repository.clone();
-                    let tag = tag.to_string();
-                    let name = asset.name.clone();
-                    let url = asset.download_url.clone();
-                    let size = asset.size;
-
-                    let btn_label = if is_up_to_date {
-                        "Re-add file".to_string()
-                    } else {
-                        format!("Download {pkg_kind}")
-                    };
-
-                    card_header_actions = card_header_actions.child(
-                        Button::new(format!("shelf-dl-{repo_index}"))
-                            .icon(download_icon())
-                            .label(btn_label)
-                            .primary()
-                            .disabled(busy)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                on_download(
-                                    provider.clone(),
-                                    owner.clone(),
-                                    repo.clone(),
-                                    tag.clone(),
-                                    name.clone(),
-                                    url.clone(),
-                                    size,
-                                    this,
-                                    window,
-                                    cx,
-                                );
-                            })),
-                    );
-                }
-
-                // Header Row
-                let card_head = div()
+                let header = div()
                     .flex()
                     .items_center()
                     .justify_between()
                     .flex_wrap()
                     .gap_3()
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
+                        div().flex().items_center().gap_3()
                             .child(repo_icon_with_provider(
-                                &repository.repository,
-                                44.,
-                                icon_path,
+                                &repository.repository, 38., presentation.icon_path.as_deref(),
                                 Some(&repository.provider),
                             ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .font_bold()
-                                            .text_size(px(16.))
-                                            .child(display_title),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(format!(
-                                                "{} · published {}",
-                                                repository.owner,
-                                                format_date(
-                                                    latest_published_at
-                                                )
-                                            )),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_0p5()
-                                    .rounded_md()
-                                    .bg(cx.theme().secondary.opacity(0.1))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .text_size(px(11.))
-                                    .font_bold()
-                                    .child(category_name),
-                            )
-                            .child(status_chip),
+                            .child(div().flex().flex_col().gap_0p5()
+                                .child(div().text_size(px(15.)).font_bold().child(title))
+                                .child(div().text_size(px(11.)).text_color(cx.theme().muted_foreground)
+                                    .child(repository.owner.clone())))
+                            .child(div().px_2().py_1().rounded_full()
+                                .bg(status_color.opacity(0.12))
+                                .text_color(status_color).text_size(px(11.)).font_bold()
+                                .child(status_text)),
                     )
-                    .child(card_header_actions);
+                    .child(Button::new(format!("shelf-dl-{repo_index}"))
+                        .icon(download_icon())
+                        .label(button_label)
+                        .primary()
+                        .disabled(busy)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            on_download(
+                                provider.clone(), owner.clone(), repo.clone(), tag.clone(),
+                                name.clone(), url.clone(), size, this, window, cx,
+                            );
+                        })));
 
-                // Slot 1: Newest Upstream
-                let slot1 = div()
-                    .flex_1()
-                    .min_w(px(200.))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(cx.theme().primary.opacity(0.35))
-                    .bg(cx.theme().primary.opacity(0.05))
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .font_bold()
-                            .text_color(cx.theme().primary)
-                            .child("NEWEST UPSTREAM"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(16.))
-                            .font_bold()
-                            .child(
-                                latest_tag
-                                    .map(str::to_string)
-                                    .unwrap_or_else(|| "None".to_string()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(
-                                target_asset.map_or(format!("No {pkg_kind} assets"), |a| {
-                                    format!("{} · {}", a.name, format_bytes(a.size))
-                                }),
-                            ),
-                    );
-
-                // Slot 2: Selected Asset
-                let slot2 = div()
-                    .flex_1()
-                    .min_w(px(200.))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(if is_up_to_date {
-                        cx.theme().success.opacity(0.4)
-                    } else {
-                        cx.theme().border
-                    })
-                    .bg(if is_up_to_date {
-                        cx.theme().success.opacity(0.05)
-                    } else {
-                        cx.theme().secondary.opacity(0.04)
-                    })
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .font_bold()
-                            .text_color(if is_up_to_date {
-                                cx.theme().success
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .child("SELECTED ASSET"),
-                    )
-                    .child(div().text_size(px(16.)).font_bold().child(if is_up_to_date {
-                        target_asset
-                            .map(|a| a.name.clone())
-                            .unwrap_or_else(|| "Downloaded".to_string())
-                    } else {
-                        "Not downloaded".to_string()
-                    }))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(if is_up_to_date {
-                                target_asset.map_or("Ready to install".to_string(), |a| {
-                                    format!("{} · Ready in project", format_bytes(a.size))
-                                })
-                            } else {
-                                format!("Click Download {pkg_kind} to store locally")
-                            }),
-                    );
-
-                // Slot 3: Previous build in old/
-                let shelf_folder = selected_type.map_or("Release Dmgs", |kind| kind.folder);
-                let (slot3_label, slot3_subtext) = if let Some((arch_name, arch_size)) = presentation.archived_file.as_ref() {
-                    (
-                        format!("{arch_name} · {}", format_bytes(Some(*arch_size))),
-                        format!("Archived build preserved in {shelf_folder}/old"),
-                    )
-                } else if let Some((_, older)) = newer_update {
-                    (
-                        format!("Archived {older}"),
-                        format!("Previous build preserved in {shelf_folder}/old"),
-                    )
+                let latest_label = format!("Latest {selected_label}");
+                let latest = release_detail_row(
+                    &latest_label, latest_tag, presentation.published_at.as_deref(),
+                    asset.size, &asset.name, cx.theme(),
+                );
+                let downloaded = if let Some(current) = current {
+                    release_detail_row(
+                        "Downloaded", &current.tag, current.published_at.as_deref(),
+                        current.size, &current.name, cx.theme(),
+                    ).into_any_element()
                 } else {
-                    (
-                        "None in shelf".to_string(),
-                        format!("Earlier versions are kept in {shelf_folder}/old"),
-                    )
+                    div().flex().items_center().gap_2()
+                        .child(div().w(px(96.)).text_size(px(11.)).font_bold()
+                            .text_color(cx.theme().muted_foreground).child("Downloaded"))
+                        .child(div().text_size(px(11.)).text_color(cx.theme().muted_foreground)
+                            .child("No downloaded file yet"))
+                        .into_any_element()
                 };
 
-                let slot3 = div()
-                    .flex_1()
-                    .min_w(px(200.))
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().secondary.opacity(0.04))
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .font_bold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("PREVIOUS BUILD (OLD/)"),
-                    )
-                    .child(div().text_size(px(16.)).font_bold().child(slot3_label))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(slot3_subtext),
-                    );
-
-                let slots_row = div().flex().flex_wrap().gap_3().child(slot1).child(slot2).child(slot3);
-
-                let card = div()
-                    .css_card_padded(cx.theme())
-                    .shadow_xs()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(card_head)
-                    .child(slots_row);
-
-                list = list.child(card);
+                let mut card = div().css_card(cx.theme()).p_3()
+                    .flex().flex_col().gap_2p5()
+                    .child(header)
+                    .child(latest)
+                    .child(downloaded);
+                if let Some((archived_name, archived_size)) = presentation.archived_file.as_ref() {
+                    let archived_release = repository.result.as_ref().ok().and_then(|releases| {
+                        releases.iter().find(|release| release.assets.iter().any(|asset| &asset.name == archived_name))
+                    });
+                    card = card.child(release_detail_row(
+                        "Previous file",
+                        archived_release.map_or("Unknown", |release| release.tag_name.as_str()),
+                        archived_release.and_then(|release| release.published_at.as_deref()),
+                        Some(*archived_size), archived_name, cx.theme(),
+                    ));
+                }
+                list = list.child(card.with_animation(
+                    format!("release-row-{}-{}-{}", repository.owner, repository.repository, extension),
+                    Animation::new(std::time::Duration::from_millis(220))
+                        .with_easing(gpui_kit::ease_in_out),
+                    |row, progress| row.opacity(progress).top(px((1.0 - progress) * 6.0)),
+                ));
             }
 
             if !matched_any {
@@ -778,21 +597,35 @@ pub fn render_live_releases<T: 'static>(
                             div()
                                 .font_bold()
                                 .text_size(px(16.))
-                                .child(format!("No {selected_label} releases found")),
+                                .child(format!("No {selected_label} downloads available")),
                         )
                         .child(
                             div()
                                 .text_size(px(13.))
                                 .text_color(cx.theme().muted_foreground)
                                 .text_center()
-                                .child("Choose another file type above or refresh the release catalog."),
+                                .child(if fetch_errors > 0 {
+                                    format!("No downloadable {selected_label} files were found. {fetch_errors} repositories could not be checked; try Check releases again.")
+                                } else {
+                                    "Choose another download format or check releases again.".to_string()
+                                }),
                         ),
                 );
+            } else if fetch_errors > 0 {
+                list = list.child(div().text_size(px(11.)).text_color(cx.theme().muted_foreground)
+                    .child(format!("{fetch_errors} repositories could not be checked. Check releases to try again.")));
             }
 
             body = body.child(list);
         }
     }
 
-    body
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .child(body)
+        .vertical_scrollbar(&scroll_handle)
 }

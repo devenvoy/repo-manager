@@ -52,10 +52,54 @@ enum StoreOutcome {
 }
 
 impl ReleaseDesk {
+    /// Probe installations off the UI thread and discard outdated results.
+    pub(crate) fn refresh_store_install_states(&mut self, cx: &mut Context<Self>) {
+        self.store_probe_revision = self.store_probe_revision.wrapping_add(1);
+        let revision = self.store_probe_revision;
+        let items = self.store_items.clone();
+        let applications_dir = expand_directory(&self.settings.applications_dir);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let states = items
+                .into_iter()
+                .map(|item| {
+                    let state = item.state(&applications_dir);
+                    (item.key, state)
+                })
+                .collect();
+            let _ = tx.send(states);
+        });
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match rx.try_recv() {
+                    Ok(states) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                if this.store_probe_revision == revision {
+                                    this.store_install_states = states;
+                                    cx.notify();
+                                }
+                            });
+                        }
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn remember_project_releases(
         &mut self,
         project_id: u128,
         repositories: &[RepositoryReleases],
+        fresh: Vec<StoreApp>,
+        cx: &mut Context<Self>,
     ) {
         let Some(project) = self
             .projects
@@ -64,12 +108,11 @@ impl ReleaseDesk {
         else {
             return;
         };
-        merge_store_results(&mut self.store_items, project, repositories);
+        merge_prepared_store_results(&mut self.store_items, project, repositories, fresh);
         self.store_revision = self.store_revision.wrapping_add(1);
         let path = catalog_path(&expand_directory(&self.settings.library_dir));
-        if let Err(error) = save(&path, &self.store_items) {
-            eprintln!("Could not save store catalog: {error}");
-        }
+        save_store_background(path, self.store_items.clone());
+        self.refresh_store_install_states(cx);
     }
 
     pub(crate) fn refresh_store(&mut self, cx: &mut Context<Self>) {
@@ -96,8 +139,12 @@ impl ReleaseDesk {
                         continue;
                     }
                 };
-                let repositories =
-                    crate::modules::release_service::fetch_project_releases(&project, token);
+                let repositories = crate::modules::release_service::fetch_project_releases(
+                    &project,
+                    token,
+                    &secret_store,
+                    None,
+                );
                 let failed: Vec<_> = repositories
                     .iter()
                     .filter(|repo| repo.result.is_err())
@@ -127,9 +174,8 @@ impl ReleaseDesk {
                                 if this.store_revision == revision {
                                     this.store_items = items;
                                     this.store_revision = this.store_revision.wrapping_add(1);
-                                    if let Err(error) = save(&path, &this.store_items) {
-                                        eprintln!("Could not save store catalog: {error}");
-                                    }
+                                    save_store_background(path, this.store_items.clone());
+                                    this.refresh_store_install_states(cx);
                                 }
                                 if !errors.is_empty() {
                                     eprintln!("Store refresh errors: {}", errors.join("; "));
@@ -360,6 +406,7 @@ impl ReleaseDesk {
                         if let Some(this) = this.upgrade() {
                             this.update(cx, |this, cx| {
                                 this.store_activities.remove(&key);
+                                this.refresh_store_install_states(cx);
                                 this.message = match result {
                                     Ok(StoreOutcome::Installed) if was_installed =>
                                         format!("{app_name} is up to date."),
@@ -400,7 +447,16 @@ fn merge_store_results(
     project: &crate::workspace::WorkspaceProject,
     repositories: &[RepositoryReleases],
 ) {
-    let mut fresh = apps_for_project(project, repositories);
+    let fresh = apps_for_project(project, repositories);
+    merge_prepared_store_results(items, project, repositories, fresh);
+}
+
+fn merge_prepared_store_results(
+    items: &mut Vec<StoreApp>,
+    project: &crate::workspace::WorkspaceProject,
+    repositories: &[RepositoryReleases],
+    mut fresh: Vec<StoreApp>,
+) {
     for repo in repositories.iter().filter(|repo| repo.result.is_err()) {
         fresh.extend(
             items
@@ -415,6 +471,22 @@ fn merge_store_results(
         );
     }
     merge_project(items, project.id, fresh);
+}
+
+// Serialize writes and discard older queued snapshots so they cannot overwrite newer data.
+fn save_store_background(path: std::path::PathBuf, items: Vec<StoreApp>) {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
+        let Ok(_guard) = SAVE_LOCK.lock() else { return };
+        if SEQUENCE.load(std::sync::atomic::Ordering::SeqCst) != sequence {
+            return;
+        }
+        if let Err(error) = save(&path, &items) {
+            eprintln!("Could not save store catalog: {error}");
+        }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -9,7 +9,6 @@ use crate::workspace_sources::RepositoryListMode;
 use gpui_kit::{Context, PathPromptOptions, Window};
 use release_desk_core::port::SecretStorePort as _;
 use release_desk_core::project::DiskLayout;
-use release_desk_store::credentials::OsSecretStore;
 
 impl ReleaseDesk {
     pub(crate) fn begin_setup(
@@ -51,8 +50,14 @@ impl ReleaseDesk {
             .unwrap_or_default()
             .to_string();
 
-        self.detected_system_credential =
-            OsSecretStore::discover_system_git_credentials(self.setup_provider.default_host());
+        self.detected_system_credential = None;
+        self.credential_discovery_revision = self.credential_discovery_revision.wrapping_add(1);
+        if original
+            .as_ref()
+            .is_none_or(|project| project.credential_ref.is_none())
+        {
+            self.discover_setup_credential(cx);
+        }
 
         if let Some(ref orig) = original {
             self.saved_credential_ref = orig.credential_ref.clone();
@@ -100,8 +105,8 @@ impl ReleaseDesk {
         }
         self.local_oauth_server = None;
         self.setup_provider = provider;
-        self.detected_system_credential =
-            OsSecretStore::discover_system_git_credentials(provider.default_host());
+        self.detected_system_credential = None;
+        self.discover_setup_credential(cx);
 
         self.selected_saved_account = None;
         self.saved_credential_ref = None;
@@ -114,6 +119,42 @@ impl ReleaseDesk {
         self.custom_host_input
             .update(cx, |input, cx| input.set_value(String::new(), window, cx));
         cx.notify();
+    }
+
+    fn discover_setup_credential(&mut self, cx: &mut Context<Self>) {
+        self.credential_discovery_revision = self.credential_discovery_revision.wrapping_add(1);
+        let revision = self.credential_discovery_revision;
+        let host = self.setup_provider.default_host().to_string();
+        let secret_store = self.secret_store.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(secret_store.discover_cached_system_git_credentials(&host));
+        });
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match rx.try_recv() {
+                    Ok(credential) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                if this.setup_active
+                                    && this.credential_discovery_revision == revision
+                                {
+                                    this.detected_system_credential = credential;
+                                    cx.notify();
+                                }
+                            });
+                        }
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn setup_back(&mut self, cx: &mut Context<Self>) {

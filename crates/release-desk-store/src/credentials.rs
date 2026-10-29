@@ -7,7 +7,7 @@ use release_desk_core::error::DomainError;
 use release_desk_core::port::SecretStorePort;
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 const SERVICE_NAME: &str = "Release Desk";
 
@@ -15,11 +15,33 @@ const SERVICE_NAME: &str = "Release Desk";
 #[derive(Debug, Default)]
 pub struct OsSecretStore {
     cache: RwLock<HashMap<String, String>>,
+    #[cfg(target_os = "macos")]
+    keychain_read: Mutex<()>,
+    system_cache: Mutex<HashMap<String, (String, String)>>,
 }
 
 impl OsSecretStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reuse a successful system credential during this process. Run on a worker thread.
+    pub fn discover_cached_system_git_credentials(&self, host: &str) -> Option<(String, String)> {
+        self.cached_system_credential(host, || Self::discover_system_git_credentials(host))
+    }
+
+    fn cached_system_credential(
+        &self,
+        host: &str,
+        discover: impl FnOnce() -> Option<(String, String)>,
+    ) -> Option<(String, String)> {
+        let mut cache = self.system_cache.lock().ok()?;
+        if let Some(credential) = cache.get(host) {
+            return Some(credential.clone());
+        }
+        let credential = discover()?;
+        cache.insert(host.to_string(), credential.clone());
+        Some(credential)
     }
 
     /// Attempt to discover existing Git or CLI credentials from the OS/Git credential helper.
@@ -91,6 +113,16 @@ impl OsSecretStore {
     #[cfg(target_os = "macos")]
     fn get_macos_keychain(&self, key: &str) -> Result<Option<String>, DomainError> {
         use security_framework::passwords::get_generic_password;
+        if let Some(secret) = self.cache.read().unwrap().get(key).cloned() {
+            return Ok(Some(secret));
+        }
+        let _guard = self
+            .keychain_read
+            .lock()
+            .map_err(|_| DomainError::PortFailure {
+                port: "Keychain",
+                message: "credential lookup lock is unavailable".into(),
+            })?;
         if let Some(secret) = self.cache.read().unwrap().get(key).cloned() {
             return Ok(Some(secret));
         }
@@ -197,5 +229,44 @@ mod tests {
         store.delete_secret(key).unwrap();
         let after_delete = store.get_secret(key).unwrap();
         assert_eq!(after_delete, None);
+    }
+}
+
+#[cfg(test)]
+mod system_cache_tests {
+    use super::OsSecretStore;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn concurrent_lookups_share_success_and_failures_can_be_retried() {
+        let store = Arc::new(OsSecretStore::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let store = Arc::clone(&store);
+                let calls = Arc::clone(&calls);
+                scope.spawn(move || {
+                    let result = store.cached_system_credential("example.com", || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Some(("user".into(), "token".into()))
+                    });
+                    assert_eq!(result, Some(("user".into(), "token".into())));
+                });
+            }
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            store
+                .cached_system_credential("other.example", || None)
+                .is_none()
+        );
+        assert!(
+            store
+                .cached_system_credential("other.example", || Some(("u".into(), "t".into())))
+                .is_some()
+        );
     }
 }

@@ -114,7 +114,8 @@ fn open_icon_db_read_only(project_dir: Option<&Path>) -> Option<Connection> {
     if !path.is_file() {
         return None;
     }
-    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let conn =
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     conn.busy_timeout(std::time::Duration::from_secs(3)).ok()?;
     Some(conn)
 }
@@ -186,7 +187,7 @@ pub fn record_icon_for(
     cached_path: &Path,
     resolution: u32,
 ) {
-    record_icon_with_confirmation(
+    let _ = record_icon_with_confirmation(
         project_dir,
         provider,
         owner,
@@ -209,7 +210,7 @@ pub fn record_ai_confirmed_icon(
     cached_path: &Path,
     resolution: u32,
     model_name: &str,
-) {
+) -> Result<(), String> {
     record_icon_with_confirmation(
         project_dir,
         provider,
@@ -219,7 +220,7 @@ pub fn record_ai_confirmed_icon(
         cached_path,
         resolution,
         &format!("ai:{model_name}:v2"),
-    );
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -232,11 +233,11 @@ fn record_icon_with_confirmation(
     cached_path: &Path,
     resolution: u32,
     confirmed_by: &str,
-) {
+) -> Result<(), String> {
     let now = chrono_now();
     let cached_str = cached_path.to_string_lossy().to_string();
     let write_to = |conn: &Connection| {
-        let _ = conn.execute(
+        conn.execute(
             "INSERT INTO icon_cache (provider, owner, repo_name, source_path, cached_path, resolution, confirmed_by, scanned_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(provider, owner, repo_name) DO UPDATE SET
@@ -255,19 +256,13 @@ fn record_icon_with_confirmation(
                 confirmed_by,
                 now,
             ],
-        );
+        )
+        .map(|_| ())
+        .map_err(|error| format!("could not save the icon database record: {error}"))
     };
-
-    if project_dir.is_some() {
-        if let Some(conn) = open_icon_db_for(project_dir) {
-            write_to(&conn);
-        }
-    }
-    if project_dir.is_none() {
-        if let Some(conn) = open_icon_db_for(None) {
-            write_to(&conn);
-        }
-    }
+    let conn = open_icon_db_for(project_dir)
+        .ok_or_else(|| "could not open the icon database".to_string())?;
+    write_to(&conn)
 }
 
 /// Delete a cached icon record.

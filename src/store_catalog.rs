@@ -179,6 +179,13 @@ pub fn catalog_path(library_dir: &Path) -> PathBuf {
 }
 
 pub fn load(path: &Path) -> Result<Vec<StoreApp>, String> {
+    let mut apps = load_for_startup(path)?;
+    validate_cached_artwork(&mut apps);
+    Ok(apps)
+}
+
+/// Load catalog records without decoding artwork; validate it on a worker afterwards.
+pub fn load_for_startup(path: &Path) -> Result<Vec<StoreApp>, String> {
     if !path.exists() {
         let old_path = path.with_file_name("catalog.json");
         if old_path.is_file() {
@@ -198,15 +205,19 @@ pub fn load(path: &Path) -> Result<Vec<StoreApp>, String> {
     let records = statement
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|error| error.to_string())?;
-    let mut apps: Vec<StoreApp> = records
+    let apps: Vec<StoreApp> = records
         .map(|record| {
             let payload = record.map_err(|error| error.to_string())?;
             serde_json::from_str(&payload).map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Invalidate any loaded icon_path that is not a genuine square icon or has low resolution (< 128px)
-    for app in &mut apps {
+    Ok(apps)
+}
+
+/// Validate persisted icons outside latency-sensitive UI paths.
+pub fn validate_cached_artwork(apps: &mut [StoreApp]) {
+    for app in apps {
         if let Some(ref icon) = app.icon_path {
             let res = crate::modules::artwork::read_icon_resolution(icon);
             if !crate::modules::artwork::is_valid_icon_file(icon) || (res > 0 && res < 128) {
@@ -214,8 +225,6 @@ pub fn load(path: &Path) -> Result<Vec<StoreApp>, String> {
             }
         }
     }
-
-    Ok(apps)
 }
 
 /// Recheck explicit manifest artwork and cached agent icons without contacting a provider.

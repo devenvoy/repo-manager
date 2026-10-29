@@ -16,7 +16,7 @@ members = [
 
 [dependencies]
 bigcolor = "1.2.1"
-gpui-kit = "0.7"
+gpui-kit = { version = "0.7", features = ["test-support"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "ico", "gif"] }
 release-desk-application = { path = "crates/release-desk-application" }
 release-desk-core = { path = "crates/release-desk-core" }

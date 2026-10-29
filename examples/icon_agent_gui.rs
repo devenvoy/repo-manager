@@ -462,7 +462,7 @@ impl IconAgentStudioGui {
             };
 
             let resolution = repo_manager::modules::artwork::read_icon_resolution(&cached_path);
-            repo_manager::modules::icon_agent::db::record_ai_confirmed_icon(
+            if let Err(error) = repo_manager::modules::icon_agent::db::record_ai_confirmed_icon(
                 Some(&project_root),
                 &provider,
                 &owner,
@@ -471,7 +471,10 @@ impl IconAgentStudioGui {
                 &cached_path,
                 resolution,
                 &kev_result.backend,
-            );
+            ) {
+                let _ = tx.send(AgentEvent::Error(error));
+                return;
+            }
 
             let record = query_icon_for(Some(&project_root), &provider, &owner, &repo_name);
 

@@ -156,18 +156,29 @@ pub fn find_cached(
         sanitize(repo_name)
     );
 
+    let prefix = format!("{safe_name}--");
     std::fs::read_dir(cache_dir)
         .ok()?
         .flatten()
-        .find_map(|entry| {
+        .filter_map(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            (name.starts_with(&format!("{safe_name}--"))
-                || ["png", "svg", "webp", "ico", "icns"]
-                    .iter()
-                    .any(|ext| name == format!("{safe_name}.{ext}")))
-            .then(|| entry.path())
+            let path = entry.path();
+            let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+            let supported = ["png", "svg", "webp", "ico", "icns"].contains(&ext.as_str());
+            (supported
+                && path.is_file()
+                && (name.starts_with(&prefix) || name == format!("{safe_name}.{ext}")))
+            .then(|| {
+                let modified = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok());
+                (modified, path)
+            })
         })
+        .max_by(|left, right| left.cmp(right))
+        .map(|(_, path)| path)
 }
 
 /// Sanitize a string for use in file names.

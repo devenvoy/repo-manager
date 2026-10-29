@@ -60,7 +60,7 @@ pub(crate) fn profile_image<T: 'static>(
     source: &WorkspaceSource,
     cx: &Context<T>,
 ) -> gpui_kit::AnyElement {
-    if let Some((url, path)) = source.avatar_cache_request() {
+    if let Some((_, path)) = source.avatar_cache_request() {
         if path.is_file() {
             return div()
                 .relative()
@@ -97,11 +97,6 @@ pub(crate) fn profile_image<T: 'static>(
                         ),
                 )
                 .into_any_element();
-        } else {
-            let path_clone = path.clone();
-            std::thread::spawn(move || {
-                let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path_clone);
-            });
         }
     }
 

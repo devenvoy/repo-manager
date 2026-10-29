@@ -34,8 +34,12 @@ pub struct IconRefreshProgress {
 pub struct IconRefreshReport {
     pub total: usize,
     pub updated: usize,
+    pub skipped: usize,
     pub failures: Vec<String>,
 }
+
+const NO_ICON_CANDIDATES: &str = "no icon candidates found";
+const NO_VALID_ICON_CANDIDATE: &str = "no valid icon candidate selected";
 
 /// Resolve an icon for a repository from the persistent cache.
 /// This is the fast path called from UI views — no scanning, no AI.
@@ -98,13 +102,13 @@ fn try_scan_and_cache_icon(
     // Tool 1: Scan for candidates
     let candidates = scan_repo(repo_dir, repo_name);
     if candidates.is_empty() {
-        return Err("no icon candidates found".into());
+        return Err(NO_ICON_CANDIDATES.into());
     }
 
     // Tool 2: Apply the shared policy and rank the complete candidate set.
     let decision = kev
         .rank_and_filter_top10(&candidates, repo_name)
-        .ok_or("no valid icon candidate selected")?;
+        .ok_or(NO_VALID_ICON_CANDIDATE)?;
     let selected = decision.top_choice;
 
     // Tool 3: Cache image to disk and record path in DB
@@ -132,13 +136,7 @@ fn try_scan_and_cache_icon(
         &cached_path,
         resolution,
         &decision.backend,
-    );
-
-    if resolve_icon_for(project_dir, provider, owner, repo_name).as_deref()
-        != Some(cached_path.as_path())
-    {
-        return Err("could not save the icon database record".into());
-    }
+    )?;
     if let (Some(project_dir), Some(previous)) = (project_dir, previous)
         && previous != cached_path
         && previous.starts_with(project_dir.join(".release-desk/icons"))
@@ -232,6 +230,7 @@ pub fn recreate_project_icons_with_progress(
         .canonicalize()
         .map_err(|error| error.to_string())?;
     let mut cloned = Vec::new();
+    let mut failures = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for source in &project.sources {
         for repo in &source.repositories {
@@ -245,9 +244,19 @@ pub fn recreate_project_icons_with_progress(
             if !path.join(".git").exists() {
                 continue;
             }
-            let path = path.canonicalize().map_err(|error| error.to_string())?;
+            let path = match path.canonicalize() {
+                Ok(path) => path,
+                Err(error) => {
+                    failures.push(format!("{owner}/{}: {error}", repo.name));
+                    continue;
+                }
+            };
             if !path.starts_with(&root) {
-                return Err(format!("repository path leaves the project: {}", repo.name));
+                failures.push(format!(
+                    "{owner}/{}: repository path leaves the project",
+                    repo.name
+                ));
+                continue;
             }
             if seen.insert((
                 source.provider.clone(),
@@ -263,16 +272,23 @@ pub fn recreate_project_icons_with_progress(
             }
         }
     }
-    if cloned.is_empty() {
+    if cloned.is_empty() && failures.is_empty() {
         return Err("No cloned repositories were found in this project.".into());
     }
-    let total = cloned.len();
+    let total = cloned.len() + failures.len();
     progress(IconRefreshProgress {
         completed: 0,
         total,
         repository: String::new(),
     });
-    let completed = std::sync::atomic::AtomicUsize::new(0);
+    for (index, failure) in failures.iter().enumerate() {
+        progress(IconRefreshProgress {
+            completed: index + 1,
+            total,
+            repository: failure.clone(),
+        });
+    }
+    let completed = std::sync::atomic::AtomicUsize::new(failures.len());
     let results = crate::modules::parallel::map_bounded(
         &cloned,
         crate::modules::parallel::IO_WORKERS,
@@ -291,14 +307,30 @@ pub fn recreate_project_icons_with_progress(
                 total,
                 repository: name.clone(),
             });
-            result.map_err(|error| format!("{owner}/{name}: {error}"))
+            match result {
+                Ok(_) => Ok(true),
+                Err(error)
+                    if matches!(error.as_str(), NO_ICON_CANDIDATES | NO_VALID_ICON_CANDIDATE) =>
+                {
+                    Ok(false)
+                }
+                Err(error) => Err(format!("{owner}/{name}: {error}")),
+            }
         },
     );
-    let updated = results.iter().filter(|result| result.is_ok()).count();
-    let failures = results.into_iter().filter_map(Result::err).collect();
+    let updated = results
+        .iter()
+        .filter(|result| matches!(result, Ok(true)))
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|result| matches!(result, Ok(false)))
+        .count();
+    failures.extend(results.into_iter().filter_map(Result::err));
     Ok(IconRefreshReport {
         total,
         updated,
+        skipped,
         failures,
     })
 }
@@ -380,16 +412,16 @@ mod project_cache_tests {
                 .push((event.completed, event.total));
         })
         .unwrap();
-        assert_eq!((report.updated, report.total), (1, 1));
+        assert_eq!((report.updated, report.skipped, report.total), (1, 0, 1));
         assert!(report.failures.is_empty());
         assert_eq!(*progress.lock().unwrap(), vec![(0, 1), (1, 1)]);
         assert!(resolve_icon_for(Some(project_dir.path()), "github", "owner", "app").is_some());
         let previous =
             resolve_icon_for(Some(project_dir.path()), "github", "owner", "app").unwrap();
         std::fs::remove_file(repo_dir.join("assets/app-icon/app-512.png")).unwrap();
-        let failed = recreate_project_icons(&project).unwrap();
-        assert_eq!((failed.updated, failed.total), (0, 1));
-        assert_eq!(failed.failures.len(), 1);
+        let skipped = recreate_project_icons(&project).unwrap();
+        assert_eq!((skipped.updated, skipped.skipped, skipped.total), (0, 1, 1));
+        assert!(skipped.failures.is_empty());
         assert_eq!(
             resolve_icon_for(Some(project_dir.path()), "github", "owner", "app"),
             Some(previous)
@@ -397,5 +429,97 @@ mod project_cache_tests {
         std::fs::remove_dir_all(repo_dir.join(".git")).unwrap();
         assert!(recreate_project_icons(&project).is_err());
         assert!(resolve_icon_for(Some(project_dir.path()), "github", "owner", "app").is_some());
+    }
+
+    #[test]
+    fn resolves_cached_file_without_database() {
+        let project = tempfile::tempdir().unwrap();
+        let source = project.path().join("icon.svg");
+        std::fs::write(&source, br#"<svg xmlns="http://www.w3.org/2000/svg"/>"#).unwrap();
+        let cached = cache_icon_in(
+            &source,
+            Some(project.path()),
+            "github",
+            "storytold",
+            "photocraft",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_icon_for(Some(project.path()), "github", "storytold", "photocraft"),
+            Some(cached)
+        );
+        assert!(resolve_icon_for(Some(project.path()), "github", "storytold", "other").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_repository_path_does_not_stop_other_refreshes() {
+        use std::os::unix::fs::symlink;
+
+        let project_dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join(".git")).unwrap();
+        symlink(outside.path(), project_dir.path().join("escaped")).unwrap();
+        std::fs::create_dir_all(project_dir.path().join("empty/.git")).unwrap();
+        let valid = project_dir.path().join("valid");
+        std::fs::create_dir_all(valid.join(".git")).unwrap();
+        std::fs::create_dir_all(valid.join("assets")).unwrap();
+        image::RgbaImage::new(512, 512)
+            .save(valid.join("assets/icon.png"))
+            .unwrap();
+        let repositories = ["escaped", "empty", "valid"]
+            .into_iter()
+            .map(|name| SourceRepository {
+                name: name.into(),
+                full_name: format!("owner/{name}"),
+                description: None,
+                stars: 0,
+                forks: 0,
+                primary_language: None,
+                is_private: false,
+                is_fork: false,
+                clone_url: String::new(),
+                default_branch: "main".into(),
+                selected: true,
+            })
+            .collect();
+        let project = WorkspaceProject {
+            id: 1,
+            name: "Project".into(),
+            directory: project_dir.path().to_path_buf(),
+            provider: ProviderChoice::GitHub,
+            account: "owner".into(),
+            custom_host: None,
+            credential_ref: None,
+            disk_layout: DiskLayout::Flat,
+            sources: vec![WorkspaceSource {
+                handle: "owner".into(),
+                display_name: None,
+                avatar_url: None,
+                bio: None,
+                provider: "github".into(),
+                repositories,
+            }],
+            repository_list_mode: RepositoryListMode::Grouped,
+        };
+
+        let report = recreate_project_icons(&project).unwrap();
+        assert_eq!(
+            (
+                report.updated,
+                report.skipped,
+                report.total,
+                report.failures.len()
+            ),
+            (1, 1, 3, 1)
+        );
+        assert!(
+            report
+                .failures
+                .iter()
+                .any(|error| error.contains("leaves the project"))
+        );
+        assert!(resolve_icon_for(Some(project_dir.path()), "github", "owner", "valid").is_some());
     }
 }

@@ -96,9 +96,10 @@ impl ReleaseDesk {
                             .collect::<Vec<_>>()
                             .join(" · ");
                         format!(
-                            "Updated {} of {} repository icons; {} failed. {}{}",
+                            "Updated {} of {} repository icons; {} had no usable icon; {} failed. {}{}",
                             report.updated,
                             report.total,
+                            report.skipped,
                             report.failures.len(),
                             examples,
                             if report.failures.len() > 3 {
@@ -109,8 +110,8 @@ impl ReleaseDesk {
                         )
                     } else {
                         format!(
-                            "Updated {} of {} repository icons.",
-                            report.updated, report.total
+                            "Updated {} of {} repository icons; {} had no usable icon.",
+                            report.updated, report.total, report.skipped
                         )
                     };
                     (message, failed)
@@ -172,7 +173,7 @@ impl ReleaseDesk {
                                     match result {
                                         Ok((message, failed)) => {
                                             if this.selected_project_id == Some(project_id) {
-                                                this.refresh_project_icon_views(project_id);
+                                                this.refresh_project_icon_views(project_id, cx);
                                             }
                                             if this.selected_project_id == Some(project_id) {
                                                 this.message = message.clone();
@@ -223,46 +224,120 @@ impl ReleaseDesk {
         .detach();
     }
 
-    pub(crate) fn refresh_project_icon_views(&mut self, project_id: u128) {
+    pub(crate) fn refresh_project_icon_views(&mut self, project_id: u128, cx: &mut Context<Self>) {
         let Some(project) = self
             .projects
             .iter()
             .find(|project| project.id == project_id)
+            .cloned()
         else {
             return;
         };
-        for (source_index, source) in project.sources.iter().enumerate() {
-            for (repo_index, repo) in source.repositories.iter().enumerate() {
-                if let Some(presentation) = self
-                    .repository_presentations
-                    .get_mut(&(source_index, repo_index))
-                {
-                    presentation.icon_path = crate::modules::icon_agent::resolve_icon_for(
+        self.icon_revision = self.icon_revision.wrapping_add(1);
+        let icon_revision = self.icon_revision;
+        let workspace_revision = self.workspace_revision;
+        let store_revision = self.store_revision;
+        let projects = self.projects.clone();
+        let mut store_items = self.store_items.clone();
+        let release_keys = match &self.release_state {
+            crate::workspace_releases::ReleaseViewState::Loaded { repositories, .. } => {
+                repositories
+                    .iter()
+                    .map(|repo| {
+                        (
+                            repo.provider.clone(),
+                            repo.owner.clone(),
+                            repo.repository.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }
+            _ => Vec::new(),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut icons = Vec::new();
+            for (source_index, source) in project.sources.iter().enumerate() {
+                for (repo_index, repo) in source.repositories.iter().enumerate() {
+                    let path = crate::modules::icon_agent::resolve_icon_for(
                         Some(&project.directory),
                         &source.provider,
                         crate::repository_git::repository_owner(source, repo),
                         &repo.name,
                     );
+                    icons.push(((source_index, repo_index), path));
                 }
             }
-        }
-        if let crate::workspace_releases::ReleaseViewState::Loaded {
-            repositories,
-            presentations,
-            ..
-        } = &mut self.release_state
-        {
-            for (repository, presentation) in repositories.iter().zip(presentations.iter_mut()) {
-                presentation.icon_path = crate::modules::icon_agent::resolve_icon_for(
-                    Some(&project.directory),
-                    &repository.provider,
-                    &repository.owner,
-                    &repository.repository,
-                );
+            let releases = release_keys
+                .into_iter()
+                .map(|(provider, owner, repository)| {
+                    let path = crate::modules::icon_agent::resolve_icon_for(
+                        Some(&project.directory),
+                        &provider,
+                        &owner,
+                        &repository,
+                    );
+                    ((provider, owner, repository), path)
+                })
+                .collect::<Vec<_>>();
+            crate::store_catalog::refresh_local_artwork(&mut store_items, &projects);
+            let _ = tx.send((icons, releases, store_items));
+        });
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match rx.try_recv() {
+                    Ok((icons, releases, store_items)) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                if this.workspace_revision != workspace_revision
+                                    || this.icon_revision != icon_revision
+                                    || this.selected_project_id != Some(project_id)
+                                {
+                                    return;
+                                }
+                                for (key, icon) in icons {
+                                    if let Some(presentation) =
+                                        this.repository_presentations.get_mut(&key)
+                                    {
+                                        presentation.icon_path = icon;
+                                    }
+                                }
+                                if let crate::workspace_releases::ReleaseViewState::Loaded {
+                                    repositories,
+                                    presentations,
+                                    ..
+                                } = &mut this.release_state
+                                {
+                                    for (repository, presentation) in
+                                        repositories.iter().zip(presentations.iter_mut())
+                                    {
+                                        if let Some((_, path)) = releases.iter().find(|(key, _)| {
+                                            key.0 == repository.provider
+                                                && key.1 == repository.owner
+                                                && key.2 == repository.repository
+                                        }) {
+                                            presentation.icon_path = path.clone();
+                                        }
+                                    }
+                                }
+                                if this.store_revision == store_revision {
+                                    this.store_items = store_items;
+                                    this.store_revision = this.store_revision.wrapping_add(1);
+                                }
+                                cx.notify();
+                            });
+                        }
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
             }
-        }
-        crate::store_catalog::refresh_local_artwork(&mut self.store_items, &self.projects);
-        self.store_revision = self.store_revision.wrapping_add(1);
+        })
+        .detach();
     }
 
     pub(crate) fn check_repository_updates(
@@ -285,6 +360,15 @@ impl ReleaseDesk {
         self.run_repository_operation(GitActivity::Pulling, None, cx);
     }
 
+    pub(crate) fn check_one_repository(
+        &mut self,
+        source_index: usize,
+        repo_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_repository_operation(GitActivity::Checking, Some((source_index, repo_index)), cx);
+    }
+
     fn run_repository_operation(
         &mut self,
         activity: GitActivity,
@@ -297,40 +381,168 @@ impl ReleaseDesk {
         let Some(project) = self
             .selected_project_id
             .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .cloned()
         else {
             return;
         };
         let project_id = project.id;
         let revision = self.workspace_revision;
-        let all_targets = match crate::repository_git::targets(project) {
-            Ok(targets) => targets,
-            Err(error) => {
-                self.message = error;
-                cx.notify();
-                return;
+        self.git_busy = true;
+        self.git_activity = Some(activity);
+        self.message = "Preparing repositories…".into();
+        cx.notify();
+        let task_project = project.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::repository_git::targets(&task_project));
+        });
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(40))
+                    .await;
+                match rx.try_recv() {
+                    Ok(result) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                if this.workspace_revision != revision
+                                    || this.selected_project_id != Some(project_id)
+                                {
+                                    return;
+                                }
+                                match result {
+                                    Ok(targets) => this.start_repository_operation(
+                                        project, revision, targets, activity, update, cx,
+                                    ),
+                                    Err(error) => {
+                                        this.git_busy = false;
+                                        this.git_activity = None;
+                                        this.message = error;
+                                        cx.notify();
+                                    }
+                                }
+                            });
+                        }
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                if this.workspace_revision == revision
+                                    && this.selected_project_id == Some(project_id)
+                                {
+                                    this.git_busy = false;
+                                    this.git_activity = None;
+                                    this.message =
+                                        "Repository preparation stopped unexpectedly.".into();
+                                    cx.notify();
+                                }
+                            });
+                        }
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
             }
-        };
+        })
+        .detach();
+    }
+
+    fn start_repository_operation(
+        &mut self,
+        project: crate::workspace::WorkspaceProject,
+        revision: u64,
+        all_targets: Vec<crate::repository_git::RepositoryTarget>,
+        activity: GitActivity,
+        update: Option<(usize, usize)>,
+        cx: &mut Context<Self>,
+    ) {
+        let project_id = project.id;
         let targets: Vec<_> = match (activity, update) {
-            (GitActivity::Pulling, Some(key)) => all_targets
+            (_, Some(key)) => all_targets
                 .into_iter()
                 .filter(|target| (target.source_index, target.repo_index) == key)
                 .collect(),
             (GitActivity::Pulling, None) => all_targets
                 .into_iter()
                 .filter(|target| {
-                    self.repository_presentations
-                        .get(&(target.source_index, target.repo_index))
-                        .is_some_and(|presentation| presentation.present)
+                    self.git_statuses.iter().any(|status| {
+                        status.source_index == target.source_index
+                            && status.repo_index == target.repo_index
+                            && crate::repository_git::can_pull(status)
+                    })
                 })
                 .collect(),
             _ => all_targets,
         };
         if targets.is_empty() {
+            self.git_busy = false;
+            self.git_activity = None;
             if activity == GitActivity::Pulling {
-                self.message = "No cloned repositories are ready to pull.".into();
+                self.message =
+                    "No repositories have confirmed updates. Check for updates first.".into();
+                cx.notify();
+            } else {
+                self.message.clear();
                 cx.notify();
             }
             return;
+        }
+        // Cached icons should not wait for Git status and commit history.
+        if activity == GitActivity::Inspecting {
+            let icon_project = project.clone();
+            let icon_targets = targets.clone();
+            let icon_cancel = self.workspace_cancel.clone();
+            let (icon_tx, icon_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for target in icon_targets {
+                    if icon_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    let Some(source) = icon_project.sources.get(target.source_index) else {
+                        continue;
+                    };
+                    let Some(repo) = source.repositories.get(target.repo_index) else {
+                        continue;
+                    };
+                    let icon = crate::modules::icon_agent::resolve_icon_for(
+                        Some(&icon_project.directory),
+                        &source.provider,
+                        crate::repository_git::repository_owner(source, repo),
+                        &repo.name,
+                    );
+                    let _ = icon_tx.send(((target.source_index, target.repo_index), icon));
+                }
+            });
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(40)).await;
+                    let mut changed = false;
+                    let mut disconnected = false;
+                    let mut arrived = Vec::new();
+                    loop {
+                        match icon_rx.try_recv() {
+                            Ok(row) => arrived.push(row),
+                            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => { disconnected = true; break; }
+                        }
+                    }
+                    if let Some(this) = this.upgrade() {
+                        this.update(cx, |this, cx| {
+                            if this.workspace_revision == revision && this.selected_project_id == Some(project_id) {
+                                for (key, icon) in arrived {
+                                    if let std::collections::hash_map::Entry::Vacant(entry) = this.repository_presentations.entry(key) {
+                                        entry.insert(crate::views::project_repository_status::RepositoryPresentation { icon_path: icon, ..Default::default() });
+                                        changed = true;
+                                    }
+                                }
+                                if changed { cx.notify(); }
+                            }
+                        });
+                    } else { return; }
+                    if disconnected { return; }
+                }
+            }).detach();
         }
         self.git_busy = true;
         self.git_activity = Some(activity);
@@ -348,6 +560,7 @@ impl ReleaseDesk {
         .into();
         cx.notify();
         let project_clone = project.clone();
+        let cancel = self.workspace_cancel.clone();
         let (status_tx, status_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -355,6 +568,11 @@ impl ReleaseDesk {
                 &targets,
                 crate::modules::parallel::IO_WORKERS,
                 |target| {
+                    if activity == GitActivity::Inspecting
+                        && cancel.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        return None;
+                    }
                     let (status, result) = match activity {
                         GitActivity::Inspecting => (crate::repository_git::inspect(target), None),
                         GitActivity::Checking => {
@@ -410,6 +628,11 @@ impl ReleaseDesk {
                             }
                         }
                     };
+                    if activity == GitActivity::Inspecting
+                        && cancel.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        return None;
+                    }
                     let presentation =
                         crate::views::project_repository_status::build_repository_presentation(
                             &project_clone,
@@ -487,7 +710,6 @@ impl ReleaseDesk {
                                         GitActivity::Checking => "Repository check finished. See each repository for its status.",
                                         GitActivity::Pulling => "Repository pulls finished. See each repository for its status.",
                                     }.into());
-                                    this.refresh_project_icon_views(project_id);
                                     cx.notify();
                                 }
                             });
@@ -618,7 +840,7 @@ impl ReleaseDesk {
                             {
                                 if finished {
                                     this.git_statuses.clear();
-                                    this.refresh_project_icon_views(project_id);
+                                    this.refresh_project_icon_views(project_id, cx);
                                 }
                                 this.message = message;
                             }
@@ -726,7 +948,7 @@ impl ReleaseDesk {
                                     this.git_statuses.push(status);
                                 }
                                 this.message = outcome_msg;
-                                this.refresh_project_icon_views(project_id);
+                                this.refresh_project_icon_views(project_id, cx);
                                 this.check_repository_updates(None, true, cx);
                             }
                             cx.notify();
@@ -838,7 +1060,7 @@ impl ReleaseDesk {
                                 if this.selected_project_id == Some(project_id)
                                     && this.workspace_revision == revision
                                 {
-                                    this.refresh_project_icon_views(project_id);
+                                    this.refresh_project_icon_views(project_id, cx);
                                     this.check_repository_updates(None, true, cx);
                                 }
                             }
