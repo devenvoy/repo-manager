@@ -14,6 +14,7 @@ pub mod gitlab_client;
 pub mod legacy_scanner;
 pub mod migration;
 pub mod project_backup;
+pub mod provider_releases;
 pub mod scheduler;
 pub mod source_fetcher;
 pub mod sqlite_store;

@@ -86,3 +86,33 @@ fn test_install_fails_on_missing_dmg() {
     assert!(err.is_err());
     assert!(matches!(err.unwrap_err(), DomainError::NotFound { .. }));
 }
+
+#[cfg(unix)]
+#[test]
+fn failed_update_preserves_installed_app() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let dmg_path = temp.path().join("Broken.dmg");
+    fs::write(&dmg_path, b"mock dmg").unwrap();
+    let mount = temp.path().join("mount");
+    let new_bundle = mount.join("Example.app");
+    fs::create_dir_all(&new_bundle).unwrap();
+    symlink("missing-file", new_bundle.join("broken-link")).unwrap();
+
+    let apps_dir = temp.path().join("Applications");
+    let existing = apps_dir.join("Example.app");
+    fs::create_dir_all(&existing).unwrap();
+    fs::write(existing.join("existing.txt"), b"keep this app").unwrap();
+    let disk = MockDiskImageAdapter {
+        mount_point: mount,
+        attached: Arc::new(AtomicBool::new(false)),
+        detached: Arc::new(AtomicBool::new(false)),
+    };
+    let installer = InstallMacOsAppUseCase::new(disk, apps_dir);
+    assert!(installer.install_from_dmg(&dmg_path, "Example").is_err());
+    assert_eq!(
+        fs::read(existing.join("existing.txt")).unwrap(),
+        b"keep this app"
+    );
+}

@@ -1,7 +1,7 @@
 //! Repository master/detail browser matching the ArtCraft Release Desk design.
 
 use crate::colors::rgb;
-use crate::components::app_icon::repo_icon;
+use crate::components::avatar::repo_icon_with_provider;
 use crate::components::avatar::source_avatar;
 use crate::components::badge::{branch_chip, language_chip, version_pill, visibility_chip};
 use crate::components::icons::{
@@ -92,13 +92,12 @@ pub fn build_repository_presentation(
         repository_owner(source, repo),
         &repo.name,
     );
-    let icon_path = crate::components::app_icon::find_local_repo_icon(&repo_dir, &repo.name)
-        .or_else(|| {
-            crate::components::app_icon::find_cached_repo_icon(
-                &repo.name,
-                Some(repository_owner(source, repo)),
-            )
-        });
+    let icon_path = crate::modules::icon_agent::resolve_icon_for(
+        Some(&project.directory),
+        source.provider.as_str(),
+        repository_owner(source, repo),
+        &repo.name,
+    );
     let latest_snapshot = release_desk_store::workspace_releases::load_snapshot_releases(
         &project.directory,
         &repo.name,
@@ -785,7 +784,12 @@ pub fn render_project_repository_status<
                             .flex()
                             .items_center()
                             .gap_2p5()
-                            .child(repo_icon(&repo.name, 36., row_icon_path))
+                            .child(repo_icon_with_provider(
+                                &repo.name,
+                                36.,
+                                row_icon_path,
+                                Some(source.provider.as_str()),
+                            ))
                             .child(
                                 div()
                                     .flex_1()
@@ -925,7 +929,14 @@ pub fn render_project_repository_status<
                     .flex()
                     .items_start()
                     .gap_4()
-                    .child(repo_icon(&repo.name, 60., detail_icon_path))
+                    .child(div().flex().flex_col().items_center().gap_1().child(
+                        repo_icon_with_provider(
+                            &repo.name,
+                            60.,
+                            detail_icon_path,
+                            Some(source.provider.as_str()),
+                        ),
+                    ))
                     .child(
                         div()
                             .flex()

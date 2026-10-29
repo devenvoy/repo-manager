@@ -5950,10 +5950,13 @@ version = "0.1.0"
 dependencies = [
  "bigcolor",
  "gpui-kit",
+ "image",
  "release-desk-application",
  "release-desk-core",
  "release-desk-git",
  "release-desk-store",
+ "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

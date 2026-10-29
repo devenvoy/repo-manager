@@ -1,6 +1,5 @@
 //! UI shell components.
 
-pub mod app_icon;
 pub mod avatar;
 pub mod badge;
 pub mod card;
@@ -10,7 +9,7 @@ pub mod motion_button;
 pub mod provider_icon;
 pub mod sidebar;
 
-pub use avatar::source_avatar;
+pub use avatar::{app_badge, repo_avatar, repo_avatar_default, repo_icon, source_avatar};
 pub use badge::{
     PillVariant, branch_chip, language_chip, status_pill, version_pill, visibility_chip,
 };

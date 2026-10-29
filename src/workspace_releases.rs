@@ -62,22 +62,12 @@ pub fn build_release_presentations(
         repositories,
         crate::modules::parallel::IO_WORKERS,
         |repository| {
-            let repo_dir = crate::repository_git::resolve_target_path(
-                project_directory,
-                release_desk_core::project::DiskLayout::Flat,
+            let icon_path = crate::modules::icon_agent::resolve_icon_for(
+                Some(project_directory),
+                &repository.provider,
                 &repository.owner,
                 &repository.repository,
             );
-            let icon_path = crate::components::app_icon::find_local_repo_icon(
-                &repo_dir,
-                &repository.repository,
-            )
-            .or_else(|| {
-                crate::components::app_icon::find_cached_repo_icon(
-                    &repository.repository,
-                    Some(&repository.owner),
-                )
-            });
 
             let Ok(releases) = &repository.result else {
                 return ReleasePresentation {

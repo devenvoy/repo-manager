@@ -12,7 +12,259 @@ pub enum GitActivity {
     Pulling,
 }
 
+#[derive(Clone, Debug)]
+pub struct ProjectCacheStatus {
+    pub project_id: u128,
+    pub running: bool,
+    pub recreate: bool,
+    pub completed: usize,
+    pub total: usize,
+    pub detail: String,
+    pub failed: bool,
+}
+
+enum ProjectCacheEvent {
+    Progress(crate::modules::icon_agent::IconRefreshProgress),
+    Finished(Result<(String, bool), String>),
+}
+
 impl ReleaseDesk {
+    pub(crate) fn clear_selected_project_cache(&mut self, cx: &mut Context<Self>) {
+        self.run_project_cache_action(false, cx);
+    }
+
+    pub(crate) fn recreate_selected_project_icons(&mut self, cx: &mut Context<Self>) {
+        self.run_project_cache_action(true, cx);
+    }
+
+    fn run_project_cache_action(&mut self, recreate: bool, cx: &mut Context<Self>) {
+        if self
+            .project_cache_status
+            .as_ref()
+            .is_some_and(|status| status.running)
+        {
+            self.message = "An icon operation is already running. Wait for it to finish.".into();
+            cx.notify();
+            return;
+        }
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|project| project.id == id))
+            .cloned()
+        else {
+            return;
+        };
+        let project_id = project.id;
+        self.project_cache_status = Some(ProjectCacheStatus {
+            project_id,
+            running: true,
+            recreate,
+            completed: 0,
+            total: 0,
+            detail: if recreate {
+                "Finding cloned repositories…"
+            } else {
+                "Clearing icon cache…"
+            }
+            .into(),
+            failed: false,
+        });
+        self.message = if recreate {
+            "Recreating repository icons…"
+        } else {
+            "Clearing project cache…"
+        }
+        .into();
+        cx.notify();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = if recreate {
+                crate::modules::icon_agent::recreate_project_icons_with_progress(
+                    &project,
+                    |progress| {
+                        let _ = tx.send(ProjectCacheEvent::Progress(progress));
+                    },
+                )
+                .map(|report| {
+                    let failed = !report.failures.is_empty();
+                    let message = if failed {
+                        let examples = report
+                            .failures
+                            .iter()
+                            .take(3)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        format!(
+                            "Updated {} of {} repository icons; {} failed. {}{}",
+                            report.updated,
+                            report.total,
+                            report.failures.len(),
+                            examples,
+                            if report.failures.len() > 3 {
+                                " · More failures omitted"
+                            } else {
+                                ""
+                            }
+                        )
+                    } else {
+                        format!(
+                            "Updated {} of {} repository icons.",
+                            report.updated, report.total
+                        )
+                    };
+                    (message, failed)
+                })
+            } else {
+                crate::modules::icon_agent::clear_project_cache(&project.directory)
+                    .map(|()| ("Project cache cleared, including icons.".to_string(), false))
+                    .map_err(|error| error.to_string())
+            };
+            let _ = tx.send(ProjectCacheEvent::Finished(result));
+        });
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match rx.try_recv() {
+                    Ok(ProjectCacheEvent::Progress(progress)) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                if this
+                                    .project_cache_status
+                                    .as_ref()
+                                    .is_some_and(|status| status.project_id == project_id)
+                                {
+                                    if let Some(status) = &mut this.project_cache_status {
+                                        if progress.completed < status.completed {
+                                            return;
+                                        }
+                                        status.completed = progress.completed;
+                                        status.total = progress.total;
+                                        status.detail = if progress.repository.is_empty() {
+                                            format!(
+                                                "Scanning 0 of {} repositories…",
+                                                progress.total
+                                            )
+                                        } else {
+                                            format!(
+                                                "Scanned {} of {} repositories · {}",
+                                                progress.completed,
+                                                progress.total,
+                                                progress.repository
+                                            )
+                                        };
+                                    }
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    }
+                    Ok(ProjectCacheEvent::Finished(result)) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                if this
+                                    .project_cache_status
+                                    .as_ref()
+                                    .is_some_and(|status| status.project_id == project_id)
+                                {
+                                    match result {
+                                        Ok((message, failed)) => {
+                                            if this.selected_project_id == Some(project_id) {
+                                                this.refresh_project_icon_views(project_id);
+                                            }
+                                            if this.selected_project_id == Some(project_id) {
+                                                this.message = message.clone();
+                                            }
+                                            if let Some(status) = &mut this.project_cache_status {
+                                                status.running = false;
+                                                status.failed = failed;
+                                                status.detail = message;
+                                            }
+                                        }
+                                        Err(error) => {
+                                            let message =
+                                                format!("Project cache action failed: {error}");
+                                            if this.selected_project_id == Some(project_id) {
+                                                this.message = message.clone();
+                                            }
+                                            if let Some(status) = &mut this.project_cache_status {
+                                                status.running = false;
+                                                status.failed = true;
+                                                status.detail = message;
+                                            }
+                                        }
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.message = "Project cache action stopped unexpectedly.".into();
+                                if let Some(status) = &mut this.project_cache_status {
+                                    status.running = false;
+                                    status.failed = true;
+                                    status.detail = this.message.clone();
+                                }
+                                cx.notify();
+                            });
+                        }
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn refresh_project_icon_views(&mut self, project_id: u128) {
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+        else {
+            return;
+        };
+        for (source_index, source) in project.sources.iter().enumerate() {
+            for (repo_index, repo) in source.repositories.iter().enumerate() {
+                if let Some(presentation) = self
+                    .repository_presentations
+                    .get_mut(&(source_index, repo_index))
+                {
+                    presentation.icon_path = crate::modules::icon_agent::resolve_icon_for(
+                        Some(&project.directory),
+                        &source.provider,
+                        crate::repository_git::repository_owner(source, repo),
+                        &repo.name,
+                    );
+                }
+            }
+        }
+        if let crate::workspace_releases::ReleaseViewState::Loaded {
+            repositories,
+            presentations,
+            ..
+        } = &mut self.release_state
+        {
+            for (repository, presentation) in repositories.iter().zip(presentations.iter_mut()) {
+                presentation.icon_path = crate::modules::icon_agent::resolve_icon_for(
+                    Some(&project.directory),
+                    &repository.provider,
+                    &repository.owner,
+                    &repository.repository,
+                );
+            }
+        }
+        crate::store_catalog::refresh_local_artwork(&mut self.store_items, &self.projects);
+        self.store_revision = self.store_revision.wrapping_add(1);
+    }
+
     pub(crate) fn check_repository_updates(
         &mut self,
         update: Option<(usize, usize)>,
@@ -235,6 +487,7 @@ impl ReleaseDesk {
                                         GitActivity::Checking => "Repository check finished. See each repository for its status.",
                                         GitActivity::Pulling => "Repository pulls finished. See each repository for its status.",
                                     }.into());
+                                    this.refresh_project_icon_views(project_id);
                                     cx.notify();
                                 }
                             });
@@ -311,6 +564,7 @@ impl ReleaseDesk {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut results = Vec::new();
+            let mut cloned_targets = Vec::new();
             for (index, target) in targets.iter().enumerate() {
                 let _ = tx.send((
                     false,
@@ -326,6 +580,9 @@ impl ReleaseDesk {
                     target.source_index,
                     target.repo_index,
                 );
+                if matches!(&result, Ok(release_desk_git::SyncOutcome::Cloned { .. })) {
+                    cloned_targets.push(target.clone());
+                }
                 results.push(format!(
                     "{}: {}",
                     target.name,
@@ -338,6 +595,11 @@ impl ReleaseDesk {
                     }
                 ));
             }
+            let _ = crate::modules::parallel::map_bounded(
+                &cloned_targets,
+                crate::modules::parallel::IO_WORKERS,
+                |target| crate::modules::icon_agent::generate_for_target(&project, target),
+            );
             let _ = tx.send((true, results.join(" · ")));
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -356,6 +618,7 @@ impl ReleaseDesk {
                             {
                                 if finished {
                                     this.git_statuses.clear();
+                                    this.refresh_project_icon_views(project_id);
                                 }
                                 this.message = message;
                             }
@@ -426,6 +689,9 @@ impl ReleaseDesk {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = crate::repository_git::clone_selected(&project, source_index, repo_index);
+            if matches!(&result, Ok(release_desk_git::SyncOutcome::Cloned { .. })) {
+                crate::modules::icon_agent::generate_for_target(&project, &target);
+            }
             let outcome_msg = match result {
                 Ok(release_desk_git::SyncOutcome::Cloned { .. }) => {
                     format!("{}: cloned successfully.", target.name)
@@ -460,6 +726,7 @@ impl ReleaseDesk {
                                     this.git_statuses.push(status);
                                 }
                                 this.message = outcome_msg;
+                                this.refresh_project_icon_views(project_id);
                                 this.check_repository_updates(None, true, cx);
                             }
                             cx.notify();
@@ -520,6 +787,7 @@ impl ReleaseDesk {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut results = Vec::new();
+            let mut cloned_targets = Vec::new();
             for (index, target) in targets.iter().enumerate() {
                 let _ = tx.send((
                     false,
@@ -535,6 +803,9 @@ impl ReleaseDesk {
                     target.source_index,
                     target.repo_index,
                 );
+                if matches!(&result, Ok(release_desk_git::SyncOutcome::Cloned { .. })) {
+                    cloned_targets.push(target.clone());
+                }
                 results.push(format!(
                     "{}: {}",
                     target.name,
@@ -547,6 +818,11 @@ impl ReleaseDesk {
                     }
                 ));
             }
+            let _ = crate::modules::parallel::map_bounded(
+                &cloned_targets,
+                crate::modules::parallel::IO_WORKERS,
+                |target| crate::modules::icon_agent::generate_for_target(&project, target),
+            );
             let _ = tx.send((true, results.join(" · ")));
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -562,6 +838,7 @@ impl ReleaseDesk {
                                 if this.selected_project_id == Some(project_id)
                                     && this.workspace_revision == revision
                                 {
+                                    this.refresh_project_icon_views(project_id);
                                     this.check_repository_updates(None, true, cx);
                                 }
                             }

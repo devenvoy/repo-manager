@@ -122,37 +122,23 @@ fn test_dynamic_repo_icon_discovery() {
     std::fs::create_dir_all(&icon_dir).unwrap();
 
     let icon_file = icon_dir.join("photocraft-1024.png");
-    std::fs::write(&icon_file, b"fake png data").unwrap();
+    image::RgbaImage::new(512, 512).save(&icon_file).unwrap();
 
     // Verify local icon discovery finds the 1024 png
-    let found = repo_manager::components::app_icon::find_local_repo_icon(&repo_dir, "photocraft");
-    assert_eq!(found, Some(icon_file));
+    let found = repo_manager::modules::artwork::find_local_repo_icon(&repo_dir, "photocraft");
+    assert_eq!(found, Some(icon_file.canonicalize().unwrap()));
 
-    // Verify cache request for ArtCraft apps points to WebP on getartcraft.com
-    let cache_req = repo_manager::components::app_icon::repo_icon_cache_request(
-        "photocraft",
-        Some("storytold"),
-    );
-    assert!(cache_req.is_some());
-    let (url, path) = cache_req.unwrap();
+    let custom_repo = temp.path().join("IndependentApp");
+    let custom_icons = custom_repo.join("src-tauri/icons");
+    std::fs::create_dir_all(&custom_icons).unwrap();
+    image::RgbaImage::new(64, 64)
+        .save(custom_icons.join("icon-64.png"))
+        .unwrap();
+    let full_icon = custom_icons.join("icon-512.png");
+    image::RgbaImage::new(512, 512).save(&full_icon).unwrap();
     assert_eq!(
-        url,
-        "https://getartcraft.com/images/apps/photocraft/icon.webp"
-    );
-    assert!(path.to_string_lossy().contains("artcraft-photocraft.webp"));
-
-    // Verify cache request for non-ArtCraft generic repo points to GitHub owner avatar
-    let generic_req = repo_manager::components::app_icon::repo_icon_cache_request(
-        "test-generic-app-xyz",
-        Some("genericowner"),
-    );
-    assert!(generic_req.is_some());
-    let (gen_url, gen_path) = generic_req.unwrap();
-    assert_eq!(gen_url, "https://github.com/genericowner.png");
-    assert!(
-        gen_path
-            .to_string_lossy()
-            .contains("genericowner-test-generic-app-xyz.png")
+        repo_manager::modules::artwork::find_local_repo_icon(&custom_repo, "IndependentApp"),
+        Some(full_icon.canonicalize().unwrap())
     );
 }
 
@@ -173,4 +159,149 @@ fn test_archived_files_discovery() {
     assert_eq!(archived.len(), 1);
     assert_eq!(archived[0].0, "PhotoCraft-0.9.0-aarch64.dmg");
     assert_eq!(archived[0].1, 19);
+}
+
+#[test]
+fn test_find_icon_engine_manifest_and_sniffing() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("my-web-app");
+    std::fs::create_dir_all(root.join("public")).unwrap();
+
+    let logo_file = root.join("public/logo.png");
+    image::RgbaImage::new(256, 256).save(&logo_file).unwrap();
+
+    let banner_file = root.join("public/banner.png");
+    image::RgbaImage::new(1200, 300).save(&banner_file).unwrap();
+
+    // Write package.json pointing to public/logo.png
+    let pkg_json = r#"{"name": "my-web-app", "icon": "public/logo.png"}"#;
+    std::fs::write(root.join("package.json"), pkg_json).unwrap();
+
+    // Write README.md with an image
+    let readme = "# My Web App\n\n![Logo](public/logo.png)\n";
+    std::fs::write(root.join("README.md"), readme).unwrap();
+
+    let icon = repo_manager::modules::artwork::find_local_repo_icon(&root, "my-web-app").unwrap();
+
+    assert_eq!(icon, logo_file.canonicalize().unwrap());
+}
+
+#[test]
+fn test_artcraft_photocraft_picks_square_icon_over_suite_banner() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("photocraft");
+    std::fs::create_dir_all(root.join("assets/app-icon")).unwrap();
+
+    // 1. Suite umbrella banner (1200x300 horizontal text banner "ARTCRAFT")
+    let banner_file = root.join("assets/logo.svg");
+    std::fs::write(&banner_file, r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300"><text>ARTCRAFT</text></svg>"#).unwrap();
+
+    // 2. Real square app icon (512x512 PNG)
+    let icon_file = root.join("assets/app-icon/photocraft-1024.png");
+    image::RgbaImage::new(512, 512).save(&icon_file).unwrap();
+
+    // 3. Resolve icon for photocraft
+    let resolved = repo_manager::modules::artwork::find_local_repo_icon(&root, "photocraft");
+    assert!(resolved.is_some(), "Must resolve an icon for photocraft");
+    assert_eq!(
+        resolved.unwrap(),
+        icon_file.canonicalize().unwrap(),
+        "Must pick authentic photocraft-1024.png, not the ARTCRAFT banner"
+    );
+}
+
+#[test]
+fn test_tauri_app_resolves_from_tauri_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("figcraft");
+    std::fs::create_dir_all(root.join("src-tauri/icons")).unwrap();
+
+    let icon_32 = root.join("src-tauri/icons/32x32.png");
+    image::RgbaImage::new(32, 32).save(&icon_32).unwrap();
+
+    let icon_128 = root.join("src-tauri/icons/128x128.png");
+    image::RgbaImage::new(128, 128).save(&icon_128).unwrap();
+
+    let icon_file = root.join("src-tauri/icons/icon-512.png");
+    image::RgbaImage::new(512, 512).save(&icon_file).unwrap();
+
+    let tauri_json = r#"{
+        "bundle": {
+            "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon-512.png"]
+        }
+    }"#;
+    std::fs::write(root.join("src-tauri/tauri.conf.json"), tauri_json).unwrap();
+
+    let resolved = repo_manager::modules::artwork::find_local_repo_icon(&root, "figcraft");
+    assert!(resolved.is_some(), "Must resolve icon from Tauri manifest");
+    assert_eq!(
+        resolved.unwrap(),
+        icon_file.canonicalize().unwrap(),
+        "Must pick highest-resolution icon-512.png over 32x32.png and 128x128.png"
+    );
+}
+
+#[test]
+fn test_highest_resolution_app_icon_is_chosen_over_low_res_manifest() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("designcraft");
+    std::fs::create_dir_all(root.join("src-tauri/icons")).unwrap();
+    std::fs::create_dir_all(root.join("assets/app-icon")).unwrap();
+
+    // 1. Low-res 32x32 in Tauri manifest
+    let icon_32 = root.join("src-tauri/icons/32x32.png");
+    image::RgbaImage::new(32, 32).save(&icon_32).unwrap();
+    let tauri_json = r#"{"bundle": {"icon": ["icons/32x32.png"]}}"#;
+    std::fs::write(root.join("src-tauri/tauri.conf.json"), tauri_json).unwrap();
+
+    // 2. High-res 1024x1024 app icon
+    let icon_1024 = root.join("assets/app-icon/designcraft-1024.png");
+    image::RgbaImage::new(1024, 1024).save(&icon_1024).unwrap();
+
+    let resolved = repo_manager::modules::artwork::find_local_repo_icon(&root, "designcraft");
+    assert!(resolved.is_some(), "Must find icon");
+    assert_eq!(
+        resolved.unwrap(),
+        icon_1024.canonicalize().unwrap(),
+        "Must prefer 1024x1024 asset icon over 32x32 manifest icon"
+    );
+}
+
+#[test]
+fn test_store_resolver_prefers_full_svg_over_matching_raster_exports() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("designcraft");
+    let icons = repo.join("assets/app-icon");
+    std::fs::create_dir_all(&icons).unwrap();
+    image::RgbaImage::new(1024, 1024)
+        .save(icons.join("designcraft-1024.png"))
+        .unwrap();
+    image::RgbaImage::new(512, 512)
+        .save(icons.join("designcraft-macos-512.png"))
+        .unwrap();
+    std::fs::write(
+        icons.join("designcraft-small.svg"),
+        r#"<svg viewBox="0 0 512 512"><circle cx="256" cy="256" r="20"/></svg>"#,
+    )
+    .unwrap();
+    let full_svg = icons.join("designcraft.svg");
+    std::fs::write(
+        &full_svg,
+        r#"<svg viewBox="0 0 512 512"><circle cx="256" cy="256" r="200"/></svg>"#,
+    )
+    .unwrap();
+
+    let selected = repo_manager::modules::artwork::find_local_repo_icon(&repo, "designcraft")
+        .expect("Store icon");
+    assert_eq!(selected, full_svg.canonicalize().unwrap());
+}
+
+#[test]
+fn test_name_initials_clean() {
+    use repo_manager::components::avatar::name_initials;
+    assert_eq!(name_initials("PhotoCraft"), "PC");
+    assert_eq!(name_initials("artcraft-services"), "AS");
+    assert_eq!(name_initials("vector_craft"), "VC");
+    assert_eq!(name_initials("cadcraft"), "CA");
+    assert_eq!(name_initials("figcraft"), "FI");
 }

@@ -182,6 +182,21 @@ pub fn fetch_releases(
             }
         }
         "gitlab" => fetch_gitlab_releases(owner, name, token.as_deref()),
+        "bitbucket" => {
+            crate::provider_releases::fetch_bitbucket_downloads(owner, name, token.as_deref(), None)
+        }
+        "gitea" => crate::provider_releases::fetch_forge_releases(
+            "https://gitea.com/",
+            owner,
+            name,
+            token.as_deref(),
+        ),
+        "forgejo" | "codeberg" => crate::provider_releases::fetch_forge_releases(
+            "https://codeberg.org/",
+            owner,
+            name,
+            token.as_deref(),
+        ),
         _ => Err(format!(
             "Release fetching is not yet supported for {provider}."
         )),
@@ -205,10 +220,10 @@ pub fn load_snapshot_releases(
 
     let content = std::fs::read_to_string(target).ok()?;
     let snapshot = release_desk_core::parse_snapshot(&content).ok()?;
-    let repo = snapshot.repos.into_iter().find(|r| {
-        r.name.eq_ignore_ascii_case(repo_name)
-            || repo_name.to_lowercase().contains(&r.name.to_lowercase())
-    })?;
+    let repo = snapshot
+        .repos
+        .into_iter()
+        .find(|r| r.name.eq_ignore_ascii_case(repo_name))?;
 
     let releases = repo.releases?;
     if releases.nodes.is_empty() {
@@ -232,10 +247,43 @@ pub fn fetch_releases_with_project(
     token: Option<String>,
     project_dir: Option<&Path>,
 ) -> Result<Vec<WorkspaceRelease>, String> {
+    fetch_releases_with_project_host(provider, owner, name, token, project_dir, None, None)
+}
+
+/// Fetch release metadata using a configured host for self-hosted forges.
+#[allow(clippy::too_many_arguments)]
+pub fn fetch_releases_with_project_host(
+    provider: &str,
+    owner: &str,
+    name: &str,
+    token: Option<String>,
+    project_dir: Option<&Path>,
+    host: Option<&str>,
+    username: Option<&str>,
+) -> Result<Vec<WorkspaceRelease>, String> {
     if let Some(dir) = project_dir {
         if let Some(snapshot_rels) = load_snapshot_releases(dir, name) {
             return Ok(snapshot_rels);
         }
+    }
+    match provider {
+        "custom" => {
+            return crate::provider_releases::fetch_forge_releases(
+                host.ok_or("Set the custom provider's HTTPS address to fetch releases.")?,
+                owner,
+                name,
+                token.as_deref(),
+            );
+        }
+        "bitbucket" => {
+            return crate::provider_releases::fetch_bitbucket_downloads(
+                owner,
+                name,
+                token.as_deref(),
+                username,
+            );
+        }
+        _ => {}
     }
     fetch_releases(provider, owner, name, token)
 }
@@ -459,6 +507,66 @@ pub fn local_asset_state(
     found_state
 }
 
+/// Return a previously downloaded release file only when it belongs to this project
+/// and matches the selected release's recorded size and shelf tag when available.
+pub fn local_release_asset(
+    project: &Path,
+    owner: &str,
+    repo: &str,
+    tag: &str,
+    name: &str,
+    size: Option<u64>,
+) -> Option<PathBuf> {
+    let root = project.canonicalize().ok()?;
+    let owner = storage_component(owner).ok()?;
+    let repo = component(repo).ok()?;
+    let tag = storage_component(tag).ok()?;
+    let name = component(name).ok()?;
+    let mut candidates = Vec::new();
+    if let Some(kind) = release_asset_type(name) {
+        let manifest = root
+            .join(kind.folder)
+            .join(".state")
+            .join(format!("{repo}.manifest"));
+        let recorded = read_shelf_manifest(&manifest);
+        if (!manifest.is_file()
+            && name
+                .to_ascii_lowercase()
+                .starts_with(&repo.to_ascii_lowercase()))
+            || (recorded.tag.as_deref() == Some(tag.as_str())
+                && recorded.current.iter().any(|item| item == name))
+        {
+            candidates.push(root.join(kind.folder).join(name));
+        }
+    }
+    candidates.push(
+        root.join(".release-desk")
+            .join("installers")
+            .join(&owner)
+            .join(repo)
+            .join(&tag)
+            .join(name),
+    );
+    if name
+        .to_ascii_lowercase()
+        .starts_with(&repo.to_ascii_lowercase())
+    {
+        candidates.extend([
+            root.join("releases").join(name),
+            root.join("installers").join(name),
+            root.join(name),
+        ]);
+    }
+    candidates.into_iter().find_map(|path| {
+        let resolved = path.canonicalize().ok()?;
+        let metadata = resolved.metadata().ok()?;
+        (resolved.starts_with(&root)
+            && metadata.is_file()
+            && size.is_none_or(|expected| metadata.len() == expected))
+        .then_some(resolved)
+    })
+}
+
 /// Inspect the selected shelf and legacy locations for previous builds in `old/`.
 pub fn local_archived_files(
     project: &Path,
@@ -601,6 +709,30 @@ pub fn download_asset(
     url: &str,
     expected_size: Option<u64>,
 ) -> Result<PathBuf, String> {
+    download_asset_with_progress(
+        project,
+        owner,
+        repo,
+        tag,
+        name,
+        url,
+        expected_size,
+        &mut |_, _| {},
+    )
+}
+
+/// Download a public asset and report the number of verified bytes received.
+#[allow(clippy::too_many_arguments)]
+pub fn download_asset_with_progress(
+    project: &Path,
+    owner: &str,
+    repo: &str,
+    tag: &str,
+    name: &str,
+    url: &str,
+    expected_size: Option<u64>,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<PathBuf, String> {
     let parsed = safe_download_url(url)?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(300))
@@ -629,7 +761,8 @@ pub fn download_asset(
             response.status()
         ));
     }
-    save_asset(
+    let expected_size = expected_size.or_else(|| response.content_length());
+    save_asset_with_progress(
         project,
         owner,
         repo,
@@ -637,6 +770,7 @@ pub fn download_asset(
         name,
         expected_size,
         &mut response,
+        on_progress,
     )
 }
 
@@ -651,6 +785,30 @@ pub fn download_github_asset(
     name: &str,
     expected_size: Option<u64>,
     token: &str,
+) -> Result<PathBuf, String> {
+    download_github_asset_with_progress(
+        project,
+        owner,
+        repo,
+        tag,
+        name,
+        expected_size,
+        token,
+        &mut |_, _| {},
+    )
+}
+
+/// Download a private GitHub asset with progress reporting.
+#[allow(clippy::too_many_arguments)]
+pub fn download_github_asset_with_progress(
+    project: &Path,
+    owner: &str,
+    repo: &str,
+    tag: &str,
+    name: &str,
+    expected_size: Option<u64>,
+    token: &str,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<PathBuf, String> {
     if token.trim().is_empty() {
         return Err("GitHub authentication is required.".into());
@@ -753,7 +911,8 @@ pub fn download_github_asset(
     {
         return Err("GitHub returned asset metadata instead of a file.".into());
     }
-    save_asset(
+    let expected_size = expected_size.or_else(|| response.content_length());
+    save_asset_with_progress(
         project,
         owner,
         repo,
@@ -761,6 +920,7 @@ pub fn download_github_asset(
         name,
         expected_size,
         &mut response,
+        on_progress,
     )
 }
 
@@ -777,6 +937,32 @@ pub fn download_gitlab_asset(
     original_url: &str,
     expected_size: Option<u64>,
     token: &str,
+) -> Result<PathBuf, String> {
+    download_gitlab_asset_with_progress(
+        project,
+        owner,
+        repo,
+        tag,
+        name,
+        original_url,
+        expected_size,
+        token,
+        &mut |_, _| {},
+    )
+}
+
+/// Download a private GitLab asset with progress reporting.
+#[allow(clippy::too_many_arguments)]
+pub fn download_gitlab_asset_with_progress(
+    project: &Path,
+    owner: &str,
+    repo: &str,
+    tag: &str,
+    name: &str,
+    original_url: &str,
+    expected_size: Option<u64>,
+    token: &str,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<PathBuf, String> {
     if token.trim().is_empty() {
         return Err("GitLab authentication is required.".into());
@@ -850,7 +1036,8 @@ pub fn download_gitlab_asset(
         {
             return Err("GitLab returned a page or metadata instead of a file.".into());
         }
-        return save_asset(
+        let expected_size = expected_size.or_else(|| response.content_length());
+        return save_asset_with_progress(
             project,
             owner,
             repo,
@@ -858,6 +1045,134 @@ pub fn download_gitlab_asset(
             name,
             expected_size,
             &mut response,
+            on_progress,
+        );
+    }
+    Err("Too many download redirects.".into())
+}
+
+/// Download a private provider asset. Credentials are sent only to that provider's
+/// configured HTTPS host; redirects to storage hosts are followed without them.
+#[allow(clippy::too_many_arguments)]
+pub fn download_provider_asset_with_progress(
+    project: &Path,
+    provider: &str,
+    owner: &str,
+    repo: &str,
+    tag: &str,
+    name: &str,
+    original_url: &str,
+    expected_size: Option<u64>,
+    token: &str,
+    username: Option<&str>,
+    custom_host: Option<&str>,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<PathBuf, String> {
+    if provider == "aws_codecommit" {
+        // CodeCommit has no release-asset endpoint. A repository declaration may
+        // point to a short-lived signed S3 URL, which already carries its own auth.
+        return download_asset_with_progress(
+            project,
+            owner,
+            repo,
+            tag,
+            name,
+            original_url,
+            expected_size,
+            on_progress,
+        );
+    }
+    let trusted_base = match provider {
+        "bitbucket" => "https://api.bitbucket.org/",
+        "gitea" => "https://gitea.com/",
+        "forgejo" | "codeberg" => "https://codeberg.org/",
+        "azure_devops" => {
+            let candidate = custom_host.unwrap_or("https://dev.azure.com/");
+            let parsed = crate::provider_releases::safe_base(candidate)?;
+            let host = parsed.host_str().ok_or("Azure DevOps host is missing.")?;
+            if host != "dev.azure.com" && !host.ends_with(".visualstudio.com") {
+                return Err("Azure DevOps host is not recognized.".into());
+            }
+            candidate
+        }
+        "custom" => custom_host.ok_or("Custom provider address is missing.")?,
+        _ => {
+            return Err(format!(
+                "Private downloads require a {provider} artifact adapter."
+            ));
+        }
+    };
+    let trusted_origin = crate::provider_releases::safe_base(trusted_base)?.origin();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("Release-Desk/1.0")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut url = safe_download_url(original_url)?;
+    for _ in 0..10 {
+        let authenticated = url.origin() == trusted_origin;
+        let mut request = client.get(url.clone());
+        if authenticated {
+            request = match provider {
+                "gitea" | "forgejo" | "codeberg" | "custom" => {
+                    request.header("Authorization", format!("token {token}"))
+                }
+                "azure_devops" => request.basic_auth("", Some(token)),
+                _ => request.bearer_auth(token),
+            };
+        }
+        let mut response = request
+            .send()
+            .map_err(|e| format!("Download failed: {}", e.without_url()))?;
+        if authenticated
+            && provider == "bitbucket"
+            && response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && let Some(username) = username
+        {
+            response = client
+                .get(url.clone())
+                .basic_auth(username, Some(token))
+                .send()
+                .map_err(|e| format!("Download failed: {}", e.without_url()))?;
+        }
+        if response.status().is_redirection() {
+            let next = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .ok_or("Download redirect has no destination.")?
+                .to_str()
+                .map_err(|_| "Invalid download redirect.")?;
+            url = safe_download_url(
+                url.join(next)
+                    .map_err(|_| "Invalid download redirect.")?
+                    .as_str(),
+            )?;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(format!("Download failed: HTTP {}", response.status()));
+        }
+        if response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value.starts_with("text/html") || value.starts_with("application/json")
+            })
+        {
+            return Err("Provider returned a page instead of an installer.".into());
+        }
+        let expected_size = expected_size.or_else(|| response.content_length());
+        return save_asset_with_progress(
+            project,
+            owner,
+            repo,
+            tag,
+            name,
+            expected_size,
+            &mut response,
+            on_progress,
         );
     }
     Err("Too many download redirects.".into())
@@ -942,6 +1257,7 @@ fn safe_download_url(raw: &str) -> Result<reqwest::Url, String> {
     Ok(url)
 }
 
+#[cfg(test)]
 fn save_asset(
     project: &Path,
     owner: &str,
@@ -950,6 +1266,29 @@ fn save_asset(
     name: &str,
     expected_size: Option<u64>,
     input: &mut impl Read,
+) -> Result<PathBuf, String> {
+    save_asset_with_progress(
+        project,
+        owner,
+        repo,
+        tag,
+        name,
+        expected_size,
+        input,
+        &mut |_, _| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn save_asset_with_progress(
+    project: &Path,
+    owner: &str,
+    repo: &str,
+    tag: &str,
+    name: &str,
+    expected_size: Option<u64>,
+    input: &mut impl Read,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<PathBuf, String> {
     let root = project
         .canonicalize()
@@ -970,7 +1309,7 @@ fn save_asset(
     let destination = folder.join(name_component);
     let mut temp = tempfile::NamedTempFile::new_in(&folder)
         .map_err(|e| format!("Cannot create temporary download: {e}"))?;
-    copy_verified(input, &mut temp, expected_size)?;
+    copy_verified_with_progress(input, &mut temp, expected_size, on_progress)?;
     temp.flush()
         .map_err(|e| format!("Cannot flush download: {e}"))?;
 
@@ -1199,10 +1538,20 @@ fn file_belongs_to_repo(file_name: &str, repo_tokens: &[String]) -> bool {
         )
 }
 
+#[cfg(test)]
 fn copy_verified(
     input: &mut impl Read,
     output: &mut impl Write,
     expected_size: Option<u64>,
+) -> Result<(), String> {
+    copy_verified_with_progress(input, output, expected_size, &mut |_, _| {})
+}
+
+fn copy_verified_with_progress(
+    input: &mut impl Read,
+    output: &mut impl Write,
+    expected_size: Option<u64>,
+    on_progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<(), String> {
     let mut buffer = [0u8; 64 * 1024];
     let mut total = 0u64;
@@ -1222,6 +1571,7 @@ fn copy_verified(
         output
             .write_all(&buffer[..count])
             .map_err(|e| format!("Cannot save download: {e}"))?;
+        on_progress(total, expected_size);
     }
     if let Some(size) = expected_size {
         if total != size {
@@ -1374,6 +1724,75 @@ mod tests {
         );
         assert!(oversized.is_empty());
         copy_verified(&mut &b"asset data"[..], &mut Vec::new(), None).unwrap();
+    }
+
+    #[test]
+    fn asset_stream_reports_download_progress() {
+        let bytes = vec![7u8; 140_000];
+        let mut output = Vec::new();
+        let mut updates = Vec::new();
+        copy_verified_with_progress(
+            &mut bytes.as_slice(),
+            &mut output,
+            Some(bytes.len() as u64),
+            &mut |received, total| updates.push((received, total)),
+        )
+        .unwrap();
+        assert_eq!(output, bytes);
+        assert!(updates.len() > 1);
+        assert!(updates.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert_eq!(
+            updates.last(),
+            Some(&(bytes.len() as u64, Some(bytes.len() as u64)))
+        );
+    }
+
+    #[test]
+    fn local_release_file_is_reused_only_for_matching_release() {
+        let project = tempfile::tempdir().unwrap();
+        let path = save_asset(
+            project.path(),
+            "owner",
+            "sample",
+            "v1",
+            "sample-v1.dmg",
+            Some(4),
+            &mut &b"test"[..],
+        )
+        .unwrap();
+        assert_eq!(
+            local_release_asset(
+                project.path(),
+                "owner",
+                "sample",
+                "v1",
+                "sample-v1.dmg",
+                Some(4)
+            ),
+            Some(path)
+        );
+        assert!(
+            local_release_asset(
+                project.path(),
+                "owner",
+                "sample",
+                "v2",
+                "sample-v1.dmg",
+                Some(4)
+            )
+            .is_none()
+        );
+        assert!(
+            local_release_asset(
+                project.path(),
+                "owner",
+                "sample",
+                "v1",
+                "sample-v1.dmg",
+                Some(5)
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1650,5 +2069,34 @@ mod tests {
             local_archived_files(root.path(), "repo", "zip"),
             Vec::<(String, u64)>::new()
         );
+    }
+
+    #[test]
+    fn snapshot_release_lookup_does_not_assign_parent_app_to_similar_repo() {
+        let root = tempfile::tempdir().unwrap();
+        let snapshot = serde_json::json!({
+            "org": "storytold", "generated": "2026-10-29T00:00:00Z",
+            "repos": [{
+                "name": "artcraft", "description": null,
+                "url": "https://github.com/storytold/artcraft",
+                "isPrivate": false, "isArchived": false,
+                "releases": {"nodes": [{
+                    "name": "ArtCraft", "tagName": "v1", "description": "Release notes",
+                    "isDraft": false, "isPrerelease": false,
+                    "createdAt": "2026-10-29T00:00:00Z",
+                    "url": "https://github.com/storytold/artcraft/releases/tag/v1",
+                    "releaseAssets": {"nodes": []}
+                }]}
+            }]
+        });
+        std::fs::write(root.path().join("data.json"), snapshot.to_string()).unwrap();
+        assert_eq!(
+            load_snapshot_releases(root.path(), "artcraft")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(load_snapshot_releases(root.path(), "artcraftx").is_none());
+        assert!(load_snapshot_releases(root.path(), "placeholder-artcraft").is_none());
     }
 }

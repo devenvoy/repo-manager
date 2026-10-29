@@ -5,6 +5,7 @@
 
 use release_desk_core::error::DomainError;
 use std::fs;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 
 /// Abstract port for mounting and unmounting disk images (`.dmg`).
@@ -144,9 +145,24 @@ impl<D: DiskImagePort> InstallMacOsAppUseCase<D> {
         } else {
             format!("{expected_app_name}.app")
         };
+        if Path::new(&app_bundle_name).components().count() != 1
+            || !Path::new(&app_bundle_name)
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+        {
+            return Err(DomainError::PortFailure {
+                port: "Installer",
+                message: "invalid application bundle name".into(),
+            });
+        }
 
         let source_app = mount_point.join(&app_bundle_name);
-        if !source_app.exists() {
+        let source_inside_mount = mount_point
+            .canonicalize()
+            .ok()
+            .zip(source_app.canonicalize().ok())
+            .is_some_and(|(root, source)| source.starts_with(root) && source.is_dir());
+        if !source_inside_mount {
             return Err(DomainError::PortFailure {
                 port: "Installer",
                 message: format!(
@@ -163,20 +179,57 @@ impl<D: DiskImagePort> InstallMacOsAppUseCase<D> {
         })?;
 
         let destination = self.applications_dir.join(&app_bundle_name);
-
-        // Remove old version if present
-        if destination.exists() {
-            fs::remove_dir_all(&destination).map_err(|e| DomainError::PortFailure {
+        if fs::symlink_metadata(&destination)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(DomainError::PortFailure {
                 port: "Installer",
-                message: format!("cannot remove existing app bundle: {e}"),
-            })?;
+                message: "installed app path is a symbolic link".into(),
+            });
         }
 
-        // Recursive copy
-        copy_dir_all(&source_app, &destination).map_err(|e| DomainError::PortFailure {
-            port: "Installer",
-            message: format!("cannot copy app bundle to target directory: {e}"),
-        })?;
+        // Prepare the new bundle before touching an installed version.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let staging = self.applications_dir.join(format!(
+            ".{app_bundle_name}.stage-{}-{nonce}",
+            std::process::id()
+        ));
+        let backup = self.applications_dir.join(format!(
+            ".{app_bundle_name}.backup-{}-{nonce}",
+            std::process::id()
+        ));
+        if let Err(error) = copy_dir_all(&source_app, &staging) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(DomainError::PortFailure {
+                port: "Installer",
+                message: format!("cannot stage app bundle: {error}"),
+            });
+        }
+        let had_previous = destination.exists();
+        if had_previous {
+            if let Err(error) = fs::rename(&destination, &backup) {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(DomainError::PortFailure {
+                    port: "Installer",
+                    message: format!("cannot preserve previous app bundle: {error}"),
+                });
+            }
+        }
+        if let Err(error) = fs::rename(&staging, &destination) {
+            if had_previous {
+                let _ = fs::rename(&backup, &destination);
+            }
+            let _ = fs::remove_dir_all(&staging);
+            return Err(DomainError::PortFailure {
+                port: "Installer",
+                message: format!("cannot activate new app bundle: {error}"),
+            });
+        }
+        if had_previous {
+            let _ = fs::remove_dir_all(&backup);
+        }
 
         Ok(destination)
     }

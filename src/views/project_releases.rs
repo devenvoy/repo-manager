@@ -1,6 +1,6 @@
 //! Release shelf backed by fetched provider data and ArtCraft application catalog.
 
-use crate::components::app_icon::repo_icon;
+use crate::components::avatar::repo_icon_with_provider;
 use crate::components::icons::{check_icon, chevron_down_icon, download_icon, refresh_icon};
 use crate::components::motion_button::Button;
 use crate::styles::CssExt as _;
@@ -430,10 +430,11 @@ pub fn render_live_releases<T: 'static>(
                                         .flex()
                                         .items_center()
                                         .gap_3()
-                                        .child(repo_icon(
+                                        .child(repo_icon_with_provider(
                                             &repository.repository,
                                             36.,
                                             icon_path,
+                                            Some(&repository.provider),
                                         ))
                                         .child(
                                             div()
@@ -575,10 +576,11 @@ pub fn render_live_releases<T: 'static>(
                             .flex()
                             .items_center()
                             .gap_3()
-                            .child(repo_icon(
+                            .child(repo_icon_with_provider(
                                 &repository.repository,
                                 44.,
                                 icon_path,
+                                Some(&repository.provider),
                             ))
                             .child(
                                 div()

@@ -1,11 +1,10 @@
-//! Source discovery, repository selection, and catalog preview controller.
+//! Source discovery and repository selection controller.
 
 use crate::app::{ReleaseDesk, project_auth_token};
 use crate::settings;
 use crate::views;
 use crate::workspace_sources::WorkspaceSource;
 use gpui_kit::{Context, Window};
-use release_desk_core::app_catalog::AppActionState;
 
 impl ReleaseDesk {
     pub(crate) fn add_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -306,28 +305,5 @@ impl ReleaseDesk {
             },
             cx,
         );
-    }
-
-    pub(crate) fn preview_app_action(&mut self, id: String, cx: &mut Context<Self>) {
-        let Some(item) = self
-            .store_items
-            .iter_mut()
-            .find(|item| item.metadata.id == id)
-        else {
-            return;
-        };
-        let action = match item.state {
-            AppActionState::Installable => "installed",
-            AppActionState::UpdateAvailable { .. } => "updated",
-            AppActionState::UpToDate { .. } => "opened",
-        };
-        if action != "opened" {
-            item.installed_version = item.latest_release_tag.clone();
-            item.state = AppActionState::UpToDate {
-                version: item.latest_release_tag.clone().unwrap_or_default(),
-            };
-        }
-        self.message = format!("{} {action} in preview only.", item.metadata.name);
-        cx.notify();
     }
 }

@@ -10,6 +10,7 @@ pub mod modules;
 pub mod repository_git;
 pub mod settings;
 pub mod state;
+pub mod store_catalog;
 pub mod styles;
 pub mod views;
 pub mod workspace;

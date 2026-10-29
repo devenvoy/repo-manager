@@ -20,7 +20,6 @@ use gpui_kit::{
 };
 use release_desk_application::event::EventBroadcaster;
 use release_desk_application::use_case::auth::AuthenticateProviderUseCase;
-use release_desk_core::app_catalog::AppStoreItem;
 use release_desk_core::port::SecretStorePort as _;
 use release_desk_core::project::DiskLayout;
 use release_desk_store::auth::{LocalOAuthServer, ModalWebviewAuthPort, SystemBrowserAuthPort};
@@ -59,8 +58,18 @@ pub struct ReleaseDesk {
     pub(crate) repo_search: Entity<InputState>,
     pub(crate) source_dialog: views::project_sources::SourceDialog,
     pub(crate) source_busy: bool,
-    pub(crate) store_items: Vec<AppStoreItem>,
+    pub(crate) store_items: Vec<crate::store_catalog::StoreApp>,
     pub(crate) selected_app_id: Option<String>,
+    pub(crate) selected_store_release: Option<String>,
+    pub(crate) selected_store_image: Option<usize>,
+    pub(crate) store_search: Entity<InputState>,
+    pub(crate) store_category: String,
+    pub(crate) store_filter: crate::controllers::store_controller::StoreFilter,
+    pub(crate) store_sort: crate::controllers::store_controller::StoreSort,
+    pub(crate) store_busy: bool,
+    pub(crate) store_revision: u64,
+    pub(crate) store_activities:
+        std::collections::HashMap<String, crate::controllers::store_controller::StoreActivity>,
     pub(crate) git_statuses: Vec<crate::repository_git::RepositoryStatus>,
     pub(crate) git_check_completed: usize,
     pub(crate) git_check_total: usize,
@@ -80,6 +89,7 @@ pub struct ReleaseDesk {
     pub(crate) selected_editor_id: String,
     pub(crate) editor_menu_open: bool,
     pub(crate) git_busy: bool,
+    pub(crate) project_cache_status: Option<crate::controllers::git_controller::ProjectCacheStatus>,
     pub(crate) workspace_revision: u64,
     pub(crate) release_state: crate::workspace_releases::ReleaseViewState,
     pub(crate) release_busy: bool,
@@ -142,7 +152,7 @@ pub(crate) fn find_webview_binary() -> Option<std::path::PathBuf> {
 
 impl ReleaseDesk {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (settings, message) = match settings::load() {
+        let (settings, mut message) = match settings::load() {
             Ok(settings) => (settings, String::new()),
             Err(error) => (Settings::default(), error),
         };
@@ -169,6 +179,9 @@ impl ReleaseDesk {
         cx.observe(&source_search, |_, _, cx| cx.notify()).detach();
         let repo_search = cx.new(|cx| InputState::new(window, cx).placeholder("Find a repository"));
         cx.observe(&repo_search, |_, _, cx| cx.notify()).detach();
+        let store_search =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search apps and releases"));
+        cx.observe(&store_search, |_, _, cx| cx.notify()).detach();
         let secret_store = Arc::new(OsSecretStore::new());
         let browser_auth = Arc::new(SystemBrowserAuthPort::new());
         let webview_auth = Arc::new(ModalWebviewAuthPort::new());
@@ -190,6 +203,17 @@ impl ReleaseDesk {
             } else {
                 "finder".to_string()
             };
+        let catalog_path = crate::store_catalog::catalog_path(&crate::workspace::expand_directory(
+            &settings.library_dir,
+        ));
+        let mut store_items = match crate::store_catalog::load(&catalog_path) {
+            Ok(items) => items,
+            Err(error) => {
+                message = error;
+                Vec::new()
+            }
+        };
+        crate::store_catalog::refresh_local_artwork(&mut store_items, &projects);
         let app = Self {
             settings,
             projects,
@@ -213,8 +237,17 @@ impl ReleaseDesk {
             repo_search,
             source_dialog: Default::default(),
             source_busy: false,
-            store_items: Vec::new(),
+            store_items,
             selected_app_id: None,
+            selected_store_release: None,
+            selected_store_image: None,
+            store_search,
+            store_category: "All".into(),
+            store_filter: Default::default(),
+            store_sort: Default::default(),
+            store_busy: false,
+            store_revision: 0,
+            store_activities: Default::default(),
             git_statuses: Vec::new(),
             git_check_completed: 0,
             git_check_total: 0,
@@ -228,6 +261,7 @@ impl ReleaseDesk {
             selected_editor_id,
             editor_menu_open: false,
             git_busy: false,
+            project_cache_status: None,
             workspace_revision: 0,
             release_state: Default::default(),
             release_busy: false,
@@ -253,40 +287,13 @@ impl ReleaseDesk {
             import_dialog: None,
         };
         app.apply_appearance(window, cx);
-        let mut download_requests: Vec<(String, std::path::PathBuf)> = app
+        let download_requests: Vec<(String, std::path::PathBuf)> = app
             .projects
             .iter()
             .flat_map(|project| &project.sources)
             .filter_map(WorkspaceSource::avatar_cache_request)
             .filter(|(_, path)| !path.is_file())
             .collect();
-
-        for project in &app.projects {
-            for source in &project.sources {
-                for repo in &source.repositories {
-                    let repo_dir = crate::repository_git::resolve_target_path(
-                        &project.directory,
-                        project.disk_layout,
-                        crate::repository_git::repository_owner(source, repo),
-                        &repo.name,
-                    );
-                    if crate::components::app_icon::find_local_repo_icon(&repo_dir, &repo.name)
-                        .is_none()
-                    {
-                        if let Some((url, path)) =
-                            crate::components::app_icon::repo_icon_cache_request(
-                                &repo.name,
-                                Some(crate::repository_git::repository_owner(source, repo)),
-                            )
-                        {
-                            if !path.is_file() {
-                                download_requests.push((url, path));
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
         if !download_requests.is_empty() {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -326,6 +333,7 @@ impl ReleaseDesk {
     }
 
     pub(crate) fn apply_nav_location(&mut self, loc: NavLocation, cx: &mut Context<Self>) {
+        self.selected_store_image = None;
         let next_project = match &loc {
             NavLocation::Project(id, _) => Some(*id),
             _ => None,
@@ -364,9 +372,13 @@ impl ReleaseDesk {
             NavLocation::AppStore => {
                 self.tab = WorkspaceTab::AppStore;
                 self.selected_app_id = None;
+                self.selected_store_release = None;
             }
             NavLocation::AppDetail(id) => {
                 self.tab = WorkspaceTab::AppStore;
+                if self.selected_app_id.as_deref() != Some(id.as_str()) {
+                    self.selected_store_release = None;
+                }
                 self.selected_app_id = Some(id);
             }
             NavLocation::Settings => {
@@ -499,14 +511,13 @@ impl Render for ReleaseDesk {
                 .detach();
             }
         }
+        let store_detail_title = self
+            .selected_app_id
+            .as_deref()
+            .and_then(|id| self.store_items.iter().find(|item| item.key == id))
+            .map(crate::store_catalog::StoreApp::display_name);
         let (location_title, project_name) = match self.tab {
-            WorkspaceTab::AppStore => {
-                if let Some(id) = &self.selected_app_id {
-                    (id.as_str(), None)
-                } else {
-                    ("App Store", None)
-                }
-            }
+            WorkspaceTab::AppStore => (store_detail_title.as_deref().unwrap_or("App Store"), None),
             WorkspaceTab::Settings => ("Settings", None),
             WorkspaceTab::ProjectHub => {
                 if self.setup_active {
@@ -531,13 +542,42 @@ impl Render for ReleaseDesk {
             WorkspaceTab::AppStore => views::render_store(
                 &self.store_items,
                 self.selected_app_id.as_deref(),
+                self.selected_store_release.as_deref(),
+                &self.store_search,
+                &self.store_category,
+                self.store_filter,
+                self.store_sort,
+                &crate::workspace::expand_directory(&self.settings.applications_dir),
+                self.store_busy,
+                &self.store_activities,
                 cx,
                 |id, this: &mut Self, cx| {
                     this.navigate_to(NavLocation::AppDetail(id), cx);
                 },
-                |id, this: &mut Self, cx| this.preview_app_action(id, cx),
+                |id, this: &mut Self, cx| this.store_action(id, cx),
+                |tag, this: &mut Self, cx| {
+                    this.selected_store_release = Some(tag);
+                    cx.notify();
+                },
                 |this: &mut Self, cx| {
-                    this.navigate_to(NavLocation::ProjectHub, cx);
+                    this.navigate_to(NavLocation::AppStore, cx);
+                },
+                |category, this: &mut Self, cx| {
+                    this.store_category = category;
+                    cx.notify();
+                },
+                |filter, this: &mut Self, cx| {
+                    this.store_filter = filter;
+                    cx.notify();
+                },
+                |sort, this: &mut Self, cx| {
+                    this.store_sort = sort;
+                    cx.notify();
+                },
+                |this: &mut Self, cx| this.refresh_store(cx),
+                |index, this: &mut Self, cx| {
+                    this.selected_store_image = Some(index);
+                    cx.notify();
                 },
             )
             .into_any_element(),
@@ -787,6 +827,7 @@ impl Render for ReleaseDesk {
                         project,
                         self.project_section,
                         self.delete_confirm,
+                        self.project_cache_status.as_ref(),
                         section_content,
                         cx,
                         |section, this: &mut Self, _window, cx| {
@@ -805,6 +846,8 @@ impl Render for ReleaseDesk {
                         },
                         |this: &mut Self, cx| this.delete_selected_project(cx),
                         |this: &mut Self, window, cx| this.import_local_repositories(window, cx),
+                        |this: &mut Self, cx| this.clear_selected_project_cache(cx),
+                        |this: &mut Self, cx| this.recreate_selected_project_icons(cx),
                     )
                     .into_any_element()
                 } else {
@@ -891,6 +934,27 @@ impl Render for ReleaseDesk {
                     this.confirm_import_dialog(handle, window, cx)
                 },
                 |this: &mut Self, _window, cx| this.cancel_import_dialog(cx),
+            ));
+        }
+
+        if let Some((item, index)) = self
+            .selected_app_id
+            .as_deref()
+            .and_then(|id| self.store_items.iter().find(|item| item.key == id))
+            .zip(self.selected_store_image)
+            && let Some(path) = item.images.get(index)
+            && path.is_file()
+        {
+            root = root.child(views::store::render_store_preview(
+                path,
+                &item.display_name(),
+                index,
+                item.images.len(),
+                cx,
+                |next, this: &mut Self, cx| {
+                    this.selected_store_image = next;
+                    cx.notify();
+                },
             ));
         }
 

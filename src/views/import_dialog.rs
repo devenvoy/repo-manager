@@ -286,9 +286,12 @@ pub fn render_import_dialog<T: 'static>(
                                     meta_row = meta_row.child(language_chip(lang, cx.theme()));
                                 }
 
-                                let repo_dir = state.project_dir.join(&repo.name);
-                                let icon_path = crate::components::app_icon::find_local_repo_icon(&repo_dir, &repo.name)
-                                    .or_else(|| crate::components::app_icon::find_cached_repo_icon(&repo.name, Some(&state.discovered.source_handle)));
+                                let icon_path = crate::modules::icon_agent::resolve_icon_for(
+                                    Some(&state.project_dir),
+                                    &state.discovered.provider,
+                                    &state.discovered.source_handle,
+                                    &repo.name,
+                                );
 
                                 let item = div()
                                     .id(ElementId::Name(format!("pick-row-{idx}").into()))
@@ -310,7 +313,12 @@ pub fn render_import_dialog<T: 'static>(
                                         on_toggle(idx, this, window, cx);
                                     }))
                                     .child(checkbox(is_selected, cx.theme()))
-                                    .child(crate::components::app_icon::repo_icon(&repo.name, 30., icon_path.as_deref()))
+                                    .child(crate::components::avatar::repo_icon_with_provider(
+                                        &repo.name,
+                                        30.,
+                                        icon_path.as_deref(),
+                                        Some(&state.discovered.provider),
+                                    ))
                                     .child(
                                         div()
                                             .flex_1()

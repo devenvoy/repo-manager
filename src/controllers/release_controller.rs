@@ -69,6 +69,7 @@ impl ReleaseDesk {
                             this.update(cx, |this, cx| {
                                 if this.workspace_revision == revision {
                                     this.release_busy = false;
+                                    this.remember_project_releases(project_id, &repositories);
                                     if this.selected_project_id == Some(project_id) {
                                         this.release_state =
                                             crate::workspace_releases::ReleaseViewState::Loaded {
@@ -76,6 +77,7 @@ impl ReleaseDesk {
                                                 presentations,
                                                 extension,
                                             };
+                                        this.refresh_project_icon_views(project_id);
                                     }
                                 }
                                 cx.notify();
@@ -216,27 +218,63 @@ impl ReleaseDesk {
         };
         let directory = project.directory.clone();
         let private = project.sources.iter().any(|source| {
-            source.provider == provider
-                && source.repositories.iter().any(|item| {
-                    item.name == repo
-                        && item.is_private
-                        && crate::repository_git::repository_owner(source, item)
-                            .eq_ignore_ascii_case(&owner)
-                })
+            source.repositories.iter().any(|item| {
+                item.name == repo
+                    && item.is_private
+                    && crate::repository_git::repository_owner(source, item)
+                        .eq_ignore_ascii_case(&owner)
+            })
         });
-        let token = if private && project.provider.as_str() == provider {
+        let custom_host = (provider == "custom" || provider == "azure_devops")
+            .then(|| {
+                (provider == "custom")
+                    .then(|| project.custom_host.clone())
+                    .flatten()
+                    .or_else(|| {
+                        project
+                            .sources
+                            .iter()
+                            .flat_map(|source| &source.repositories)
+                            .find(|item| item.name == repo)
+                            .and_then(|item| {
+                                crate::modules::release_service::clone_host(&item.clone_url)
+                            })
+                            .filter(|host| {
+                                provider != "azure_devops"
+                                    || host == "dev.azure.com"
+                                    || host.ends_with(".visualstudio.com")
+                            })
+                            .map(|host| format!("https://{host}"))
+                    })
+            })
+            .flatten();
+        let (token, username) = if private && project.provider.as_str() == provider {
             match project_auth_token(project, &self.secret_store) {
-                Ok(token) => token,
+                Ok(token) => (token, Some(project.account.clone())),
                 Err(error) => {
                     self.message = error;
                     cx.notify();
                     return;
                 }
             }
+        } else if private {
+            let host = custom_host
+                .as_deref()
+                .and_then(|value| url::Url::parse(value).ok())
+                .and_then(|value| value.host_str().map(str::to_string))
+                .unwrap_or_else(|| {
+                    crate::workspace::ProviderChoice::from_source_provider(&provider)
+                        .default_host()
+                        .to_string()
+                });
+            match release_desk_store::OsSecretStore::discover_system_git_credentials(&host) {
+                Some((username, token)) => (Some(token), Some(username)),
+                None => (None, None),
+            }
         } else {
-            None
+            (None, None)
         };
-        if private && token.is_none() {
+        if private && token.is_none() && !crate::modules::release_service::signed_asset_url(&url) {
             self.message =
                 format!("Connect a {provider} account with access to download this private asset.");
             cx.notify();
@@ -258,8 +296,21 @@ impl ReleaseDesk {
                         &directory, &owner, &repo, &tag, &name, &url, size, &token,
                     )
                 }
-                (_, Some(_)) => {
-                    Err("Private downloads are not supported for this provider.".into())
+                (provider, Some(token)) => {
+                    release_desk_store::workspace_releases::download_provider_asset_with_progress(
+                        &directory,
+                        provider,
+                        &owner,
+                        &repo,
+                        &tag,
+                        &name,
+                        &url,
+                        size,
+                        &token,
+                        username.as_deref(),
+                        custom_host.as_deref(),
+                        &mut |_, _| {},
+                    )
                 }
                 (_, None) => release_desk_store::workspace_releases::download_asset(
                     &directory, &owner, &repo, &tag, &name, &url, size,

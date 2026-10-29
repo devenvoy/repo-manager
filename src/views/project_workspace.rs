@@ -5,9 +5,10 @@ use crate::components::motion_button::Button;
 use crate::components::provider_icon::provider_icon;
 use crate::styles::CssExt as _;
 use crate::workspace::{ProjectSection, WorkspaceProject};
-use gpui_kit::base::StyledExt;
+use gpui_kit::base::{Disableable as _, StyledExt};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::ButtonVariants as _;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, IntoElement, ParentElement as _, Styled as _, Window, div, px,
 };
@@ -20,10 +21,13 @@ pub fn render_project_workspace<
     FEdit: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FDelete: Fn(&mut T, &mut Context<T>) + Copy + 'static,
     FImport: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
+    FClearCache: Fn(&mut T, &mut Context<T>) + Copy + 'static,
+    FRecreateIcons: Fn(&mut T, &mut Context<T>) + Copy + 'static,
 >(
     project: &WorkspaceProject,
     section: ProjectSection,
     delete_confirm: bool,
+    cache_status: Option<&crate::controllers::git_controller::ProjectCacheStatus>,
     section_content: Option<AnyElement>,
     cx: &Context<T>,
     on_section: FSection,
@@ -31,7 +35,11 @@ pub fn render_project_workspace<
     on_edit: FEdit,
     on_delete: FDelete,
     on_import: FImport,
+    on_clear_cache: FClearCache,
+    on_recreate_icons: FRecreateIcons,
 ) -> impl IntoElement {
+    let cache_status = cache_status.filter(|status| status.project_id == project.id);
+    let cache_running = cache_status.is_some_and(|status| status.running);
     let mut tabs = div()
         .flex()
         .flex_wrap()
@@ -114,6 +122,43 @@ pub fn render_project_workspace<
                             })),
                     ),
             )
+            .child(div()
+                .pt_4()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(div().text_size(px(16.)).font_bold().child("Project cache and icons"))
+                .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground)
+                    .child("Clear cached icons for this project, or scan all cloned repositories and choose their icons again."))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(Button::new("clear-project-cache")
+                        .label(if cache_running && cache_status.is_some_and(|status| !status.recreate) { "Clearing cache…" } else { "Clear project cache" })
+                        .outline()
+                        .disabled(cache_running)
+                        .on_click(cx.listener(move |this, _, _, cx| on_clear_cache(this, cx))))
+                    .child(Button::new("recreate-project-icons")
+                        .label(if cache_running && cache_status.is_some_and(|status| status.recreate) { "Recreating icons…" } else { "Recreate repo icons" })
+                        .outline()
+                        .disabled(cache_running)
+                        .on_click(cx.listener(move |this, _, _, cx| on_recreate_icons(this, cx)))))
+                .when_some(cache_status, |panel, status| {
+                    let color = if status.running { cx.theme().primary } else if status.failed { cx.theme().danger } else { cx.theme().success };
+                    panel.child(div()
+                        .p_3()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(color.opacity(0.45))
+                        .bg(color.opacity(0.08))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().text_size(px(12.)).font_bold().text_color(color).child(
+                            if status.running { "Working…" } else if status.failed { "Completed with errors" } else { "Completed successfully" }
+                        ))
+                        .child(div().text_size(px(12.)).child(status.detail.clone())))
+                }))
             .child(div().pt_4().border_t_1().border_color(cx.theme().border).text_size(px(16.)).font_bold().child("Delete project"))
             .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child("Remove this project from Release Desk. The directory and its files stay on disk."))
             .child(Button::new("delete-project").label(if delete_confirm { "Confirm: remove project" } else { "Delete project" }).on_click(cx.listener(move |this, _, _, cx| on_delete(this, cx))))

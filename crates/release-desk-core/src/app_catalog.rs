@@ -32,7 +32,12 @@ impl AppActionState {
             (Some(installed), Some(latest)) => {
                 let norm_installed = installed.trim_start_matches('v');
                 let norm_latest = latest.trim_start_matches('v');
-                if norm_installed == norm_latest {
+                let installed_parts = numeric_version(norm_installed);
+                let latest_parts = numeric_version(norm_latest);
+                if norm_installed == norm_latest
+                    || installed == "installed"
+                    || matches!((&installed_parts, &latest_parts), (Some(current), Some(next)) if next <= current)
+                {
                     Self::UpToDate {
                         version: installed.to_string(),
                     }
@@ -53,6 +58,15 @@ impl AppActionState {
     pub fn requires_update(&self) -> bool {
         matches!(self, Self::UpdateAvailable { .. })
     }
+}
+
+fn numeric_version(value: &str) -> Option<Vec<u64>> {
+    let value = value.split(['-', '+']).next()?;
+    value
+        .split('.')
+        .map(str::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
 }
 
 /// Rich metadata defining a desktop application in the catalog.
@@ -398,6 +412,14 @@ mod tests {
                 version: "v1.0.0".to_string(),
             }
         );
+        assert!(matches!(
+            AppActionState::derive(Some("installed"), Some("v2.0.0")),
+            AppActionState::UpToDate { .. }
+        ));
+        assert!(matches!(
+            AppActionState::derive(Some("2.0.0"), Some("v1.9.0")),
+            AppActionState::UpToDate { .. }
+        ));
     }
 
     #[test]
