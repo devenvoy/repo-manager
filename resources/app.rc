@@ -1,0 +1,3 @@
+// Windows application icon resource.
+// The first (ID 1) icon resource is used as the default executable icon.
+IDI_ICON1 ICON "resources/app.ico"

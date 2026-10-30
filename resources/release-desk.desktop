@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Release Desk
+GenericName=Release Management
+Comment=Manage Git releases, packages, and deployments across providers
+Exec=release-desk
+Icon=release-desk
+Terminal=false
+Type=Application
+Categories=Development;Utility;GTK;
+StartupNotify=true
+StartupWMClass=release-desk
+MimeType=inode/directory;
