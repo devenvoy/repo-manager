@@ -331,20 +331,26 @@ pub fn discover_workspace(project_dir: &Path) -> Option<DiscoveredWorkspace> {
         return None;
     }
 
-    // Pick the most common owner detected or default to "storytold"
+    // Use the discovered owner when available; otherwise retain a local source.
     let dominant_owner = detected_owners
         .into_iter()
         .max_by_key(|(_, count)| *count)
         .map(|(owner, _)| owner)
-        .unwrap_or_else(|| "storytold".to_string());
+        .unwrap_or_else(|| "local".to_string());
 
-    let avatar_url = Some(format!("https://github.com/{dominant_owner}.png"));
+    let avatar_url =
+        (dominant_owner != "local").then(|| format!("https://github.com/{dominant_owner}.png"));
 
+    let provider = if dominant_owner == "local" {
+        "local"
+    } else {
+        "github"
+    };
     Some(DiscoveredWorkspace {
         source_handle: dominant_owner.clone(),
         display_name: Some(dominant_owner),
         avatar_url,
-        provider: "github".to_string(),
+        provider: provider.to_string(),
         bio: Some(format!(
             "Discovered {} repositories from disk checkouts",
             discovered_repos.len()
@@ -367,7 +373,8 @@ pub fn build_confirmed_source(
         clean_handle
     };
 
-    let avatar_url = Some(format!("https://github.com/{effective_handle}.png"));
+    let avatar_url = (discovered.provider == "github" && effective_handle != "local")
+        .then(|| format!("https://github.com/{effective_handle}.png"));
     let mut initial_releases = HashMap::new();
 
     let repositories: Vec<SourceRepository> = discovered
@@ -376,7 +383,10 @@ pub fn build_confirmed_source(
         .filter(|r| r.selected)
         .map(|r| {
             let full_name = format!("{effective_handle}/{}", r.name);
-            let clone_url = if r.clone_url.is_empty() {
+            let clone_url = if r.clone_url.is_empty()
+                && discovered.provider == "github"
+                && effective_handle != "local"
+            {
                 format!("https://github.com/{effective_handle}/{}.git", r.name)
             } else {
                 r.clone_url.clone()
@@ -420,6 +430,19 @@ pub fn build_confirmed_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_repository_without_remote_does_not_invent_an_owner_or_url() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("my-repo/.git")).unwrap();
+        let discovered = discover_workspace(temp.path()).expect("local repository");
+        assert_eq!(discovered.source_handle, "local");
+        assert_eq!(discovered.provider, "local");
+        assert!(discovered.avatar_url.is_none());
+        let (source, _) = build_confirmed_source(&discovered, "local");
+        assert!(source.avatar_url.is_none());
+        assert!(source.repositories[0].clone_url.is_empty());
+    }
 
     #[test]
     fn discover_from_json_snapshot() {

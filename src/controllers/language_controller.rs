@@ -45,19 +45,9 @@ impl ReleaseDesk {
         } else {
             repo.full_name.clone()
         };
-        let token = if provider == project.provider.as_str() {
-            match project_auth_token(project, &self.secret_store) {
-                Ok(token) => token,
-                Err(error) => {
-                    self.language_breakdowns
-                        .insert(key, LanguageBreakdownState::Error(error));
-                    cx.notify();
-                    return;
-                }
-            }
-        } else {
-            None
-        };
+        let use_token = provider == project.provider.as_str();
+        let auth_project = project.clone();
+        let secret_store = self.secret_store.clone();
 
         self.language_breakdowns
             .insert(key, LanguageBreakdownState::Loading);
@@ -66,11 +56,19 @@ impl ReleaseDesk {
         let project_id = project.id;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = release_desk_store::source_fetcher::fetch_repository_languages(
-                &provider,
-                &full_name,
-                token.as_deref(),
-            );
+            let result = (|| {
+                let token = if use_token {
+                    project_auth_token(&auth_project, &secret_store)?
+                } else {
+                    None
+                };
+                release_desk_store::source_fetcher::fetch_repository_languages(
+                    &provider,
+                    &full_name,
+                    token.as_deref(),
+                )
+                .map_err(|error| error.to_string())
+            })();
             let _ = tx.send(result);
         });
         cx.spawn_in(window, async move |this, cx| {

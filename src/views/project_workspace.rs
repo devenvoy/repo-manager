@@ -110,7 +110,7 @@ pub fn render_project_workspace<
                         div()
                             .text_size(px(12.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("Scan your project folder to discover and import existing local Git repositories (such as ArtCraft or local working projects)."),
+                            .child("Scan your project folder to discover and import existing local Git repositories."),
                     )
                     .child(
                         Button::new("settings-import-local-repos")

@@ -265,44 +265,46 @@ impl ReleaseDesk {
                     })
             })
             .flatten();
-        let (token, username) = if private && project.provider.as_str() == provider {
-            match project_auth_token(project, &self.secret_store) {
-                Ok(token) => (token, Some(project.account.clone())),
-                Err(error) => {
-                    self.message = error;
-                    cx.notify();
-                    return;
-                }
-            }
-        } else if private {
-            let host = custom_host
-                .as_deref()
-                .and_then(|value| url::Url::parse(value).ok())
-                .and_then(|value| value.host_str().map(str::to_string))
-                .unwrap_or_else(|| {
-                    crate::workspace::ProviderChoice::from_source_provider(&provider)
-                        .default_host()
-                        .to_string()
-                });
-            match release_desk_store::OsSecretStore::discover_system_git_credentials(&host) {
-                Some((username, token)) => (Some(token), Some(username)),
-                None => (None, None),
-            }
-        } else {
-            (None, None)
-        };
-        if private && token.is_none() && !crate::modules::release_service::signed_asset_url(&url) {
-            self.message =
-                format!("Connect a {provider} account with access to download this private asset.");
-            cx.notify();
-            return;
-        }
+        let auth_project = project.clone();
+        let secret_store = self.secret_store.clone();
         self.release_busy = true;
         self.message = format!("Downloading {name}…");
         cx.notify();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = match (provider.as_str(), token) {
+            let result = (|| {
+                let (token, username) = if private && auth_project.provider.as_str() == provider {
+                    (
+                        project_auth_token(&auth_project, &secret_store)?,
+                        Some(auth_project.account.clone()),
+                    )
+                } else if private {
+                    let host = custom_host
+                        .as_deref()
+                        .and_then(|value| url::Url::parse(value).ok())
+                        .and_then(|value| value.host_str().map(str::to_string))
+                        .unwrap_or_else(|| {
+                            crate::workspace::ProviderChoice::from_source_provider(&provider)
+                                .default_host()
+                                .to_string()
+                        });
+                    secret_store
+                        .discover_cached_system_git_credentials(&host)
+                        .map_or((None, None), |(username, token)| {
+                            (Some(token), Some(username))
+                        })
+                } else {
+                    (None, None)
+                };
+                if private
+                    && token.is_none()
+                    && !crate::modules::release_service::signed_asset_url(&url)
+                {
+                    return Err(format!(
+                        "Connect a {provider} account with access to download this private asset."
+                    ));
+                }
+                match (provider.as_str(), token) {
                 ("github", Some(token)) => {
                     release_desk_store::workspace_releases::download_github_asset(
                         &directory, &owner, &repo, &tag, &name, size, &token,
@@ -332,7 +334,8 @@ impl ReleaseDesk {
                 (_, None) => release_desk_store::workspace_releases::download_asset(
                     &directory, &owner, &repo, &tag, &name, &url, size,
                 ),
-            };
+                }
+            })();
             let _ = tx.send(result);
         });
         cx.spawn_in(window, async move |this, cx| {

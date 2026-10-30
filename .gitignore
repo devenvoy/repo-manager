@@ -2,3 +2,8 @@
 /dist/
 .DS_Store
 bin/release-desk-webview
+
+/.agents/
+/.planning/
+/skills-lock.json
+/.privacy-backup/

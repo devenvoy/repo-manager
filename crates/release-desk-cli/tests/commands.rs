@@ -34,3 +34,19 @@ fn initializes_and_links_snapshot_read_only() {
     // Assert source file was NOT edited or modified
     assert_eq!(fs::read_to_string(&source).expect("source content"), raw);
 }
+
+#[test]
+fn migration_command_is_not_exposed() {
+    let binary = env!("CARGO_BIN_EXE_release-desk-cli");
+    let help = Command::new(binary)
+        .arg("--help")
+        .output()
+        .expect("run help");
+    assert!(help.status.success());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("migrate"));
+    let result = Command::new(binary)
+        .arg("migrate")
+        .output()
+        .expect("run command");
+    assert!(!result.status.success());
+}

@@ -4,9 +4,7 @@
 //! matches them against on-disk installations in `~/Applications`, and derives
 //! 3-state action buttons (`Install`, `Update`, `Open`).
 
-use release_desk_core::app_catalog::{
-    AppActionState, AppStoreItem, default_artcraft_catalog, find_known_app,
-};
+use release_desk_core::app_catalog::{AppActionState, AppStoreItem, find_known_app};
 use release_desk_core::project::ProjectIdentity;
 use std::path::{Path, PathBuf};
 
@@ -106,27 +104,6 @@ impl<P: AppInstallationProbe> AppStoreAggregatorUseCase<P> {
             }
         }
 
-        // 2. If no project apps are populated yet, populate standard ArtCraft catalog entries
-        if items.is_empty() && !projects.is_empty() {
-            let default_proj = &projects[0];
-            for meta in default_artcraft_catalog() {
-                let installed_version = self
-                    .probe
-                    .probe_installed_version(&self.install_target_dir, &meta.binary_name);
-
-                let default_release = Some("v2.4.0".to_string());
-                let item = AppStoreItem::new(
-                    meta.clone(),
-                    default_proj.id,
-                    default_proj.name.as_str().to_string(),
-                    meta.id.clone(),
-                    default_release,
-                    installed_version,
-                );
-                items.push(item);
-            }
-        }
-
         // Sort by category then name
         items.sort_by(|a, b| {
             a.metadata
@@ -170,6 +147,21 @@ mod tests {
         fn probe_installed_version(&self, _target_dir: &Path, binary_name: &str) -> Option<String> {
             self.installed.get(binary_name).cloned()
         }
+    }
+
+    #[test]
+    fn empty_project_does_not_invent_apps() {
+        let use_case = AppStoreAggregatorUseCase::new(
+            MockAppProbe::default(),
+            PathBuf::from("/example/applications"),
+        );
+        let project = ProjectIdentity::new(
+            ProjectId::from_u128(1),
+            ProjectName::new("Any project").unwrap(),
+        );
+        let (items, metrics) = use_case.aggregate_apps(&[project], &[]);
+        assert!(items.is_empty());
+        assert_eq!(metrics.total_apps, 0);
     }
 
     #[test]

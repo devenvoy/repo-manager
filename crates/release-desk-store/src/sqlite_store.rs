@@ -4,7 +4,7 @@
 //! with thread-safe connection pooling and WAL mode.
 
 use crate::boundary::ManagedLibrary;
-use crate::migration::migrate;
+use crate::schema::initialize;
 use release_desk_application::use_case::discovery::{
     ProjectRepositoryRecord, TrackingStatus, TrackingStore,
 };
@@ -29,14 +29,13 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Open or create a SQLite database at `db_path` bounded by `library`.
     pub fn open(db_path: impl AsRef<Path>, library: ManagedLibrary) -> Result<Self, DomainError> {
-        let mut conn =
-            Connection::open(db_path.as_ref()).map_err(|e| DomainError::PortFailure {
-                port: "SQLite",
-                message: e.to_string(),
-            })?;
+        let conn = Connection::open(db_path.as_ref()).map_err(|e| DomainError::PortFailure {
+            port: "SQLite",
+            message: e.to_string(),
+        })?;
 
-        migrate(&mut conn).map_err(|e| DomainError::PortFailure {
-            port: "Migration",
+        initialize(&conn).map_err(|e| DomainError::PortFailure {
+            port: "SQLite schema",
             message: e.to_string(),
         })?;
 
@@ -48,13 +47,13 @@ impl SqliteStore {
 
     /// Open an in-memory database (useful for isolated tests).
     pub fn open_in_memory(library: ManagedLibrary) -> Result<Self, DomainError> {
-        let mut conn = Connection::open_in_memory().map_err(|e| DomainError::PortFailure {
+        let conn = Connection::open_in_memory().map_err(|e| DomainError::PortFailure {
             port: "SQLite",
             message: e.to_string(),
         })?;
 
-        migrate(&mut conn).map_err(|e| DomainError::PortFailure {
-            port: "Migration",
+        initialize(&conn).map_err(|e| DomainError::PortFailure {
+            port: "SQLite schema",
             message: e.to_string(),
         })?;
 

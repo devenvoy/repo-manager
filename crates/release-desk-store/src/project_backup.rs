@@ -3,7 +3,6 @@
 //! Automatically writes and maintains a `data.json` snapshot inside the project's
 //! clone location, providing local backup redundancy and detecting database-disk mismatches.
 
-use crate::boundary::FORBIDDEN_ARTCRAFT_ROOT;
 use release_desk_core::error::DomainError;
 use release_desk_core::port::ProjectBackupPort;
 pub use release_desk_core::snapshot::{MismatchReport, RevisionMismatch};
@@ -27,21 +26,6 @@ impl ProjectSnapshotManager {
     pub fn snapshot_path(project_root: &Path) -> PathBuf {
         project_root.join(".release-desk/data.json")
     }
-
-    /// Ensure the target project root is not inside the forbidden ArtCraft legacy path.
-    fn validate_boundary(root: &Path) -> Result<(), DomainError> {
-        let forbidden = Path::new(FORBIDDEN_ARTCRAFT_ROOT);
-        if root == forbidden || root.starts_with(forbidden) {
-            return Err(DomainError::PortFailure {
-                port: "ProjectBackup",
-                message: format!(
-                    "SAFETY VIOLATION: project clone location cannot be inside ArtCraft: {}",
-                    root.display()
-                ),
-            });
-        }
-        Ok(())
-    }
 }
 
 impl ProjectBackupPort for ProjectSnapshotManager {
@@ -51,8 +35,6 @@ impl ProjectBackupPort for ProjectSnapshotManager {
         project_root: &Path,
         snapshot: &Snapshot,
     ) -> Result<PathBuf, DomainError> {
-        Self::validate_boundary(project_root)?;
-
         let snapshot_file = Self::snapshot_path(project_root);
         let parent = snapshot_file
             .parent()
@@ -200,29 +182,6 @@ impl ProjectBackupPort for ProjectSnapshotManager {
 mod tests {
     use super::*;
     use release_desk_core::git::{BranchRef, Revision};
-
-    #[test]
-    fn rejects_artcraft_root_for_backup() {
-        let manager = ProjectSnapshotManager::new();
-        let snapshot = Snapshot {
-            org: "org".into(),
-            generated: "".into(),
-            repos: vec![],
-        };
-        assert!(
-            manager
-                .write_backup_snapshot(Path::new(FORBIDDEN_ARTCRAFT_ROOT), &snapshot)
-                .is_err()
-        );
-        assert!(
-            manager
-                .write_backup_snapshot(
-                    &Path::new(FORBIDDEN_ARTCRAFT_ROOT).join("subdir"),
-                    &snapshot
-                )
-                .is_err()
-        );
-    }
 
     #[test]
     fn write_and_read_backup_snapshot() {

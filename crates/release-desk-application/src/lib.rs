@@ -9,6 +9,3 @@ pub mod use_case;
 pub use event::{AppEvent, EventBroadcaster};
 pub use job_coordinator::JobCoordinator;
 pub use provider_registry::ProviderRegistry;
-pub use use_case::{
-    AnalyzeLegacySetupUseCase, ExecuteLegacyMigrationUseCase, PreviewMigrationPlanUseCase,
-};

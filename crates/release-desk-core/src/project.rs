@@ -215,14 +215,14 @@ mod tests {
 
     #[test]
     fn test_disk_layout_path_computation() {
-        let root = PathBuf::from("/Users/devansh/Projects/MyFleet");
+        let root = PathBuf::from("/Users/example/Projects/MyFleet");
         assert_eq!(
             DiskLayout::Grouped.compute_clone_path(&root, "storytold", "photocraft"),
-            PathBuf::from("/Users/devansh/Projects/MyFleet/storytold/photocraft")
+            PathBuf::from("/Users/example/Projects/MyFleet/storytold/photocraft")
         );
         assert_eq!(
             DiskLayout::Flat.compute_clone_path(&root, "storytold", "photocraft"),
-            PathBuf::from("/Users/devansh/Projects/MyFleet/photocraft")
+            PathBuf::from("/Users/example/Projects/MyFleet/photocraft")
         );
     }
 }

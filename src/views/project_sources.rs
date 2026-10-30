@@ -11,7 +11,7 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
     Animation, AnimationExt as _, Context, Entity, IntoElement, ParentElement as _, Styled as _,
-    Window, div, img, px,
+    StyledImage as _, Window, div, img, px,
 };
 use release_desk_application::use_case::profile_ingestion::RepoClonePlan;
 use release_desk_core::project::DiskLayout;
@@ -61,43 +61,46 @@ pub(crate) fn profile_image<T: 'static>(
     cx: &Context<T>,
 ) -> gpui_kit::AnyElement {
     if let Some((_, path)) = source.avatar_cache_request() {
-        if path.is_file() {
-            return div()
-                .relative()
-                .w(px(52.))
-                .h(px(52.))
-                .child(
-                    img(path)
-                        .w(px(52.))
-                        .h(px(52.))
-                        .rounded_full()
-                        .border_2()
-                        .border_color(cx.theme().border),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .bottom(px(-2.))
-                        .right(px(-2.))
-                        .w(px(20.))
-                        .h(px(20.))
-                        .rounded_full()
-                        .bg(cx.theme().background)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            crate::components::provider_icon::provider_icon(provider_choice(
-                                &source.provider,
-                            ))
-                            .w(px(12.))
-                            .h(px(12.)),
-                        ),
-                )
-                .into_any_element();
-        }
+        let fallback_name = source.handle.clone();
+        return div()
+            .relative()
+            .w(px(52.))
+            .h(px(52.))
+            .child(
+                img(path)
+                    .w(px(52.))
+                    .h(px(52.))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(cx.theme().border)
+                    .with_fallback(move || {
+                        crate::components::avatar::repo_initials_badge(&fallback_name, 52.)
+                            .into_any_element()
+                    }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(-2.))
+                    .right(px(-2.))
+                    .w(px(20.))
+                    .h(px(20.))
+                    .rounded_full()
+                    .bg(cx.theme().background)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        crate::components::provider_icon::provider_icon(provider_choice(
+                            &source.provider,
+                        ))
+                        .w(px(12.))
+                        .h(px(12.)),
+                    ),
+            )
+            .into_any_element();
     }
 
     let initial = source
@@ -172,6 +175,8 @@ pub fn render_project_sources<
     search: &Entity<InputState>,
     dialog: SourceDialog,
     busy: bool,
+    destinations: &std::collections::HashMap<(usize, usize), bool>,
+    destinations_pending: bool,
     cx: &Context<T>,
     on_add: FAdd,
     on_remove: FRemove,
@@ -406,6 +411,7 @@ pub fn render_project_sources<
                     .primary().disabled(busy)
                     .on_click(cx.listener(move |this, _, window, cx| on_add(this, window, cx)))))
             .into_any_element(),
+        SourceDialog::Select(_source_index) if destinations_pending => div().absolute().inset_0().bg(cx.theme().background.opacity(0.96)).flex().flex_col().gap_3().items_center().justify_center().child("Checking repository destinations…").child(Button::new("cancel-checking-destinations").label("Cancel").outline().on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Closed, this, cx)))).into_any_element(),
         SourceDialog::Select(source_index) => {
             if let Some(source) = sources.get(source_index) {
                 let query = search.read(cx).value().to_string();
@@ -415,13 +421,7 @@ pub fn render_project_sources<
                 let mut actionable_count = 0;
                 for (repo_index, repo) in source.repositories.iter().enumerate() {
                     let selected = repo.selected;
-                    let clone_path = crate::repository_git::resolve_target_path(
-                        project_directory,
-                        disk_layout,
-                        crate::repository_git::repository_owner(source, repo),
-                        &repo.name,
-                    );
-                    let already_managed = selected && std::fs::symlink_metadata(&clone_path).is_ok();
+                    let already_managed = selected && destinations.get(&(source_index, repo_index)).copied().unwrap_or(true);
                     if selected && !already_managed { actionable_count += 1; }
                     if already_managed {
                         already_managed_count += 1;
@@ -618,11 +618,12 @@ pub fn render_project_sources<
                     .into_any_element()
             } else { div().into_any_element() }
         }
+        SourceDialog::Review(_source_index) if destinations_pending => div().absolute().inset_0().bg(cx.theme().background.opacity(0.96)).flex().flex_col().gap_3().items_center().justify_center().child("Checking repository destinations…").child(Button::new("cancel-checking-destinations").label("Cancel").outline().on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Closed, this, cx)))).into_any_element(),
         SourceDialog::Review(source_index) => {
             let Some(source) = sources.get(source_index) else { return div().relative().child(content).into_any_element(); };
             let mut plans = div().flex().flex_col().gap_2();
             let mut count = 0;
-            for repo in &source.repositories {
+            for (repo_index, repo) in source.repositories.iter().enumerate() {
                 if !repo.selected { continue; }
                 let target = crate::repository_git::resolve_target_path(
                     project_directory,
@@ -630,7 +631,7 @@ pub fn render_project_sources<
                     crate::repository_git::repository_owner(source, repo),
                     &repo.name,
                 );
-                if std::fs::symlink_metadata(&target).is_ok() { continue; }
+                if destinations.get(&(source_index, repo_index)).copied().unwrap_or(true) { continue; }
                 count += 1;
                 plans = plans.child(div().p_3().rounded_lg().border_1().border_color(cx.theme().border)
                     .flex().flex_col().gap_1()

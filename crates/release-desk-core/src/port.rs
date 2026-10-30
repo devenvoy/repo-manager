@@ -162,15 +162,6 @@ pub trait ProjectBackupPort: Send + Sync {
     ) -> Result<MismatchReport, DomainError>;
 }
 
-/// Abstract legacy setup scanner port for discovering old workspaces, scripts, and snapshots.
-pub trait LegacyScannerPort: Send + Sync {
-    /// Inspect a legacy filesystem path in read-only mode and produce an analysis.
-    fn scan(&self, path: &Path) -> Result<crate::migration::LegacySetupAnalysis, DomainError>;
-
-    /// Compute a deterministic fingerprint of the source directory for immutability verification.
-    fn compute_fingerprint(&self, path: &Path) -> Result<String, DomainError>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

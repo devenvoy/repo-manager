@@ -20,7 +20,7 @@ pub fn render_welcome<T: 'static>(
         .child("Your releases, one organized place.")
         .child(
             "Choose where Release Desk should create its managed library. \
-             ArtCraft stays where it is and its data.json is linked read-only.",
+             The selected project stays where it is and its snapshot is linked read-only.",
         )
         .child(
             Form::new()
@@ -31,14 +31,14 @@ pub fn render_welcome<T: 'static>(
                 )
                 .child(
                     Field::new()
-                        .label("ArtCraft snapshot")
+                        .label("Project snapshot")
                         .child(Input::new(path_input)),
                 ),
         )
         .child(
             Button::new("create-library")
                 .primary()
-                .label("Create library and open ArtCraft")
+                .label("Create library and open project")
                 .on_click(cx.listener(move |this, _, _, cx| on_create(this, cx))),
         )
 }

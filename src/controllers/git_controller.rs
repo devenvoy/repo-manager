@@ -754,37 +754,30 @@ impl ReleaseDesk {
         else {
             return;
         };
-        let targets = match crate::repository_git::targets(&project) {
-            Ok(targets) if !targets.is_empty() => targets
-                .into_iter()
-                .filter(|target| target.source_index == source_index && !target.path.exists())
-                .collect::<Vec<_>>(),
-            Ok(_) => {
-                self.message = "Select at least one repository first.".into();
-                cx.notify();
-                return;
-            }
-            Err(error) => {
-                self.message = error;
-                cx.notify();
-                return;
-            }
-        };
-        if targets.is_empty() {
-            self.message = "That repository is no longer selected.".into();
-            cx.notify();
-            return;
-        }
         let project_id = project.id;
         let revision = self.workspace_revision;
         self.source_dialog = crate::views::project_sources::SourceDialog::Closed;
         self.project_section = ProjectSection::Repositories;
         self.git_busy = true;
         self.git_statuses.clear();
-        self.message = format!("Cloning {} repositories…", targets.len());
+        self.message = "Preparing repositories for cloning…".into();
         cx.notify();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let targets = match crate::repository_git::targets(&project) {
+                Ok(targets) => targets
+                    .into_iter()
+                    .filter(|target| target.source_index == source_index && !target.path.exists())
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    let _ = tx.send((true, error));
+                    return;
+                }
+            };
+            if targets.is_empty() {
+                let _ = tx.send((true, "No selected repositories need cloning.".into()));
+                return;
+            }
             let mut results = Vec::new();
             let mut cloned_targets = Vec::new();
             for (index, target) in targets.iter().enumerate() {
@@ -832,13 +825,11 @@ impl ReleaseDesk {
                 match rx.try_recv() {
                     Ok((finished, message)) => {
                         let _ = this.update_in(cx, |this, _, cx| {
-                            if finished {
-                                this.git_busy = false;
-                            }
                             if this.selected_project_id == Some(project_id)
                                 && this.workspace_revision == revision
                             {
                                 if finished {
+                                    this.git_busy = false;
                                     this.git_statuses.clear();
                                     this.refresh_project_icon_views(project_id, cx);
                                 }
@@ -852,9 +843,13 @@ impl ReleaseDesk {
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         let _ = this.update_in(cx, |this, _, cx| {
-                            this.git_busy = false;
-                            this.message = "Clone operation stopped unexpectedly.".into();
-                            cx.notify();
+                            if this.selected_project_id == Some(project_id)
+                                && this.workspace_revision == revision
+                            {
+                                this.git_busy = false;
+                                this.message = "Clone operation stopped unexpectedly.".into();
+                                cx.notify();
+                            }
                         });
                         return;
                     }
@@ -882,34 +877,33 @@ impl ReleaseDesk {
         else {
             return;
         };
-        let targets = match crate::repository_git::targets(&project) {
-            Ok(targets) => targets,
-            Err(error) => {
-                self.message = error;
-                cx.notify();
-                return;
-            }
-        };
-        let Some(target) = targets
-            .into_iter()
-            .find(|t| t.source_index == source_index && t.repo_index == repo_index)
-        else {
-            self.message = "Repository is no longer selected.".into();
-            cx.notify();
-            return;
-        };
-        if target.path.exists() {
-            self.message = format!("{}: already exists on disk.", target.name);
-            cx.notify();
-            return;
-        }
         let project_id = project.id;
         let revision = self.workspace_revision;
         self.git_busy = true;
-        self.message = format!("Cloning {}…", target.name);
+        self.message = "Preparing repository for cloning…".into();
         cx.notify();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let target = match crate::repository_git::targets(&project) {
+                Ok(targets) => targets
+                    .into_iter()
+                    .find(|target| {
+                        target.source_index == source_index && target.repo_index == repo_index
+                    })
+                    .ok_or_else(|| "Repository is no longer selected.".to_string()),
+                Err(error) => Err(error),
+            };
+            let target = match target {
+                Ok(target) => target,
+                Err(error) => {
+                    let _ = tx.send(Err(error));
+                    return;
+                }
+            };
+            if target.path.exists() {
+                let _ = tx.send(Err(format!("{}: already exists on disk.", target.name)));
+                return;
+            }
             let result = crate::repository_git::clone_selected(&project, source_index, repo_index);
             if matches!(&result, Ok(release_desk_git::SyncOutcome::Cloned { .. })) {
                 crate::modules::icon_agent::generate_for_target(&project, &target);
@@ -925,7 +919,7 @@ impl ReleaseDesk {
                 Err(error) => format!("{}: clone failed: {error}", target.name),
             };
             let status = crate::repository_git::inspect(&target);
-            let _ = tx.send((status, outcome_msg));
+            let _ = tx.send(Ok((status, outcome_msg)));
         });
         cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -933,12 +927,12 @@ impl ReleaseDesk {
                     .timer(std::time::Duration::from_millis(100))
                     .await;
                 match rx.try_recv() {
-                    Ok((status, outcome_msg)) => {
+                    Ok(Ok((status, outcome_msg))) => {
                         let _ = this.update_in(cx, |this, _, cx| {
-                            this.git_busy = false;
                             if this.selected_project_id == Some(project_id)
                                 && this.workspace_revision == revision
                             {
+                                this.git_busy = false;
                                 if let Some(existing) = this.git_statuses.iter_mut().find(|s| {
                                     s.source_index == status.source_index
                                         && s.repo_index == status.repo_index
@@ -955,11 +949,27 @@ impl ReleaseDesk {
                         });
                         return;
                     }
+                    Ok(Err(error)) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            if this.selected_project_id == Some(project_id)
+                                && this.workspace_revision == revision
+                            {
+                                this.git_busy = false;
+                                this.message = error;
+                                cx.notify();
+                            }
+                        });
+                        return;
+                    }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         let _ = this.update_in(cx, |this, _, cx| {
-                            this.git_busy = false;
-                            this.message = "Clone operation stopped unexpectedly.".into();
-                            cx.notify();
+                            if this.selected_project_id == Some(project_id)
+                                && this.workspace_revision == revision
+                            {
+                                this.git_busy = false;
+                                this.message = "Clone operation stopped unexpectedly.".into();
+                                cx.notify();
+                            }
                         });
                         return;
                     }
@@ -985,29 +995,27 @@ impl ReleaseDesk {
         else {
             return;
         };
-        let targets = match crate::repository_git::targets(&project) {
-            Ok(targets) => targets
-                .into_iter()
-                .filter(|target| !target.path.exists())
-                .collect::<Vec<_>>(),
-            Err(error) => {
-                self.message = error;
-                cx.notify();
-                return;
-            }
-        };
-        if targets.is_empty() {
-            self.message = "All selected repositories are already cloned.".into();
-            cx.notify();
-            return;
-        }
         let project_id = project.id;
         let revision = self.workspace_revision;
         self.git_busy = true;
-        self.message = format!("Cloning {} missing repositories…", targets.len());
+        self.message = "Preparing missing repositories for cloning…".into();
         cx.notify();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let targets = match crate::repository_git::targets(&project) {
+                Ok(targets) => targets
+                    .into_iter()
+                    .filter(|target| !target.path.exists())
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    let _ = tx.send((true, error));
+                    return;
+                }
+            };
+            if targets.is_empty() {
+                let _ = tx.send((true, "All selected repositories are already cloned.".into()));
+                return;
+            }
             let mut results = Vec::new();
             let mut cloned_targets = Vec::new();
             for (index, target) in targets.iter().enumerate() {
@@ -1055,18 +1063,14 @@ impl ReleaseDesk {
                 match rx.try_recv() {
                     Ok((finished, message)) => {
                         let _ = this.update_in(cx, |this, _, cx| {
-                            if finished {
-                                this.git_busy = false;
-                                if this.selected_project_id == Some(project_id)
-                                    && this.workspace_revision == revision
-                                {
-                                    this.refresh_project_icon_views(project_id, cx);
-                                    this.check_repository_updates(None, true, cx);
-                                }
-                            }
                             if this.selected_project_id == Some(project_id)
                                 && this.workspace_revision == revision
                             {
+                                if finished {
+                                    this.git_busy = false;
+                                    this.refresh_project_icon_views(project_id, cx);
+                                    this.check_repository_updates(None, true, cx);
+                                }
                                 this.message = message;
                             }
                             cx.notify();
@@ -1077,9 +1081,13 @@ impl ReleaseDesk {
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         let _ = this.update_in(cx, |this, _, cx| {
-                            this.git_busy = false;
-                            this.message = "Clone operation stopped unexpectedly.".into();
-                            cx.notify();
+                            if this.selected_project_id == Some(project_id)
+                                && this.workspace_revision == revision
+                            {
+                                this.git_busy = false;
+                                this.message = "Clone operation stopped unexpectedly.".into();
+                                cx.notify();
+                            }
                         });
                         return;
                     }

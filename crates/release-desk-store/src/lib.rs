@@ -11,11 +11,10 @@ pub mod credentials;
 pub mod downloader;
 pub mod github_client;
 pub mod gitlab_client;
-pub mod legacy_scanner;
-pub mod migration;
 pub mod project_backup;
 pub mod provider_releases;
 pub mod scheduler;
+pub mod schema;
 pub mod source_fetcher;
 pub mod sqlite_store;
 
@@ -24,13 +23,11 @@ pub use auth::{
     LocalOAuthServer, ModalWebviewAuthPort, OAuthRedirectOutcome, SystemBrowserAuthPort,
 };
 pub use bitbucket_client::HttpBitbucketGateway;
-pub use boundary::{BoundaryError, FORBIDDEN_ARTCRAFT_ROOT, ManagedLibrary};
+pub use boundary::{BoundaryError, ManagedLibrary};
 pub use credentials::OsSecretStore;
 pub use downloader::HttpDownloadPort;
 pub use github_client::HttpGitHubGateway;
 pub use gitlab_client::HttpGitLabGateway;
-pub use legacy_scanner::{SystemLegacyScanner, compute_source_fingerprint, scan_legacy_setup};
-pub use migration::{MigrationError, migrate as run_migrations};
 pub use project_backup::{MismatchReport, ProjectSnapshotManager, RevisionMismatch};
 pub use scheduler::OsSchedulerPort;
 pub use source_fetcher::{
@@ -152,7 +149,7 @@ impl Store {
         let snapshot = parse_snapshot(&raw)?;
 
         // Resolve an existing ancestor before creating anything, so an invalid
-        // destination inside the linked ArtCraft folder stays untouched.
+        // destination inside the linked source folder stays untouched.
         let parent = canonical_future_path(library_parent)?;
         let library_root = parent.join(LIBRARY_DIR);
         if path_overlaps(&library_root, &source_root) {
@@ -165,11 +162,16 @@ impl Store {
             return Err(StoreError::LibraryOverlapsSource);
         }
         let mut connection = open_database(&library_root)?;
-        migrate(&connection)?;
+        initialize_store_schema(&connection)?;
 
         let project = Project {
             id: Uuid::new_v4().to_string(),
-            name: "ArtCraft".into(),
+            name: source_root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or("Imported project")
+                .to_string(),
             account: snapshot.org,
             linked_snapshot: snapshot_path,
         };
@@ -202,7 +204,7 @@ impl Store {
         let config = read_config(config_path)?;
         let library_root = config.library_root.canonicalize()?;
         let connection = open_database(&library_root)?;
-        migrate(&connection)?;
+        initialize_store_schema(&connection)?;
         Ok(Self {
             connection,
             library_root,
@@ -361,13 +363,11 @@ fn open_database(root: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
-fn migrate(connection: &Connection) -> Result<()> {
+fn initialize_store_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
-         CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, account TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);\
+        "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, account TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);\
          CREATE TABLE IF NOT EXISTS linked_sources (project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE, snapshot_path TEXT NOT NULL, source_root TEXT NOT NULL);\
-         CREATE TABLE IF NOT EXISTS snapshot_cache (project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE, body TEXT NOT NULL, generated TEXT NOT NULL);\
-         INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, CURRENT_TIMESTAMP);",
+         CREATE TABLE IF NOT EXISTS snapshot_cache (project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE, body TEXT NOT NULL, generated TEXT NOT NULL);",
     )?;
     Ok(())
 }
@@ -424,6 +424,26 @@ mod tests {
             store.cached_snapshot(&project).expect("cache").snapshot.org,
             "storytold"
         );
+    }
+
+    #[test]
+    fn linked_project_uses_the_chosen_source_name() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let source = temp.path().join("AnotherProject/.release-desk");
+        fs::create_dir_all(&source).expect("source directory");
+        let snapshot = source.join("data.json");
+        fs::write(
+            &snapshot,
+            r#"{"org":"owner","generated":"2026-01-01T00:00:00Z","repos":[]}"#,
+        )
+        .expect("snapshot");
+        let project = Store::initialize_at(
+            &temp.path().join("config.json"),
+            &temp.path().join("library"),
+            &snapshot,
+        )
+        .expect("initialize");
+        assert_eq!(project.name, "AnotherProject");
     }
 
     #[test]

@@ -195,9 +195,9 @@ mod tests {
         assert_eq!(gl.provider, GitProviderKind::GitLab);
         assert_eq!(gl.login.as_str(), "cloud-ops");
 
-        let handle = parse_profile_input("@devanshpc", GitProviderKind::GitHub).unwrap();
+        let handle = parse_profile_input("@example-user", GitProviderKind::GitHub).unwrap();
         assert_eq!(handle.provider, GitProviderKind::GitHub);
-        assert_eq!(handle.login.as_str(), "devanshpc");
+        assert_eq!(handle.login.as_str(), "example-user");
 
         assert!(parse_profile_input("", GitProviderKind::GitHub).is_err());
         assert!(parse_profile_input("https://github.com/", GitProviderKind::GitHub).is_err());
@@ -208,7 +208,7 @@ mod tests {
         let use_case = IngestProfileUseCase::new();
         let id = ProjectId::from_u128(100);
         let name = ProjectName::new("Fleet").unwrap();
-        let root = PathBuf::from("/Users/devansh/Codes");
+        let root = PathBuf::from("/Users/example/Codes");
 
         let grouped_proj =
             ProjectIdentity::with_clone_location(id, name.clone(), Some(root.clone()))
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(plans.len(), 1);
         assert_eq!(
             plans[0].target_path,
-            PathBuf::from("/Users/devansh/Codes/storytold/photocraft")
+            PathBuf::from("/Users/example/Codes/storytold/photocraft")
         );
 
         let flat_proj = ProjectIdentity::with_clone_location(id, name, Some(root))
@@ -254,7 +254,7 @@ mod tests {
         assert_eq!(flat_plans.len(), 1);
         assert_eq!(
             flat_plans[0].target_path,
-            PathBuf::from("/Users/devansh/Codes/photocraft")
+            PathBuf::from("/Users/example/Codes/photocraft")
         );
     }
 }

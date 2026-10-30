@@ -46,29 +46,57 @@ impl ReleaseDesk {
         cx: &mut Context<Self>,
     ) {
         let cred_key = format!("release_desk_{}_{}", self.setup_provider.as_str(), handle);
-        match self.secret_store.get_secret(&cred_key) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                self.message = "Saved account credential is missing. Connect again.".into();
-                cx.notify();
-                return;
-            }
-            Err(error) => {
-                self.message = format!("Cannot read saved account: {error}");
-                cx.notify();
-                return;
-            }
-        }
-        self.selected_saved_account = Some(handle.clone());
-        self.saved_credential_ref = Some(cred_key);
-        self.auth_mode_choice = AuthModeChoice::SavedAccount;
-        self.auth_status_message = Some(format!(
-            "Using Keychain credentials for @{}. No token needed!",
-            handle
-        ));
-        self.account_input
-            .update(cx, |input, cx| input.set_value(handle, window, cx));
+        let secret_store = self.secret_store.clone();
+        let provider = self.setup_provider;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.message = "Checking saved account…".into();
         cx.notify();
+        let key_for_lookup = cred_key.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(secret_store.get_secret(&key_for_lookup));
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match rx.try_recv() {
+                    Ok(result) => {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            if !this.setup_active || this.setup_provider != provider {
+                                return;
+                            }
+                            match result {
+                                Ok(Some(_)) => {
+                                    this.selected_saved_account = Some(handle.clone());
+                                    this.saved_credential_ref = Some(cred_key);
+                                    this.auth_mode_choice = AuthModeChoice::SavedAccount;
+                                    this.auth_status_message = Some(format!(
+                                        "Using Keychain credentials for @{handle}. No token needed!"
+                                    ));
+                                    this.account_input.update(cx, |input, cx| {
+                                        input.set_value(handle, window, cx)
+                                    });
+                                    this.message.clear();
+                                }
+                                Ok(None) => {
+                                    this.message =
+                                        "Saved account credential is missing. Connect again.".into()
+                                }
+                                Err(error) => {
+                                    this.message = format!("Cannot read saved account: {error}")
+                                }
+                            }
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn disconnect_credential(&mut self, window: &mut Window, cx: &mut Context<Self>) {

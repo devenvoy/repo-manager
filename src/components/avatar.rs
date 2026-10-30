@@ -83,17 +83,23 @@ pub fn source_avatar(
     theme: &Theme,
 ) -> impl IntoElement {
     if let Some(path) = avatar_file {
-        if path.is_file() {
-            return div()
-                .w(px(size))
-                .h(px(size))
-                .rounded_full()
-                .border_2()
-                .border_color(theme.border)
-                .overflow_hidden()
-                .child(img(path.to_path_buf()).size_full().rounded_full())
-                .into_any_element();
-        }
+        let fallback_name = handle.to_string();
+        return div()
+            .w(px(size))
+            .h(px(size))
+            .rounded_full()
+            .border_2()
+            .border_color(theme.border)
+            .overflow_hidden()
+            .child(
+                img(path.to_path_buf())
+                    .size_full()
+                    .rounded_full()
+                    .with_fallback(move || {
+                        repo_initials_badge(&fallback_name, size).into_any_element()
+                    }),
+            )
+            .into_any_element();
     }
 
     let initial = handle

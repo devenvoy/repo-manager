@@ -17,6 +17,15 @@ use gpui_kit::{
 use release_desk_core::app_catalog::AppActionState;
 use std::{collections::HashMap, path::Path};
 
+fn matches_store_filter(filter: StoreFilter, state: Option<&AppActionState>) -> bool {
+    match filter {
+        StoreFilter::All => true,
+        StoreFilter::Installed => state.is_some_and(AppActionState::is_installed),
+        StoreFilter::Updates => state.is_some_and(AppActionState::requires_update),
+        StoreFilter::Available => matches!(state, Some(AppActionState::Installable)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_store<
     T: 'static,
@@ -75,21 +84,7 @@ pub fn render_store<
         .copied()
         .filter(|item| {
             (category == "All" || item.display_category() == category)
-                && match filter {
-                    StoreFilter::All => true,
-                    StoreFilter::Installed => install_states
-                        .get(&item.key)
-                        .is_some_and(AppActionState::is_installed),
-                    StoreFilter::Updates => install_states
-                        .get(&item.key)
-                        .is_some_and(AppActionState::requires_update),
-                    StoreFilter::Available => {
-                        matches!(
-                            install_states.get(&item.key),
-                            Some(AppActionState::Installable)
-                        )
-                    }
-                }
+                && matches_store_filter(filter, install_states.get(&item.key))
                 && (query.is_empty()
                     || item.display_name().to_lowercase().contains(&query)
                     || item.description.to_lowercase().contains(&query)
@@ -910,7 +905,34 @@ fn platform_label() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_date, note_lines};
+    use super::{format_date, matches_store_filter, note_lines};
+    use crate::controllers::store_controller::StoreFilter;
+    use release_desk_core::app_catalog::AppActionState;
+
+    #[test]
+    fn filters_use_cached_state_and_do_not_assume_unknown_is_installable() {
+        let update = AppActionState::UpdateAvailable {
+            installed_version: "1".into(),
+            latest_version: "2".into(),
+        };
+        let installed = AppActionState::UpToDate {
+            version: "1".into(),
+        };
+        assert!(matches_store_filter(StoreFilter::All, None));
+        assert!(!matches_store_filter(StoreFilter::Installed, None));
+        assert!(!matches_store_filter(StoreFilter::Updates, None));
+        assert!(!matches_store_filter(StoreFilter::Available, None));
+        assert!(matches_store_filter(StoreFilter::Updates, Some(&update)));
+        assert!(matches_store_filter(StoreFilter::Installed, Some(&update)));
+        assert!(matches_store_filter(
+            StoreFilter::Installed,
+            Some(&installed)
+        ));
+        assert!(matches_store_filter(
+            StoreFilter::Available,
+            Some(&AppActionState::Installable)
+        ));
+    }
 
     #[test]
     fn release_notes_hide_markdown_noise_and_raw_links() {

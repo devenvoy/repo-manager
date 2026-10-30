@@ -5,7 +5,6 @@ pub mod error;
 pub mod git;
 pub mod installer;
 pub mod job;
-pub mod migration;
 pub mod model;
 pub mod port;
 pub mod project;
@@ -25,10 +24,7 @@ pub use app_catalog::{
 pub use error::{DomainError, ValidationError};
 pub use git::GitSyncState;
 pub use installer::{Asset, AssetConnection, InstallerExtension, InstallerStatus};
-pub use migration::{
-    LegacySetupAnalysis, LegacySetupKind, MigrationAction, MigrationPlan, MigrationResult,
-};
-pub use port::{LegacyScannerPort, ProjectBackupPort};
+pub use port::ProjectBackupPort;
 pub use project::{
     AccountIdentity, AccountKind, AccountLogin, DiskLayout, ProfileSource, ProjectId,
     ProjectIdentity, ProjectName, SelectableRepo, TrackingPreferences,

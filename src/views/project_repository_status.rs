@@ -383,6 +383,7 @@ pub fn render_project_repository_status<
     languages_expanded: &std::collections::HashSet<(usize, usize)>,
     language_breakdowns: &std::collections::HashMap<(usize, usize), LanguageBreakdownState>,
     selected_editor_id: &str,
+    editors: &[ExternalEditor],
     editor_menu_open: bool,
     cx: &Context<T>,
     on_check: FCheck,
@@ -990,7 +991,6 @@ pub fn render_project_repository_status<
             );
 
         // Horizontal directory row with installed IDE dropdown and Open button
-        let editors = available_editors();
         let current_editor = editors
             .iter()
             .find(|e| e.id == selected_editor_id)
@@ -1004,7 +1004,7 @@ pub fn render_project_repository_status<
             });
 
         let mut menu_items = div().flex().flex_col().gap_0p5();
-        for editor in &editors {
+        for editor in editors {
             let is_selected = editor.id == current_editor.id;
             let ed_id = editor.id.to_string();
             let mut item = div()

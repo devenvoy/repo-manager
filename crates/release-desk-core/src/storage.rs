@@ -3,7 +3,6 @@
 use crate::error::ValidationError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-
 /// A strictly validated relative path inside managed storage.
 ///
 /// Guaranteed never to escape its root: no leading slashes, no `..`, no `:` (Windows drives/streams),

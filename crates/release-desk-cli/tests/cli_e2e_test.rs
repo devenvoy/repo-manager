@@ -5,8 +5,6 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
-const ARTCRAFT_FILE: &str = "/Volumes/Devansh2/codes/ArtCraft/.release-desk/data.json";
-
 fn login_with_stdin(binary: &str, library_dir: &Path, provider: &str, token: &str) -> Output {
     use std::io::Write as _;
     let mut child = Command::new(binary)
@@ -40,17 +38,6 @@ fn e2e_cli_full_workflow_test() {
     let temp = tempfile::tempdir().expect("tempdir");
     let library_dir = temp.path().join("library");
     let project_clone_dir = temp.path().join("project_clones/ArtCraftApp");
-
-    // Pre-record ArtCraft hash if the file exists and is readable
-    let artcraft_path = Path::new(ARTCRAFT_FILE);
-    let original_artcraft_hash = if let Ok(bytes) = fs::read(artcraft_path) {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        Some(format!("{:x}", hasher.finalize()))
-    } else {
-        None
-    };
 
     // ---------------------------------------------------------
     // 1. release-desk init
@@ -328,19 +315,4 @@ fn e2e_cli_full_workflow_test() {
     let backup_json: Value = serde_json::from_slice(&backup_out.stdout).expect("valid json");
     assert!(backup_json["bytes_written"].as_u64().unwrap() > 0);
     assert!(archive_dest.exists());
-
-    // ---------------------------------------------------------
-    // 10. ArtCraft Safety Verification: File was NOT touched
-    // ---------------------------------------------------------
-    if let Some(expected_hash) = original_artcraft_hash {
-        let current_bytes = fs::read(artcraft_path).expect("read artcraft file again");
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&current_bytes);
-        let current_hash = format!("{:x}", hasher.finalize());
-        assert_eq!(
-            expected_hash, current_hash,
-            "SAFETY VIOLATION: ArtCraft data.json was modified during CLI execution!"
-        );
-    }
 }

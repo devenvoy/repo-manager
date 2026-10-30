@@ -58,6 +58,9 @@ pub struct ReleaseDesk {
     pub(crate) repo_search: Entity<InputState>,
     pub(crate) source_dialog: views::project_sources::SourceDialog,
     pub(crate) source_busy: bool,
+    pub(crate) source_destinations: std::collections::HashMap<(usize, usize), bool>,
+    pub(crate) source_destination_pending: bool,
+    pub(crate) source_destination_revision: u64,
     pub(crate) store_items: Vec<crate::store_catalog::StoreApp>,
     pub(crate) selected_app_id: Option<String>,
     pub(crate) selected_store_release: Option<String>,
@@ -90,6 +93,7 @@ pub struct ReleaseDesk {
     >,
     pub(crate) commits_collapsed: bool,
     pub(crate) selected_editor_id: String,
+    pub(crate) available_editors: Vec<views::project_repository_status::ExternalEditor>,
     pub(crate) editor_menu_open: bool,
     pub(crate) git_busy: bool,
     pub(crate) project_cache_status: Option<crate::controllers::git_controller::ProjectCacheStatus>,
@@ -222,18 +226,40 @@ impl ReleaseDesk {
             webview_auth.clone(),
             EventBroadcaster::default(),
         );
-        let selected_editor_id =
-            if views::project_repository_status::is_app_installed("Visual Studio Code") {
-                "vscode".to_string()
-            } else if views::project_repository_status::is_app_installed("Cursor") {
-                "cursor".to_string()
-            } else if views::project_repository_status::is_app_installed("Xcode") {
-                "xcode".to_string()
-            } else if views::project_repository_status::is_app_installed("Android Studio") {
-                "android-studio".to_string()
-            } else {
-                "finder".to_string()
-            };
+        let selected_editor_id = "finder".to_string();
+        let (editor_tx, editor_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = editor_tx.send(views::project_repository_status::available_editors());
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                match editor_rx.try_recv() {
+                    Ok(editors) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            if this.selected_editor_id == "finder" {
+                                if let Some(editor) = editors.iter().find(|editor| {
+                                    matches!(
+                                        editor.id,
+                                        "vscode" | "cursor" | "xcode" | "android-studio"
+                                    )
+                                }) {
+                                    this.selected_editor_id = editor.id.to_string();
+                                }
+                            }
+                            this.available_editors = editors;
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        })
+        .detach();
         let catalog_path = crate::store_catalog::catalog_path(&crate::workspace::expand_directory(
             &settings.library_dir,
         ));
@@ -296,6 +322,9 @@ impl ReleaseDesk {
             repo_search,
             source_dialog: Default::default(),
             source_busy: false,
+            source_destinations: Default::default(),
+            source_destination_pending: false,
+            source_destination_revision: 0,
             store_items,
             selected_app_id: None,
             selected_store_release: None,
@@ -320,6 +349,7 @@ impl ReleaseDesk {
             language_breakdowns: Default::default(),
             commits_collapsed: false,
             selected_editor_id,
+            available_editors: Vec::new(),
             editor_menu_open: false,
             git_busy: false,
             project_cache_status: None,
@@ -362,14 +392,15 @@ impl ReleaseDesk {
             .iter()
             .flat_map(|project| &project.sources)
             .filter_map(WorkspaceSource::avatar_cache_request)
-            .filter(|(_, path)| !path.is_file())
             .collect();
 
         if !download_requests.is_empty() {
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 for (url, path) in download_requests {
-                    let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path);
+                    if !path.is_file() {
+                        let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path);
+                    }
                 }
                 let _ = tx.send(());
             });
@@ -788,6 +819,8 @@ impl Render for ReleaseDesk {
                                 &self.source_search,
                                 self.source_dialog,
                                 self.source_busy,
+                                &self.source_destinations,
+                                self.source_destination_pending,
                                 cx,
                                 |this: &mut Self, window, cx| this.add_source(window, cx),
                                 |index, this: &mut Self, cx| this.remove_source(index, cx),
@@ -801,8 +834,7 @@ impl Render for ReleaseDesk {
                                     this.execute_clone_plan(source, window, cx)
                                 },
                                 |dialog, this: &mut Self, cx| {
-                                    this.source_dialog = dialog;
-                                    cx.notify();
+                                    this.set_source_dialog(dialog, cx);
                                 },
                                 |url, this: &mut Self, cx| this.open_source_url(&url, cx),
                             )
@@ -824,6 +856,7 @@ impl Render for ReleaseDesk {
                                 &self.languages_expanded,
                                 &self.language_breakdowns,
                                 &self.selected_editor_id,
+                                &self.available_editors,
                                 self.editor_menu_open,
                                 cx,
                                 |this: &mut Self, _window, cx| {
@@ -870,9 +903,11 @@ impl Render for ReleaseDesk {
                                 },
                                 |path, editor_id, this: &mut Self, cx| {
                                     this.editor_menu_open = false;
-                                    views::project_repository_status::open_path_in_editor(
-                                        &path, &editor_id,
-                                    );
+                                    std::thread::spawn(move || {
+                                        views::project_repository_status::open_path_in_editor(
+                                            &path, &editor_id,
+                                        )
+                                    });
                                     cx.notify();
                                 },
                             )

@@ -263,7 +263,7 @@ pub fn render_project_setup<T: 'static>(
                         ),
                 );
             } else {
-                // If a system credential (e.g. devenvoy from macOS Keychain / gh CLI) was detected:
+                // If a system credential (e.g. example from macOS Keychain / gh CLI) was detected:
                 if let Some((ref username, _)) = props.system_credential {
                     let user_label = username.clone();
                     content = content.child(

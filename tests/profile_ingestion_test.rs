@@ -38,7 +38,7 @@ fn test_parse_profile_urls_across_hosts() {
 #[test]
 fn test_selectable_repos_selection_and_clone_planning() {
     let use_case = IngestProfileUseCase::new();
-    let root = PathBuf::from("/Users/devansh/Codes/Projects");
+    let root = PathBuf::from("/Users/example/Codes/Projects");
 
     let proj = ProjectIdentity::with_clone_location(
         ProjectId::from_u128(77),
@@ -80,11 +80,11 @@ fn test_selectable_repos_selection_and_clone_planning() {
     assert_eq!(plans.len(), 2);
     assert_eq!(
         plans[0].target_path,
-        PathBuf::from("/Users/devansh/Codes/Projects/storytold/photocraft")
+        PathBuf::from("/Users/example/Codes/Projects/storytold/photocraft")
     );
     assert_eq!(
         plans[1].target_path,
-        PathBuf::from("/Users/devansh/Codes/Projects/storytold/gridcraft")
+        PathBuf::from("/Users/example/Codes/Projects/storytold/gridcraft")
     );
 
     // Unselect one repo
@@ -103,7 +103,7 @@ fn test_selectable_repos_selection_and_clone_planning() {
         .unwrap();
     assert_eq!(
         flat_plans[0].target_path,
-        PathBuf::from("/Users/devansh/Codes/Projects/photocraft")
+        PathBuf::from("/Users/example/Codes/Projects/photocraft")
     );
 }
 

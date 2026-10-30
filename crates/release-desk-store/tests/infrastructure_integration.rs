@@ -22,7 +22,7 @@ fn real_sqlite_and_storage_lifecycle_integration() {
     let library = ManagedLibrary::new(&library_dir).expect("valid library root");
     let db_path = library_dir.join("release-desk.sqlite3");
 
-    // 1. Open SQLite database on disk (runs migrations automatically)
+    // 1. Open SQLite database on disk (initializes the current schema)
     let store = SqliteStore::open(&db_path, library.clone()).expect("open sqlite store");
     assert!(db_path.exists());
 

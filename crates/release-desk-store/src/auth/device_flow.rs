@@ -185,7 +185,7 @@ impl GitHubDeviceFlow {
         )))
     }
 
-    /// Fetch the authenticated GitHub user login handle (e.g. "devenvoy").
+    /// Fetch the authenticated GitHub user login handle (e.g. "example").
     pub fn fetch_user_login(&self, access_token: &str) -> Result<String, DomainError> {
         let url = format!("{}/user", self.api_base_url);
         let resp = self

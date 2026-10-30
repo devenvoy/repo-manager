@@ -14,47 +14,48 @@ impl ReleaseDesk {
             return;
         };
 
-        let Some(discovered) = crate::modules::importer::discover_workspace(&project.directory)
-        else {
-            self.message = format!(
-                "No metadata (.release-desk/data.json) or Git repositories found in project folder ({}).",
-                project.directory.display()
-            );
-            cx.notify();
-            return;
-        };
-
-        if discovered.repositories.is_empty() {
-            self.message = format!(
-                "No repositories found in project folder ({}).",
-                project.directory.display()
-            );
-            cx.notify();
-            return;
-        }
-
-        let state = views::import_dialog::ImportDialogState::new(
-            project.id,
-            project.directory,
-            discovered,
-            window,
-            cx,
-        );
-
-        // Pre-cache avatar proactively in background so it displays immediately in the dialog
-        if let Some(ref url) = state.discovered.avatar_url {
-            if let Some(ref path) = state.avatar_path {
-                let url_clone = url.clone();
-                let path_clone = path.clone();
-                std::thread::spawn(move || {
-                    let _ =
-                        release_desk_store::source_fetcher::cache_avatar(&url_clone, &path_clone);
-                });
-            }
-        }
-
-        self.import_dialog = Some(state);
+        let project_id = project.id;
+        let directory = project.directory;
+        let revision = self.workspace_revision;
+        let worker_directory = directory.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.message = "Searching project metadata…".into();
         cx.notify();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::modules::importer::discover_workspace(
+                &worker_directory,
+            ));
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                match rx.try_recv() {
+                    Ok(discovered) => {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            if this.workspace_revision != revision || this.selected_project_id != Some(project_id) { return; }
+                            let Some(discovered) = discovered.filter(|value| !value.repositories.is_empty()) else {
+                                this.message = format!("No metadata (.release-desk/data.json) or Git repositories found in project folder ({}).", directory.display());
+                                cx.notify();
+                                return;
+                            };
+                            let state = views::import_dialog::ImportDialogState::new(project_id, directory, discovered, window, cx);
+                            if let (Some(url), Some(path)) = (state.discovered.avatar_url.clone(), state.avatar_path.clone()) {
+                                std::thread::spawn(move || { let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path); });
+                            }
+                            this.import_dialog = Some(state);
+                            this.message.clear();
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let _ = this.update_in(cx, |this, _, cx| { if this.workspace_revision == revision { this.message = "Project search stopped unexpectedly.".into(); cx.notify(); } });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        }).detach();
     }
 
     pub(crate) fn toggle_import_repo(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -158,11 +159,11 @@ impl ReleaseDesk {
 
         // Cache avatar in background
         if let Some((url, path)) = avatar_req {
-            if !path.is_file() {
-                std::thread::spawn(move || {
+            std::thread::spawn(move || {
+                if !path.is_file() {
                     let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path);
-                });
-            }
+                }
+            });
         }
 
         self.message =

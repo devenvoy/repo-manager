@@ -218,21 +218,47 @@ impl ReleaseDesk {
             return;
         }
         let applications_dir = expand_directory(&self.settings.applications_dir);
-        if matches!(
-            app.state(&applications_dir),
-            AppActionState::UpToDate { .. }
-        ) {
-            let path = applications_dir.join(&app.bundle_name);
-            let launcher = InstallMacOsAppUseCase::new(HdiutilAdapter, applications_dir);
-            match launcher.launch_installed_app(&path) {
-                Ok(()) => self.message = format!("Opening {}…", app.display_name()),
-                Err(error) => {
-                    eprintln!("Store open failed for {}: {error}", app.display_name());
-                    self.message =
-                        format!("Couldn't open {}. Please try again.", app.display_name());
-                }
-            }
+        let Some(state) = self.store_install_states.get(&key).cloned() else {
+            self.message = "Checking installed app status…".into();
+            self.refresh_store_install_states(cx);
             cx.notify();
+            return;
+        };
+        if matches!(state, AppActionState::UpToDate { .. }) {
+            let path = applications_dir.join(&app.bundle_name);
+            let app_name = app.display_name();
+            self.message = format!("Opening {app_name}…");
+            cx.notify();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let launcher = InstallMacOsAppUseCase::new(HdiutilAdapter, applications_dir);
+                let _ = tx.send(launcher.launch_installed_app(&path));
+            });
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(100))
+                        .await;
+                    match rx.try_recv() {
+                        Ok(result) => {
+                            if let Some(this) = this.upgrade() {
+                                this.update(cx, |this, cx| {
+                                    if let Err(error) = result {
+                                        eprintln!("Store open failed for {app_name}: {error}");
+                                        this.message =
+                                            format!("Couldn't open {app_name}. Please try again.");
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                            return;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    }
+                }
+            })
+            .detach();
             return;
         }
         let Some(asset) = app.platform_asset().cloned() else {
@@ -246,16 +272,6 @@ impl ReleaseDesk {
         if self.store_activities.contains_key(&key) {
             return;
         }
-        let local_asset = app.platform_release().and_then(|release| {
-            release_desk_store::workspace_releases::local_release_asset(
-                &app.project_directory,
-                &app.owner,
-                &app.repository,
-                &release.tag,
-                &asset.name,
-                asset.size,
-            )
-        });
         let Some(project) = self
             .projects
             .iter()
@@ -295,53 +311,11 @@ impl ReleaseDesk {
                     })
             })
             .flatten();
-        let (token, username) =
-            if local_asset.is_none() && private && project.provider.as_str() == app.provider {
-                match project_auth_token(&project, &self.secret_store) {
-                    Ok(token) => (token, Some(project.account.clone())),
-                    Err(error) => {
-                        self.message = error;
-                        cx.notify();
-                        return;
-                    }
-                }
-            } else if local_asset.is_none() && private {
-                let host = custom_host
-                    .as_deref()
-                    .and_then(|value| url::Url::parse(value).ok())
-                    .and_then(|value| value.host_str().map(str::to_string))
-                    .unwrap_or_else(|| {
-                        crate::workspace::ProviderChoice::from_source_provider(&app.provider)
-                            .default_host()
-                            .to_string()
-                    });
-                match release_desk_store::OsSecretStore::discover_system_git_credentials(&host) {
-                    Some((username, token)) => (Some(token), Some(username)),
-                    None => (None, None),
-                }
-            } else {
-                (None, None)
-            };
-        if local_asset.is_none()
-            && private
-            && token.is_none()
-            && !crate::modules::release_service::signed_asset_url(&asset.download_url)
-        {
-            self.message =
-                "Connect the provider account before installing this private release.".into();
-            cx.notify();
-            return;
-        }
         let app_name = app.display_name();
-        let was_installed = app.state(&applications_dir).is_installed();
-        self.store_activities.insert(
-            key.clone(),
-            if local_asset.is_some() {
-                StoreActivity::Installing
-            } else {
-                StoreActivity::Downloading(None)
-            },
-        );
+        let was_installed = state.is_installed();
+        let secret_store = self.secret_store.clone();
+        self.store_activities
+            .insert(key.clone(), StoreActivity::Downloading(None));
         cx.notify();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -358,17 +332,65 @@ impl ReleaseDesk {
             let mut on_installing = || {
                 let _ = tx.send(StoreEvent::Installing);
             };
-            let result = install_or_download(
-                &app,
-                &asset,
-                token.as_deref(),
-                username.as_deref(),
-                custom_host.as_deref(),
-                &applications_dir,
-                local_asset,
-                &mut on_progress,
-                &mut on_installing,
-            );
+            let result = (|| {
+                let local_asset = app.platform_release().and_then(|release| {
+                    release_desk_store::workspace_releases::local_release_asset(
+                        &app.project_directory,
+                        &app.owner,
+                        &app.repository,
+                        &release.tag,
+                        &asset.name,
+                        asset.size,
+                    )
+                });
+                let (token, username) = if local_asset.is_none()
+                    && private
+                    && project.provider.as_str() == app.provider
+                {
+                    (
+                        project_auth_token(&project, &secret_store)?,
+                        Some(project.account.clone()),
+                    )
+                } else if local_asset.is_none() && private {
+                    let host = custom_host
+                        .as_deref()
+                        .and_then(|value| url::Url::parse(value).ok())
+                        .and_then(|value| value.host_str().map(str::to_string))
+                        .unwrap_or_else(|| {
+                            crate::workspace::ProviderChoice::from_source_provider(&app.provider)
+                                .default_host()
+                                .to_string()
+                        });
+                    secret_store
+                        .discover_cached_system_git_credentials(&host)
+                        .map_or((None, None), |(username, token)| {
+                            (Some(token), Some(username))
+                        })
+                } else {
+                    (None, None)
+                };
+                if local_asset.is_none()
+                    && private
+                    && token.is_none()
+                    && !crate::modules::release_service::signed_asset_url(&asset.download_url)
+                {
+                    return Err(
+                        "Connect the provider account before installing this private release."
+                            .to_string(),
+                    );
+                }
+                install_or_download(
+                    &app,
+                    &asset,
+                    token.as_deref(),
+                    username.as_deref(),
+                    custom_host.as_deref(),
+                    &applications_dir,
+                    local_asset,
+                    &mut on_progress,
+                    &mut on_installing,
+                )
+            })();
             let _ = tx.send(StoreEvent::Finished(result));
         });
         cx.spawn(async move |this, cx| {
@@ -377,11 +399,16 @@ impl ReleaseDesk {
                     .timer(std::time::Duration::from_millis(100))
                     .await;
                 let mut latest = None;
-                while let Ok(event) = rx.try_recv() {
-                    let done = matches!(event, StoreEvent::Finished(_));
-                    latest = Some(event);
-                    if done {
-                        break;
+                let mut disconnected = false;
+                loop {
+                    match rx.try_recv() {
+                        Ok(event) => {
+                            let done = matches!(event, StoreEvent::Finished(_));
+                            latest = Some(event);
+                            if done { break; }
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => { disconnected = true; break; }
                     }
                 }
                 match latest {
@@ -416,7 +443,7 @@ impl ReleaseDesk {
                                         format!("{app_name} is downloaded. Open the file to finish installing."),
                                     Err(error) => {
                                         eprintln!("Store install failed for {app_name}: {error}");
-                                        format!("Couldn't install {app_name}. Please try again.")
+                                        if error.starts_with("Connect the provider account") { error } else { format!("Couldn't install {app_name}. Please try again.") }
                                     }
                                 };
                                 cx.notify();
@@ -424,7 +451,7 @@ impl ReleaseDesk {
                         }
                         return;
                     }
-                    None if matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                    None if disconnected => {
                         if let Some(this) = this.upgrade() {
                             this.update(cx, |this, cx| {
                                 this.store_activities.remove(&key);

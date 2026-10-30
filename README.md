@@ -8,7 +8,7 @@ Release Desk is a Rust desktop app for managing projects, repositories, and thei
 cargo run
 ```
 
-Create projects and select repositories in the Project Hub. The **App Store** reads a local SQLite catalog at `<library_dir>/store/catalog.sqlite3`; opening it does not fetch from the network. Refreshing a project's Releases page updates that project's store records, and the Store's **Refresh** button checks every project online. Existing `catalog.json` data is migrated automatically. Failed provider requests keep the last known listing. Install uses a matching file already downloaded in the project's release shelf before contacting a provider.
+Create projects and select repositories in the Project Hub. The **App Store** reads a local SQLite catalog at `<library_dir>/store/catalog.sqlite3`; opening it does not fetch from the network. Refreshing a project's Releases page updates that project's store records, and the Store's **Refresh** button checks every project online. Failed provider requests keep the last known listing. Install uses a matching file already downloaded in the project's release shelf before contacting a provider.
 
 ## Store metadata
 

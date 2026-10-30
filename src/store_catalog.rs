@@ -187,13 +187,8 @@ pub fn load(path: &Path) -> Result<Vec<StoreApp>, String> {
 /// Load catalog records without decoding artwork; validate it on a worker afterwards.
 pub fn load_for_startup(path: &Path) -> Result<Vec<StoreApp>, String> {
     if !path.exists() {
-        let old_path = path.with_file_name("catalog.json");
-        if old_path.is_file() {
-            let bytes = std::fs::read(&old_path).map_err(|error| error.to_string())?;
-            let apps: Vec<StoreApp> = serde_json::from_slice(&bytes)
-                .map_err(|error| format!("Cannot read old store catalog: {error}"))?;
-            save(path, &apps)?;
-            return Ok(apps);
+        if path.with_file_name("catalog.json").is_file() {
+            return Err("An older Store catalog was found but is not supported; its file was left unchanged.".into());
         }
         return Ok(Vec::new());
     }
@@ -613,15 +608,17 @@ mod tests {
         let restored = load(&path).expect("load catalog");
         assert_eq!(restored.len(), 2);
         assert_eq!(restored[0].project_directory, dir.path());
-        let migrated = dir.path().join("migration/catalog.sqlite3");
-        std::fs::create_dir_all(migrated.parent().unwrap()).unwrap();
-        std::fs::write(
-            migrated.with_file_name("catalog.json"),
-            serde_json::to_vec(&apps).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(load(&migrated).unwrap().len(), 2);
-        assert!(migrated.is_file());
+    }
+
+    #[test]
+    fn legacy_catalog_is_reported_without_conversion_or_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("catalog.json");
+        std::fs::write(&old, b"original contents").unwrap();
+        let current = dir.path().join("catalog.sqlite3");
+        assert!(load(&current).is_err());
+        assert_eq!(std::fs::read(&old).unwrap(), b"original contents");
+        assert!(!current.exists());
     }
 
     #[test]

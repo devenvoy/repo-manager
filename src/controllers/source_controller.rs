@@ -6,7 +6,107 @@ use crate::views;
 use crate::workspace_sources::WorkspaceSource;
 use gpui_kit::{Context, Window};
 
+fn destination_is_occupied(path: &std::path::Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 impl ReleaseDesk {
+    pub(crate) fn set_source_dialog(
+        &mut self,
+        dialog: views::project_sources::SourceDialog,
+        cx: &mut Context<Self>,
+    ) {
+        self.source_dialog = dialog;
+        self.source_destination_revision = self.source_destination_revision.wrapping_add(1);
+        let revision = self.source_destination_revision;
+        let index = match dialog {
+            views::project_sources::SourceDialog::Select(index)
+            | views::project_sources::SourceDialog::Review(index) => index,
+            _ => {
+                self.source_destination_pending = false;
+                cx.notify();
+                return;
+            }
+        };
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(source) = project.sources.get(index).cloned() else {
+            return;
+        };
+        let workspace_revision = self.workspace_revision;
+        self.source_destination_pending = true;
+        self.source_destinations.clear();
+        cx.notify();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let states = source
+                .repositories
+                .iter()
+                .enumerate()
+                .map(|(repo_index, repo)| {
+                    let path = crate::repository_git::resolve_target_path(
+                        &project.directory,
+                        project.disk_layout,
+                        crate::repository_git::repository_owner(&source, repo),
+                        &repo.name,
+                    );
+                    let occupied = destination_is_occupied(&path);
+                    ((index, repo_index), occupied)
+                })
+                .collect();
+            let _ = tx.send(states);
+        });
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(40))
+                    .await;
+                match rx.try_recv() {
+                    Ok(states) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                if this.source_destination_revision == revision {
+                                    this.source_destination_pending = false;
+                                    if this.workspace_revision == workspace_revision {
+                                        this.source_destinations = states;
+                                    } else {
+                                        this.source_dialog = views::project_sources::SourceDialog::Closed;
+                                        this.message = "Project changed while checking destinations. Open the picker again.".into();
+                                    }
+                                    cx.notify();
+                                }
+                            });
+                        }
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        if let Some(this) = this.upgrade() {
+                            this.update(cx, |this, cx| {
+                                if this.source_destination_revision == revision {
+                                    this.source_destination_pending = false;
+                                    this.message =
+                                        "Could not check repository destinations.".into();
+                                    cx.notify();
+                                }
+                            });
+                        }
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn add_source(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.source_busy {
             return;
@@ -44,7 +144,10 @@ impl ReleaseDesk {
             existing.provider.eq_ignore_ascii_case(&provider)
                 && existing.handle.eq_ignore_ascii_case(&owner)
         }) {
-            self.source_dialog = views::project_sources::SourceDialog::Select(existing_index);
+            self.set_source_dialog(
+                views::project_sources::SourceDialog::Select(existing_index),
+                cx,
+            );
             self.message = format!(
                 "@{owner} is already a source. Choose repositories from its existing profile."
             );
@@ -53,22 +156,11 @@ impl ReleaseDesk {
         }
 
         let project_id = project.id;
-        let auth_token = if provider == project.provider.as_str() {
-            match project_auth_token(project, &self.secret_store) {
-                Ok(token) => token,
-                Err(error) => {
-                    self.message = error;
-                    cx.notify();
-                    return;
-                }
-            }
-        } else {
-            None
-        };
-
+        let use_token = provider == project.provider.as_str();
+        let auth_project = project.clone();
+        let secret_store = self.secret_store.clone();
         let input_for_fetch = raw.clone();
         let provider_for_fetch = default_provider.to_string();
-        let auth_token_clone = auth_token.clone();
 
         self.source_busy = true;
         self.message = format!("Fetching live repositories for @{owner} from {provider}...");
@@ -76,11 +168,19 @@ impl ReleaseDesk {
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let res = release_desk_store::source_fetcher::fetch_source_input(
-                &input_for_fetch,
-                &provider_for_fetch,
-                auth_token_clone.as_deref(),
-            );
+            let res = (|| {
+                let token = if use_token {
+                    project_auth_token(&auth_project, &secret_store)?
+                } else {
+                    None
+                };
+                release_desk_store::source_fetcher::fetch_source_input(
+                    &input_for_fetch,
+                    &provider_for_fetch,
+                    token.as_deref(),
+                )
+                .map_err(|error| error.to_string())
+            })();
             if let Ok((profile, _)) = &res {
                 if let Some((url, path)) =
                     WorkspaceSource::from_fetched(profile.clone(), None).avatar_cache_request()
@@ -130,7 +230,7 @@ impl ReleaseDesk {
                                                     this.language_breakdowns.clear();
                                                     this.release_state = Default::default();
                                                     if this.selected_project_id == Some(project_id) {
-                                                        this.source_dialog = views::project_sources::SourceDialog::Select(source_index);
+                                                        this.set_source_dialog(views::project_sources::SourceDialog::Select(source_index), cx);
                                                     }
                                                     if this.selected_project_id == Some(project_id) && this.source_input.read(cx).value().trim() == raw {
                                                         this.source_input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
@@ -189,18 +289,9 @@ impl ReleaseDesk {
         let project_id = project.id;
         let handle = source.handle.clone();
         let provider = source.provider.clone();
-        let token = if provider == project.provider.as_str() {
-            match project_auth_token(project, &self.secret_store) {
-                Ok(token) => token,
-                Err(error) => {
-                    self.message = error;
-                    cx.notify();
-                    return;
-                }
-            }
-        } else {
-            None
-        };
+        let use_token = provider == project.provider.as_str();
+        let auth_project = project.clone();
+        let secret_store = self.secret_store.clone();
         let fetch_handle = handle.clone();
         let fetch_provider = provider.clone();
         self.source_busy = true;
@@ -208,11 +299,19 @@ impl ReleaseDesk {
         cx.notify();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = release_desk_store::source_fetcher::fetch_profile_and_repos(
-                &fetch_handle,
-                &fetch_provider,
-                token.as_deref(),
-            );
+            let result = (|| {
+                let token = if use_token {
+                    project_auth_token(&auth_project, &secret_store)?
+                } else {
+                    None
+                };
+                release_desk_store::source_fetcher::fetch_profile_and_repos(
+                    &fetch_handle,
+                    &fetch_provider,
+                    token.as_deref(),
+                )
+                .map_err(|error| error.to_string())
+            })();
             if let Ok(profile) = &result {
                 if let Some((url, path)) =
                     WorkspaceSource::from_fetched(profile.clone(), None).avatar_cache_request()
@@ -305,5 +404,25 @@ impl ReleaseDesk {
             },
             cx,
         );
+    }
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::destination_is_occupied;
+
+    #[test]
+    fn existing_and_broken_symlink_destinations_are_occupied() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("repo");
+        assert!(!destination_is_occupied(&target));
+        std::fs::create_dir(&target).unwrap();
+        assert!(destination_is_occupied(&target));
+        #[cfg(unix)]
+        {
+            let broken = dir.path().join("broken");
+            std::os::unix::fs::symlink(dir.path().join("missing"), &broken).unwrap();
+            assert!(destination_is_occupied(&broken));
+        }
     }
 }

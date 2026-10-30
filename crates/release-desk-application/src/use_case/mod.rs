@@ -7,7 +7,6 @@ pub mod auth;
 pub mod discovery;
 pub mod installer;
 pub mod macos_installer;
-pub mod migration;
 pub mod profile_ingestion;
 pub mod project;
 pub mod pull_request;
@@ -28,9 +27,6 @@ pub use installer::{
     DownloadInstallerUseCase, DownloadPort, InstallAssetCommand, InstallAssetOutcome,
 };
 pub use macos_installer::{DiskImagePort, HdiutilAdapter, InstallMacOsAppUseCase, InstallStep};
-pub use migration::{
-    AnalyzeLegacySetupUseCase, ExecuteLegacyMigrationUseCase, PreviewMigrationPlanUseCase,
-};
 pub use profile_ingestion::{
     DiscoveredRepoItem, IngestProfileUseCase, ParsedProfileRef, RepoClonePlan, parse_profile_input,
 };
