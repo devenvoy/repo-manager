@@ -25,6 +25,89 @@ impl OsSecretStore {
         Self::default()
     }
 
+    /// Ask Git Credential Manager for a host credential. It may open a browser and
+    /// keeps token refresh and storage in Git Credential Manager's own store.
+    pub fn credential_manager_account(
+        host: &str,
+        path: Option<&str>,
+    ) -> Result<(String, String), DomainError> {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        if host.is_empty()
+            || !host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        {
+            return Err(DomainError::PortFailure {
+                port: "git_credential_manager",
+                message: "Invalid provider host".into(),
+            });
+        }
+        if path.is_some_and(|path| {
+            path.is_empty()
+                || path.contains(['\n', '\r', '\\'])
+                || path.split('/').any(|part| part.is_empty() || part == "..")
+        }) {
+            return Err(DomainError::PortFailure {
+                port: "git_credential_manager",
+                message: "Invalid provider path".into(),
+            });
+        }
+        let mut child = Command::new("git-credential-manager")
+            .arg("get")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| DomainError::PortFailure {
+                port: "git_credential_manager",
+                message: "Install Git Credential Manager to use browser sign-in".into(),
+            })?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let request = path.map_or_else(
+                || format!("protocol=https\nhost={host}\n"),
+                |path| format!("protocol=https\nhost={host}\npath={path}\n"),
+            );
+            writeln!(stdin, "{request}").map_err(|error| DomainError::PortFailure {
+                port: "git_credential_manager",
+                message: format!("Could not start credential request: {error}"),
+            })?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|error| DomainError::PortFailure {
+                port: "git_credential_manager",
+                message: format!("Credential request failed: {error}"),
+            })?;
+        if !output.status.success() {
+            return Err(DomainError::PortFailure {
+                port: "git_credential_manager",
+                message:
+                    "Browser sign-in was cancelled or Git Credential Manager could not connect"
+                        .into(),
+            });
+        }
+        let mut username = None;
+        let mut password = None;
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(value) = line.strip_prefix("username=") {
+                username = Some(value.to_string());
+            } else if let Some(value) = line.strip_prefix("password=") {
+                password = Some(value.to_string());
+            }
+        }
+        match (username, password) {
+            (Some(username), Some(password)) if !username.is_empty() && !password.is_empty() => {
+                Ok((username, password))
+            }
+            _ => Err(DomainError::PortFailure {
+                port: "git_credential_manager",
+                message: "Git Credential Manager returned no usable account".into(),
+            }),
+        }
+    }
+
     /// Reuse a successful system credential during this process. Run on a worker thread.
     pub fn discover_cached_system_git_credentials(&self, host: &str) -> Option<(String, String)> {
         self.cached_system_credential(host, || Self::discover_system_git_credentials(host))

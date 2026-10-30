@@ -134,6 +134,52 @@ impl GitCredentialContext {
                 "invalid credential helper configuration",
             ));
         }
+        let expected_username = if remote_url.starts_with("https://github.com/") {
+            "x-access-token"
+        } else if remote_url.starts_with("https://gitlab.com/") {
+            "oauth2"
+        } else {
+            return Err(GitError::InvalidInput(
+                "project credentials are not supported for this host",
+            ));
+        };
+        let host = remote_url
+            .strip_prefix("https://")
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(host, _)| host)
+            .ok_or(GitError::InvalidInput("remote has no repository path"))?;
+        Self::for_provider(
+            helper_executable,
+            credential_ref,
+            remote_url,
+            host,
+            expected_username,
+        )
+    }
+
+    /// Scope a selected provider credential to an exact HTTPS remote and host.
+    pub fn for_provider(
+        helper_executable: std::path::PathBuf,
+        credential_ref: String,
+        remote_url: &str,
+        expected_host: &str,
+        username: &str,
+    ) -> Result<Self, GitError> {
+        if !helper_executable.is_absolute()
+            || helper_executable.to_str().is_none()
+            || credential_ref.is_empty()
+            || credential_ref.chars().any(char::is_control)
+            || username.is_empty()
+            || username.chars().any(char::is_control)
+            || expected_host.is_empty()
+            || !expected_host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b':'))
+        {
+            return Err(GitError::InvalidInput(
+                "invalid credential helper configuration",
+            ));
+        }
         let rest = remote_url
             .strip_prefix("https://")
             .ok_or(GitError::InvalidInput(
@@ -142,15 +188,11 @@ impl GitCredentialContext {
         let (host, path) = rest
             .split_once('/')
             .ok_or(GitError::InvalidInput("remote has no repository path"))?;
-        let username = match host {
-            "github.com" => "x-access-token",
-            "gitlab.com" => "oauth2",
-            _ => {
-                return Err(GitError::InvalidInput(
-                    "project credentials are not supported for this host",
-                ));
-            }
-        };
+        if host != expected_host {
+            return Err(GitError::InvalidInput(
+                "remote host does not match the provider",
+            ));
+        }
         if path.is_empty()
             || path.starts_with('/')
             || path
@@ -183,6 +225,8 @@ pub struct GitClient {
     executable: std::ffi::OsString,
     credential: Option<GitCredentialContext>,
     token: Option<String>,
+    codecommit_credentials: bool,
+    credential_manager: bool,
 }
 
 impl Default for GitClient {
@@ -197,6 +241,8 @@ impl GitClient {
             executable: "git".into(),
             credential: None,
             token: None,
+            codecommit_credentials: false,
+            credential_manager: false,
         }
     }
 
@@ -209,6 +255,18 @@ impl GitClient {
     /// Supply an authentication token used for HTTPS Basic Authorization header (e.g. from `gh auth token`).
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
         self.token = Some(token.into());
+        self
+    }
+
+    /// Use the AWS CLI's CodeCommit Git credential helper for an AWS remote.
+    pub fn with_codecommit_credentials(mut self) -> Self {
+        self.codecommit_credentials = true;
+        self
+    }
+
+    /// Ask Git Credential Manager for a fresh credential on each Git operation.
+    pub fn with_credential_manager(mut self) -> Self {
+        self.credential_manager = true;
         self
     }
 
@@ -686,6 +744,39 @@ impl GitClient {
             ] {
                 command.env_remove(key);
             }
+        } else if self.credential_manager {
+            command
+                .args([
+                    "-c",
+                    "credential.helper=",
+                    "-c",
+                    "credential.helper=!git-credential-manager",
+                    "-c",
+                    "credential.useHttpPath=true",
+                    "-c",
+                    "http.followRedirects=false",
+                    "-c",
+                    "http.extraHeader=",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null");
+        } else if self.codecommit_credentials {
+            command
+                .args([
+                    "-c",
+                    "credential.helper=",
+                    "-c",
+                    "credential.helper=!aws codecommit credential-helper $@",
+                    "-c",
+                    "credential.useHttpPath=true",
+                    "-c",
+                    "credential.interactive=never",
+                    "-c",
+                    "http.followRedirects=false",
+                ])
+                .env("GIT_TERMINAL_PROMPT", "0");
         } else if let Some(token) = &self.token {
             let b64 = to_base64(format!("x-access-token:{token}").as_bytes());
             let header = format!("http.extraHeader=Authorization: Basic {b64}");
@@ -1036,6 +1127,37 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn provider_credentials_require_the_configured_host_and_repository() {
+        let executable = std::env::current_exe().expect("test executable");
+        let remote = "https://git.example.com/team/app.git";
+        let credential = GitCredentialContext::for_provider(
+            executable.clone(),
+            "saved-forge-token".into(),
+            remote,
+            "git.example.com",
+            "developer",
+        )
+        .expect("forge credential scope");
+        let client = GitClient::new().with_credential(credential);
+        assert!(client.validate_credential_remote(remote).is_ok());
+        assert!(
+            client
+                .validate_credential_remote("https://git.example.com/other/app.git")
+                .is_err()
+        );
+        assert!(
+            GitCredentialContext::for_provider(
+                executable,
+                "saved-forge-token".into(),
+                "https://other.example.com/team/app.git",
+                "git.example.com",
+                "developer",
+            )
+            .is_err()
+        );
     }
 
     #[test]

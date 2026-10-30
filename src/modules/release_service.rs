@@ -38,13 +38,17 @@ pub fn fetch_project_releases(
             } else {
                 raw_owner.to_string()
             };
-            let host = (effective_provider == "custom")
-                .then(|| {
-                    project.custom_host.clone().or_else(|| {
-                        clone_host(&repo.clone_url).map(|host| format!("https://{host}"))
-                    })
-                })
-                .flatten();
+            let host = matches!(
+                effective_provider.as_str(),
+                "custom" | "forgejo" | "azure_devops"
+            )
+            .then(|| {
+                project
+                    .custom_host
+                    .clone()
+                    .or_else(|| clone_host(&repo.clone_url).map(|host| format!("https://{host}")))
+            })
+            .flatten();
 
             let (effective_token, username) = if effective_provider == project.provider.as_str() {
                 (token.clone(), Some(project.account.clone()))

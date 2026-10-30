@@ -7,7 +7,6 @@ use crate::workspace::{
 };
 use crate::workspace_sources::RepositoryListMode;
 use gpui_kit::{Context, PathPromptOptions, Window};
-use release_desk_core::port::SecretStorePort as _;
 use release_desk_core::project::DiskLayout;
 
 impl ReleaseDesk {
@@ -20,10 +19,6 @@ impl ReleaseDesk {
         let original = editing
             .and_then(|id| self.projects.iter().find(|project| project.id == id))
             .cloned();
-        if let Some(ref mut server) = self.local_oauth_server {
-            server.stop();
-        }
-        self.local_oauth_server = None;
         self.editing_project_id = editing;
         self.setup_step = 0;
         self.setup_active = true;
@@ -56,18 +51,29 @@ impl ReleaseDesk {
             .as_ref()
             .is_none_or(|project| project.credential_ref.is_none())
         {
-            self.discover_setup_credential(cx);
+            self.discover_setup_credential(false, cx);
         }
 
         if let Some(ref orig) = original {
             self.saved_credential_ref = orig.credential_ref.clone();
-            self.selected_saved_account = Some(orig.account.clone());
-            self.auth_mode_choice = AuthModeChoice::SavedAccount;
+            self.selected_saved_account =
+                orig.credential_ref.as_ref().map(|_| orig.account.clone());
+            self.auth_mode_choice = if self.saved_credential_ref.is_some() {
+                AuthModeChoice::SavedAccount
+            } else if self.setup_provider == ProviderChoice::GitHub {
+                AuthModeChoice::OAuthBrowser
+            } else {
+                AuthModeChoice::Token
+            };
             self.auth_status_message = None;
         } else {
             self.selected_saved_account = None;
             self.saved_credential_ref = None;
-            self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+            self.auth_mode_choice = if self.setup_provider == ProviderChoice::GitHub {
+                AuthModeChoice::OAuthBrowser
+            } else {
+                AuthModeChoice::Token
+            };
             self.auth_status_message = None;
         }
 
@@ -100,17 +106,17 @@ impl ReleaseDesk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(ref mut server) = self.local_oauth_server {
-            server.stop();
-        }
-        self.local_oauth_server = None;
         self.setup_provider = provider;
         self.detected_system_credential = None;
-        self.discover_setup_credential(cx);
+        self.discover_setup_credential(false, cx);
 
         self.selected_saved_account = None;
         self.saved_credential_ref = None;
-        self.auth_mode_choice = AuthModeChoice::OAuthBrowser;
+        self.auth_mode_choice = if provider == ProviderChoice::GitHub {
+            AuthModeChoice::OAuthBrowser
+        } else {
+            AuthModeChoice::Token
+        };
         self.auth_status_message = None;
         self.account_input
             .update(cx, |input, cx| input.set_value(String::new(), window, cx));
@@ -121,14 +127,62 @@ impl ReleaseDesk {
         cx.notify();
     }
 
-    fn discover_setup_credential(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn find_setup_credential(&mut self, cx: &mut Context<Self>) {
+        self.discover_setup_credential(true, cx);
+    }
+
+    fn discover_setup_credential(&mut self, manual: bool, cx: &mut Context<Self>) {
         self.credential_discovery_revision = self.credential_discovery_revision.wrapping_add(1);
         let revision = self.credential_discovery_revision;
-        let host = self.setup_provider.default_host().to_string();
+        if !manual
+            && matches!(
+                self.setup_provider,
+                ProviderChoice::Forgejo | ProviderChoice::Custom
+            )
+        {
+            self.detected_system_credential = None;
+            return;
+        }
+        let host = if matches!(
+            self.setup_provider,
+            ProviderChoice::Forgejo | ProviderChoice::Custom
+        ) {
+            let raw = self.custom_host_input.read(cx).value().trim().to_string();
+            url::Url::parse(&raw)
+                .ok()
+                .filter(|url| {
+                    url.scheme() == "https" && url.username().is_empty() && url.password().is_none()
+                })
+                .and_then(|url| url.host_str().map(str::to_string))
+                .unwrap_or_default()
+        } else {
+            self.setup_provider.default_host().to_string()
+        };
+        if host.is_empty() || self.setup_provider == ProviderChoice::AwsCodeCommit {
+            self.detected_system_credential = None;
+            if manual {
+                self.auth_status_message = Some(
+                    "Enter a valid HTTPS server address before checking Git credentials.".into(),
+                );
+                cx.notify();
+            }
+            return;
+        }
+        if manual {
+            self.auth_status_message = Some("Looking for an existing Git credential…".into());
+            cx.notify();
+        }
         let secret_store = self.secret_store.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(secret_store.discover_cached_system_git_credentials(&host));
+            let credential = if manual {
+                release_desk_store::credentials::OsSecretStore::discover_system_git_credentials(
+                    &host,
+                )
+            } else {
+                secret_store.discover_cached_system_git_credentials(&host)
+            };
+            let _ = tx.send(credential);
         });
         cx.spawn(async move |this, cx| {
             loop {
@@ -143,6 +197,13 @@ impl ReleaseDesk {
                                     && this.credential_discovery_revision == revision
                                 {
                                     this.detected_system_credential = credential;
+                                    if manual {
+                                        this.auth_status_message = Some(if this.detected_system_credential.is_some() {
+                                            "Found an existing Git credential. Use the account shown below to connect.".into()
+                                        } else {
+                                            "No existing Git credential was found for this host.".into()
+                                        });
+                                    }
                                     cx.notify();
                                 }
                             });
@@ -202,9 +263,8 @@ impl ReleaseDesk {
             cx.notify();
             return;
         }
-        if self.setup_step == 1 && self.setup_provider == ProviderChoice::Custom && host.is_empty()
-        {
-            self.message = "Enter a server URL for Custom Git.".into();
+        if self.setup_step == 1 && self.setup_provider.requires_endpoint() && host.is_empty() {
+            self.message = format!("Enter {}.", self.setup_provider.endpoint_label());
             cx.notify();
             return;
         }
@@ -225,40 +285,72 @@ impl ReleaseDesk {
         });
         let account = self.account_input.read(cx).value().trim().to_string();
         let token = self.token_input.read(cx).value().trim().to_string();
-        let credential_ref = if let Some(ref saved_ref) = self.saved_credential_ref {
-            Some(saved_ref.clone())
-        } else if !token.is_empty() {
-            let key_suffix = if !account.is_empty() {
-                account.as_str()
-            } else {
-                "default"
-            };
-            let cred_key = format!(
-                "release_desk_{}_{}",
-                self.setup_provider.as_str(),
-                key_suffix
-            );
-            if let Err(error) = self.secret_store.set_secret(&cred_key, &token) {
-                self.message = format!("Could not save token: {error}");
+        if !token.is_empty() && self.saved_credential_ref.is_none() {
+            self.message =
+                "Click Save Token to validate this credential before creating the project.".into();
+            cx.notify();
+            return;
+        }
+        let previous = self
+            .editing_project_id
+            .and_then(|id| self.projects.iter().find(|project| project.id == id));
+        if let Some(previous) = previous {
+            if previous.provider == self.setup_provider
+                && previous.provider.requires_endpoint()
+                && previous.custom_host.as_deref() != Some(host.as_str())
+                && self.saved_credential_ref == previous.credential_ref
+                && self.saved_credential_ref.is_some()
+            {
+                self.message =
+                    "Provider address changed. Connect a token for the new address or disconnect the old credential."
+                        .into();
                 cx.notify();
                 return;
             }
-            Some(cred_key)
-        } else if let Some(existing) = self
-            .editing_project_id
-            .and_then(|id| self.projects.iter().find(|project| project.id == id))
-        {
-            existing.credential_ref.clone()
-        } else {
-            None
-        };
+        }
+        let credential_ref = self.saved_credential_ref.clone();
+        if let Some(reference) = credential_ref.as_deref() {
+            let expected = release_desk_store::provider_sources::connection::credential_key(
+                self.setup_provider.as_str(),
+                &account,
+                self.setup_provider
+                    .requires_endpoint()
+                    .then_some(host.as_str()),
+            );
+            let unchanged_legacy = previous.is_some_and(|project| {
+                project.provider == self.setup_provider
+                    && project.account == account
+                    && project.custom_host.as_deref()
+                        == self
+                            .setup_provider
+                            .requires_endpoint()
+                            .then_some(host.as_str())
+                    && project.credential_ref.as_deref() == Some(reference)
+            });
+            let managed_browser = self
+                .setup_provider
+                .credential_manager_reference(
+                    self.setup_provider
+                        .requires_endpoint()
+                        .then_some(host.as_str()),
+                )
+                .as_deref()
+                == Some(reference);
+            if reference != expected && !unchanged_legacy && !managed_browser {
+                self.message =
+                    "The saved credential belongs to another account or provider address. Connect again."
+                        .into();
+                cx.notify();
+                return;
+            }
+        }
         let project = WorkspaceProject {
             id,
             name,
             directory,
             provider: self.setup_provider,
             account,
-            custom_host: (self.setup_provider == ProviderChoice::Custom).then_some(host),
+            custom_host: self.setup_provider.requires_endpoint().then_some(host),
             credential_ref,
             disk_layout: self.setup_layout,
             sources: self

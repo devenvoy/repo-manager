@@ -46,7 +46,7 @@ impl HttpGitLabGateway {
     fn request(&self, url: &str) -> reqwest::blocking::RequestBuilder {
         let mut req = self.client.get(url);
         if let Some(ref token) = self.token {
-            req = req.header("PRIVATE-TOKEN", token);
+            req = req.bearer_auth(token);
         }
         req
     }

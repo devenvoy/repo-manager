@@ -255,7 +255,7 @@ fn test_find_saved_accounts_for_provider() {
         },
     ];
 
-    let github_accounts = find_saved_accounts_for_provider(&projects, ProviderChoice::GitHub);
+    let github_accounts = find_saved_accounts_for_provider(&projects, ProviderChoice::GitHub, None);
     assert_eq!(github_accounts.len(), 1);
     assert_eq!(github_accounts[0].handle, "octocat");
     assert_eq!(
@@ -264,11 +264,12 @@ fn test_find_saved_accounts_for_provider() {
     );
     assert!(github_accounts[0].has_keychain_secret);
 
-    let gitlab_accounts = find_saved_accounts_for_provider(&projects, ProviderChoice::GitLab);
+    let gitlab_accounts = find_saved_accounts_for_provider(&projects, ProviderChoice::GitLab, None);
     assert_eq!(gitlab_accounts.len(), 1);
     assert_eq!(gitlab_accounts[0].handle, "gitlab-user");
 
-    let bitbucket_accounts = find_saved_accounts_for_provider(&projects, ProviderChoice::Bitbucket);
+    let bitbucket_accounts =
+        find_saved_accounts_for_provider(&projects, ProviderChoice::Bitbucket, None);
     assert!(bitbucket_accounts.is_empty());
 }
 

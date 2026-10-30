@@ -193,6 +193,15 @@ pub fn render_project_sources<
             "github" => format!("https://github.com/{}", source.handle),
             "gitlab" => format!("https://gitlab.com/{}", source.handle),
             "bitbucket" => format!("https://bitbucket.org/{}", source.handle),
+            "gitea" => format!("https://gitea.com/{}", source.handle),
+            "codeberg" => format!("https://codeberg.org/{}", source.handle),
+            "azure_devops" => format!("https://dev.azure.com/{}", source.handle),
+            "forgejo" | "custom" => source
+                .repositories
+                .first()
+                .and_then(|repo| url::Url::parse(&repo.clone_url).ok())
+                .map(|url| format!("{}/{}", url.origin().ascii_serialization(), source.handle))
+                .unwrap_or_default(),
             _ => String::new(),
         };
         let mut actions = div()

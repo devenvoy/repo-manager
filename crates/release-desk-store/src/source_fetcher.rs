@@ -126,11 +126,7 @@ pub fn fetch_repository_languages(
 
     let mut request = client.get(url).header("Accept", "application/json");
     if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
-        request = if provider == "gitlab" {
-            request.header("PRIVATE-TOKEN", token)
-        } else {
-            request.bearer_auth(token)
-        };
+        request = request.bearer_auth(token);
     }
     let response = request.send().map_err(|error| DomainError::PortFailure {
         port,
@@ -600,7 +596,7 @@ fn gitlab_request(
 ) -> reqwest::blocking::RequestBuilder {
     let request = client.get(url);
     if let Some(token) = token.filter(|t| !t.trim().is_empty()) {
-        request.header("PRIVATE-TOKEN", token)
+        request.bearer_auth(token)
     } else {
         request
     }

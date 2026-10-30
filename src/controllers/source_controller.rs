@@ -128,8 +128,21 @@ impl ReleaseDesk {
         };
 
         let default_provider = project.provider.as_str();
+        let source_request = release_desk_store::provider_sources::SourceRequest {
+            provider: default_provider,
+            input: &raw,
+            credential: None,
+            endpoint: project.custom_host.as_deref(),
+        };
         let (provider, owner, _) =
-            release_desk_store::source_fetcher::parse_input_target(&raw, default_provider);
+            match release_desk_store::provider_sources::identify(&source_request) {
+                Ok(target) => target,
+                Err(error) => {
+                    self.message = error.to_string();
+                    cx.notify();
+                    return;
+                }
+            };
 
         if owner.is_empty()
             || owner.contains(['?', '#', ' ', '\\'])
@@ -160,7 +173,8 @@ impl ReleaseDesk {
         let auth_project = project.clone();
         let secret_store = self.secret_store.clone();
         let input_for_fetch = raw.clone();
-        let provider_for_fetch = default_provider.to_string();
+        let provider_for_fetch = provider.clone();
+        let endpoint_for_fetch = project.custom_host.clone();
 
         self.source_busy = true;
         self.message = format!("Fetching live repositories for @{owner} from {provider}...");
@@ -174,10 +188,13 @@ impl ReleaseDesk {
                 } else {
                     None
                 };
-                release_desk_store::source_fetcher::fetch_source_input(
-                    &input_for_fetch,
-                    &provider_for_fetch,
-                    token.as_deref(),
+                release_desk_store::provider_sources::discover(
+                    &release_desk_store::provider_sources::SourceRequest {
+                        provider: &provider_for_fetch,
+                        input: &input_for_fetch,
+                        credential: token.as_deref(),
+                        endpoint: endpoint_for_fetch.as_deref(),
+                    },
                 )
                 .map_err(|error| error.to_string())
             })();
@@ -294,6 +311,7 @@ impl ReleaseDesk {
         let secret_store = self.secret_store.clone();
         let fetch_handle = handle.clone();
         let fetch_provider = provider.clone();
+        let endpoint_for_fetch = project.custom_host.clone();
         self.source_busy = true;
         self.message = format!("Refreshing @{handle}…");
         cx.notify();
@@ -305,11 +323,15 @@ impl ReleaseDesk {
                 } else {
                     None
                 };
-                release_desk_store::source_fetcher::fetch_profile_and_repos(
-                    &fetch_handle,
-                    &fetch_provider,
-                    token.as_deref(),
+                release_desk_store::provider_sources::discover(
+                    &release_desk_store::provider_sources::SourceRequest {
+                        provider: &fetch_provider,
+                        input: &fetch_handle,
+                        credential: token.as_deref(),
+                        endpoint: endpoint_for_fetch.as_deref(),
+                    },
                 )
+                .map(|(profile, _)| profile)
                 .map_err(|error| error.to_string())
             })();
             if let Ok(profile) = &result {

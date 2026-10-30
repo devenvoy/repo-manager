@@ -22,11 +22,14 @@ impl Scope {
             path: std::env::var("REPO_MANAGER_CREDENTIAL_PATH").ok()?,
             username: std::env::var("REPO_MANAGER_CREDENTIAL_USERNAME").ok()?,
         };
-        let supported = matches!(
-            (scope.host.as_str(), scope.username.as_str()),
-            ("github.com", "x-access-token") | ("gitlab.com", "oauth2")
-        );
-        if !supported
+        let valid_host = !scope.host.is_empty()
+            && scope
+                .host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b':'));
+        if !valid_host
+            || scope.username.is_empty()
+            || scope.username.chars().any(char::is_control)
             || [&scope.key, &scope.path]
                 .iter()
                 .any(|value| value.is_empty() || value.chars().any(char::is_control))
@@ -59,12 +62,7 @@ pub fn dispatch() -> Option<i32> {
     let stdout = io::stdout();
     let store = OsSecretStore::new();
     let result = respond(&operation, &scope, stdin.lock(), stdout.lock(), |key| {
-        store
-            .get_secret(key)
-            .ok()
-            .flatten()
-            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
-            .or_else(|| std::env::var("GH_TOKEN").ok())
+        store.get_secret(key).ok().flatten()
     });
     Some(if result.is_ok() { 0 } else { 1 })
 }

@@ -96,13 +96,14 @@ impl WorkspaceSource {
             "gitlab" => Some(format!("https://gitlab.com/{target}")),
             "bitbucket" => Some(format!("https://bitbucket.org/{target}")),
             "codeberg" => Some(format!("https://codeberg.org/{target}")),
-            "azuredevops" | "azure" => Some(format!("https://dev.azure.com/{target}")),
+            "azure_devops" | "azuredevops" | "azure" => {
+                Some(format!("https://dev.azure.com/{target}"))
+            }
             "gitea" => Some(format!("https://gitea.com/{target}")),
-            "forgejo" => Some(format!("https://codeberg.org/{target}")),
-            "aws" | "awscodecommit" => Some(format!(
+            "aws" | "awscodecommit" | "aws_codecommit" => Some(format!(
                 "https://console.aws.amazon.com/codesuite/codecommit/repositories/{target}"
             )),
-            _ => Some(format!("https://github.com/{target}")),
+            _ => None,
         }
     }
 

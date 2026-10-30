@@ -13,6 +13,7 @@ pub mod github_client;
 pub mod gitlab_client;
 pub mod project_backup;
 pub mod provider_releases;
+pub mod provider_sources;
 pub mod scheduler;
 pub mod schema;
 pub mod source_fetcher;

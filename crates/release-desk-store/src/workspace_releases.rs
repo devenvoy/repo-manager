@@ -275,6 +275,14 @@ pub fn fetch_releases_with_project_host(
                 token.as_deref(),
             );
         }
+        "forgejo" => {
+            return crate::provider_releases::fetch_forge_releases(
+                host.ok_or("Set the Forgejo server's HTTPS address to fetch releases.")?,
+                owner,
+                name,
+                token.as_deref(),
+            );
+        }
         "bitbucket" => {
             return crate::provider_releases::fetch_bitbucket_downloads(
                 owner,
@@ -363,7 +371,7 @@ fn fetch_gitlab_releases(
             .get(url.clone())
             .query(&[("per_page", 100), ("page", page)]);
         if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
-            request = request.header("PRIVATE-TOKEN", token);
+            request = request.bearer_auth(token);
         }
         let response = request
             .send()
@@ -994,7 +1002,7 @@ pub fn download_gitlab_asset_with_progress(
         .map_err(|e| e.to_string())?;
     let response = client
         .get(lookup)
-        .header("PRIVATE-TOKEN", token)
+        .bearer_auth(token)
         .send()
         .map_err(|e| format!("GitLab release lookup failed: {}", e.without_url()))?;
     if !response.status().is_success() {
@@ -1011,7 +1019,7 @@ pub fn download_gitlab_asset_with_progress(
     for _ in 0..10 {
         let mut request = client.get(url.clone());
         if authenticated && trusted_gitlab_host(&url) {
-            request = request.header("PRIVATE-TOKEN", token);
+            request = request.bearer_auth(token);
         } else {
             authenticated = false;
         }

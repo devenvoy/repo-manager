@@ -20,6 +20,9 @@ pub struct RepositoryTarget {
     pub project_root: PathBuf,
     /// Project-selected OS secret reference, never the secret itself.
     pub credential_ref: Option<String>,
+    pub provider: String,
+    pub account: String,
+    pub endpoint: Option<String>,
 }
 
 /// Local state, or an actionable failure. A local inspection is not a remote check.
@@ -122,6 +125,9 @@ pub fn targets(project: &WorkspaceProject) -> Result<Vec<RepositoryTarget>, Stri
                 credential_ref: (source.provider == project.provider.as_str())
                     .then(|| project.credential_ref.clone())
                     .flatten(),
+                provider: source.provider.clone(),
+                account: project.account.clone(),
+                endpoint: project.custom_host.clone(),
             });
         }
     }
@@ -161,25 +167,90 @@ fn validate_target_path(root: &Path, path: &Path) -> Result<(), String> {
 
 fn git_client(target: &RepositoryTarget) -> Result<GitClient, String> {
     let mut client = GitClient::new();
+    if target.provider == "aws_codecommit" {
+        let remote = url::Url::parse(&target.url)
+            .map_err(|_| "CodeCommit requires a valid HTTPS clone URL".to_string())?;
+        let host = remote
+            .host_str()
+            .ok_or("CodeCommit clone URL has no host")?;
+        let expected_host = target
+            .endpoint
+            .as_deref()
+            .map(|region| format!("git-codecommit.{region}.amazonaws.com"))
+            .ok_or("CodeCommit project has no AWS region")?;
+        if remote.scheme() != "https"
+            || host != expected_host
+            || !remote.username().is_empty()
+            || remote.password().is_some()
+        {
+            return Err("CodeCommit clone URL is not a supported AWS HTTPS remote".into());
+        }
+        return Ok(client.with_codecommit_credentials());
+    }
     if let Some(reference) = &target.credential_ref {
+        let remote = url::Url::parse(&target.url)
+            .map_err(|_| "Selected credential requires a valid HTTPS clone URL".to_string())?;
+        if remote.scheme() != "https"
+            || !remote.username().is_empty()
+            || remote.password().is_some()
+        {
+            return Err(
+                "Selected credential requires an HTTPS clone URL without embedded credentials"
+                    .into(),
+            );
+        }
+        let host = remote.host_str().ok_or("Clone URL has no host")?;
+        let configured_origin = target
+            .endpoint
+            .as_deref()
+            .and_then(|endpoint| url::Url::parse(endpoint).ok())
+            .map(|endpoint| endpoint.origin());
+        let valid_host = match target.provider.as_str() {
+            "github" => host == "github.com",
+            "gitlab" => host == "gitlab.com",
+            "bitbucket" => host == "bitbucket.org",
+            "gitea" => host == "gitea.com",
+            "codeberg" => host == "codeberg.org",
+            "azure_devops" => host == "dev.azure.com" || host.ends_with(".visualstudio.com"),
+            "forgejo" | "custom" => configured_origin.as_ref() == Some(&remote.origin()),
+            _ => false,
+        };
+        if !valid_host {
+            return Err("Clone host does not match the selected provider".into());
+        }
+        if reference.starts_with("gcm:") {
+            let provider = crate::workspace::ProviderChoice::from_source_provider(&target.provider);
+            if provider.credential_manager_host() != Some(host)
+                || provider
+                    .credential_manager_reference(target.endpoint.as_deref())
+                    .as_deref()
+                    != Some(reference.as_str())
+            {
+                return Err("Git Credential Manager account belongs to another host".into());
+            }
+            return Ok(client.with_credential_manager());
+        }
+        let username = match target.provider.as_str() {
+            "github" => "x-access-token",
+            "gitlab" => "oauth2",
+            "bitbucket" => "x-bitbucket-api-token-auth",
+            "azure_devops" => "release-desk",
+            _ => target.account.as_str(),
+        };
         let executable = std::env::current_exe()
             .map_err(|error| format!("Cannot locate Git credential helper: {error}"))?;
-        let credential = GitCredentialContext::new(executable, reference.clone(), &target.url)
-            .map_err(|error| error.to_string())?;
+        let authority = remote
+            .port()
+            .map_or_else(|| host.to_string(), |port| format!("{host}:{port}"));
+        let credential = GitCredentialContext::for_provider(
+            executable,
+            reference.clone(),
+            &target.url,
+            &authority,
+            username,
+        )
+        .map_err(|error| error.to_string())?;
         client = client.with_credential(credential);
-    } else {
-        let host = if target.url.contains("gitlab") {
-            "gitlab.com"
-        } else if target.url.contains("bitbucket") {
-            "bitbucket.org"
-        } else {
-            "github.com"
-        };
-        if let Some((_, token)) =
-            release_desk_store::credentials::OsSecretStore::discover_system_git_credentials(host)
-        {
-            client = client.with_token(token);
-        }
     }
     Ok(client)
 }

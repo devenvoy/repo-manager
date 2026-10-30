@@ -20,6 +20,14 @@ pub enum ProviderChoice {
     Custom,
 }
 
+/// Browser flow that the desktop can complete for a provider.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BrowserAuth {
+    GitHubDevice,
+    GitCredentialManager(&'static str),
+    Unavailable,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ProjectSection {
     #[default]
@@ -51,6 +59,23 @@ impl ProjectSection {
 }
 
 impl ProviderChoice {
+    pub const fn requires_endpoint(self) -> bool {
+        matches!(
+            self,
+            Self::AzureDevOps | Self::Forgejo | Self::AwsCodeCommit | Self::Custom
+        )
+    }
+
+    pub const fn endpoint_label(self) -> &'static str {
+        match self {
+            Self::AzureDevOps => "Azure organization URL (https://dev.azure.com/your-org)",
+            Self::Forgejo => "Forgejo server HTTPS URL",
+            Self::AwsCodeCommit => "AWS region (for example us-east-1)",
+            Self::Custom => "Gitea-compatible server HTTPS URL",
+            _ => "Provider address",
+        }
+    }
+
     pub fn from_source_provider(provider: &str) -> Self {
         match provider {
             "github" => Self::GitHub,
@@ -87,7 +112,7 @@ impl ProviderChoice {
             Self::Forgejo => "Forgejo",
             Self::Codeberg => "Codeberg",
             Self::AwsCodeCommit => "AWS CodeCommit",
-            Self::Custom => "Custom Git server",
+            Self::Custom => "Custom Gitea-compatible server",
         }
     }
 
@@ -112,10 +137,58 @@ impl ProviderChoice {
             Self::Bitbucket => "bitbucket.org",
             Self::AzureDevOps => "dev.azure.com",
             Self::Gitea => "gitea.com",
-            Self::Forgejo => "codeberg.org",
+            Self::Forgejo => "",
             Self::Codeberg => "codeberg.org",
             Self::AwsCodeCommit => "amazonaws.com",
             Self::Custom => "localhost",
+        }
+    }
+
+    /// Concrete browser flow available for this provider.
+    pub const fn browser_auth(self) -> BrowserAuth {
+        match self {
+            Self::GitHub => BrowserAuth::GitHubDevice,
+            Self::GitLab => BrowserAuth::GitCredentialManager("gitlab.com"),
+            Self::Bitbucket => BrowserAuth::GitCredentialManager("bitbucket.org"),
+            Self::AzureDevOps => BrowserAuth::GitCredentialManager("dev.azure.com"),
+            _ => BrowserAuth::Unavailable,
+        }
+    }
+
+    /// Hosts with a browser flow implemented by Git Credential Manager.
+    pub const fn credential_manager_host(self) -> Option<&'static str> {
+        match self.browser_auth() {
+            BrowserAuth::GitCredentialManager(host) => Some(host),
+            _ => None,
+        }
+    }
+
+    /// Opaque reference to a credential managed outside Release Desk.
+    pub fn credential_manager_reference(self, endpoint: Option<&str>) -> Option<String> {
+        let host = self.credential_manager_host()?;
+        if self == Self::AzureDevOps {
+            let url = url::Url::parse(endpoint?).ok()?;
+            if url.scheme() != "https"
+                || url.host_str() != Some(host)
+                || url.port().is_some()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return None;
+            }
+            let organization = url.path().trim_matches('/');
+            if organization.is_empty()
+                || !organization
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return None;
+            }
+            Some(format!("gcm:{host}:{organization}"))
+        } else {
+            Some(format!("gcm:{host}"))
         }
     }
 
@@ -124,8 +197,12 @@ impl ProviderChoice {
             Self::GitLab => {
                 "https://gitlab.com/-/profile/personal_access_tokens?name=Release%20Desk&scopes=api,read_user,read_repository"
             }
-            Self::Bitbucket => "https://bitbucket.org/account/settings/app-passwords/",
-            _ => {
+            Self::Bitbucket => "https://id.atlassian.com/manage-profile/security/api-tokens",
+            Self::Gitea => "https://gitea.com/user/settings/applications",
+            Self::Codeberg => "https://codeberg.org/user/settings/applications",
+            Self::AzureDevOps => "https://dev.azure.com/",
+            Self::Forgejo | Self::AwsCodeCommit | Self::Custom => "",
+            Self::GitHub => {
                 "https://github.com/settings/tokens/new?description=Release%20Desk&scopes=repo,read:user"
             }
         }
@@ -195,11 +272,16 @@ pub enum AuthModeChoice {
 pub fn find_saved_accounts_for_provider(
     projects: &[WorkspaceProject],
     provider: ProviderChoice,
+    endpoint: Option<&str>,
 ) -> Vec<SavedAccountInfo> {
     let mut accounts = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for p in projects {
-        if p.provider == provider && !p.account.trim().is_empty() {
+        if p.provider == provider
+            && (!provider.requires_endpoint() || p.custom_host.as_deref() == endpoint)
+            && !p.account.trim().is_empty()
+            && p.credential_ref.is_some()
+        {
             let handle = p.account.trim().to_string();
             if seen.insert(handle.clone()) {
                 let cred_key = p
@@ -208,8 +290,8 @@ pub fn find_saved_accounts_for_provider(
                     .unwrap_or_else(|| format!("release_desk_{}_{}", provider.as_str(), handle));
                 accounts.push(SavedAccountInfo {
                     handle,
+                    has_keychain_secret: !cred_key.starts_with("gcm:"),
                     credential_ref: Some(cred_key),
-                    has_keychain_secret: true,
                 });
             }
         }
@@ -241,10 +323,50 @@ impl WorkspaceProject {
         if !self.directory.is_absolute() || !self.directory.is_dir() {
             return Err("Choose an existing directory on disk for this project.".into());
         }
-        if self.provider == ProviderChoice::Custom {
+        if self.provider.requires_endpoint() && self.provider != ProviderChoice::AwsCodeCommit {
             let host = self.custom_host.as_deref().unwrap_or_default();
             if !valid_custom_host(host) {
-                return Err("Enter a valid HTTPS URL for the custom Git server.".into());
+                return Err("Enter a valid HTTPS provider URL.".into());
+            }
+            let parsed = url::Url::parse(host)
+                .map_err(|_| "Enter a valid HTTPS provider URL.".to_string())?;
+            if parsed.scheme() != "https"
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                return Err(
+                    "Enter a provider HTTPS URL without credentials or query parameters.".into(),
+                );
+            }
+            let path = parsed.path().trim_matches('/');
+            match self.provider {
+                ProviderChoice::AzureDevOps
+                    if parsed.host_str() != Some("dev.azure.com")
+                        || parsed.port().is_some()
+                        || path.is_empty()
+                        || path.contains('/') =>
+                {
+                    return Err(
+                        "Enter an Azure organization URL, such as https://dev.azure.com/example."
+                            .into(),
+                    );
+                }
+                ProviderChoice::Forgejo | ProviderChoice::Custom if !path.is_empty() => {
+                    return Err("Enter the Git server HTTPS origin without a path.".into());
+                }
+                _ => {}
+            }
+        }
+        if self.provider == ProviderChoice::AwsCodeCommit {
+            let region = self.custom_host.as_deref().unwrap_or_default();
+            if region.is_empty()
+                || !region
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            {
+                return Err("Enter a valid AWS region, such as us-east-1.".into());
             }
         }
         Ok(())
@@ -305,6 +427,56 @@ mod tests {
         assert!(project.validate().is_err());
         project.custom_host = Some("https://git.example.com".into());
         assert!(project.validate().is_ok());
+    }
+
+    #[test]
+    fn provider_coordinates_are_validated_at_project_creation() {
+        let mut project = WorkspaceProject {
+            id: 1,
+            name: "Providers".into(),
+            directory: std::env::temp_dir(),
+            provider: ProviderChoice::AzureDevOps,
+            account: String::new(),
+            custom_host: Some("https://dev.azure.com/example".into()),
+            credential_ref: None,
+            disk_layout: DiskLayout::Grouped,
+            sources: Vec::new(),
+            repository_list_mode: RepositoryListMode::Grouped,
+        };
+        assert!(project.validate().is_ok());
+        project.custom_host = Some("https://evil.example.com/example".into());
+        assert!(project.validate().is_err());
+        project.provider = ProviderChoice::Forgejo;
+        project.custom_host = Some("https://git.example.com".into());
+        assert!(project.validate().is_ok());
+        project.custom_host = Some("https://git.example.com/path".into());
+        assert!(project.validate().is_err());
+        project.provider = ProviderChoice::AwsCodeCommit;
+        project.custom_host = Some("us-east-1".into());
+        assert!(project.validate().is_ok());
+        project.custom_host = Some("us-east-1/other".into());
+        assert!(project.validate().is_err());
+    }
+
+    #[test]
+    fn browser_credential_reference_is_scoped_to_azure_organization() {
+        assert_eq!(
+            ProviderChoice::AzureDevOps
+                .credential_manager_reference(Some("https://dev.azure.com/first"))
+                .as_deref(),
+            Some("gcm:dev.azure.com:first")
+        );
+        assert_ne!(
+            ProviderChoice::AzureDevOps
+                .credential_manager_reference(Some("https://dev.azure.com/first")),
+            ProviderChoice::AzureDevOps
+                .credential_manager_reference(Some("https://dev.azure.com/second"))
+        );
+        assert!(
+            ProviderChoice::AzureDevOps
+                .credential_manager_reference(Some("https://evil.example.com/first"))
+                .is_none()
+        );
     }
 
     #[test]

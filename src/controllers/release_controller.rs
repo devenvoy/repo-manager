@@ -242,27 +242,24 @@ impl ReleaseDesk {
                         .eq_ignore_ascii_case(&owner)
             })
         });
-        let custom_host = (provider == "custom" || provider == "azure_devops")
+        let custom_host = matches!(provider.as_str(), "custom" | "forgejo" | "azure_devops")
             .then(|| {
-                (provider == "custom")
-                    .then(|| project.custom_host.clone())
-                    .flatten()
-                    .or_else(|| {
-                        project
-                            .sources
-                            .iter()
-                            .flat_map(|source| &source.repositories)
-                            .find(|item| item.name == repo)
-                            .and_then(|item| {
-                                crate::modules::release_service::clone_host(&item.clone_url)
-                            })
-                            .filter(|host| {
-                                provider != "azure_devops"
-                                    || host == "dev.azure.com"
-                                    || host.ends_with(".visualstudio.com")
-                            })
-                            .map(|host| format!("https://{host}"))
-                    })
+                project.custom_host.clone().or_else(|| {
+                    project
+                        .sources
+                        .iter()
+                        .flat_map(|source| &source.repositories)
+                        .find(|item| item.name == repo)
+                        .and_then(|item| {
+                            crate::modules::release_service::clone_host(&item.clone_url)
+                        })
+                        .filter(|host| {
+                            provider != "azure_devops"
+                                || host == "dev.azure.com"
+                                || host.ends_with(".visualstudio.com")
+                        })
+                        .map(|host| format!("https://{host}"))
+                })
             })
             .flatten();
         let auth_project = project.clone();

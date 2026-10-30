@@ -10,6 +10,8 @@ cargo run
 
 Create projects and select repositories in the Project Hub. The **App Store** reads a local SQLite catalog at `<library_dir>/store/catalog.sqlite3`; opening it does not fetch from the network. Refreshing a project's Releases page updates that project's store records, and the Store's **Refresh** button checks every project online. Failed provider requests keep the last known listing. Install uses a matching file already downloaded in the project's release shelf before contacting a provider.
 
+Project creation accepts GitHub, GitLab, Bitbucket Cloud, Gitea, Forgejo, Codeberg, Azure DevOps, AWS CodeCommit, and Gitea-compatible custom servers. Each host uses its own source discovery adapter. Azure needs an organization URL; Forgejo and custom servers need an HTTPS origin; CodeCommit needs an AWS region and a configured AWS CLI profile. See [provider connections](docs/provider-connections.md) for credentials and source input formats.
+
 ## Store metadata
 
 Place `release-desk-store.json` at the root of a cloned repository to supply its store page:

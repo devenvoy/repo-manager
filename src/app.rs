@@ -22,7 +22,7 @@ use release_desk_application::event::EventBroadcaster;
 use release_desk_application::use_case::auth::AuthenticateProviderUseCase;
 use release_desk_core::port::SecretStorePort as _;
 use release_desk_core::project::DiskLayout;
-use release_desk_store::auth::{LocalOAuthServer, ModalWebviewAuthPort, SystemBrowserAuthPort};
+use release_desk_store::auth::{ModalWebviewAuthPort, SystemBrowserAuthPort};
 use release_desk_store::credentials::OsSecretStore;
 use std::sync::Arc;
 
@@ -119,7 +119,6 @@ pub struct ReleaseDesk {
     pub(crate) auth_status_message: Option<String>,
     pub(crate) detected_system_credential: Option<(String, String)>,
     pub(crate) credential_discovery_revision: u64,
-    pub(crate) local_oauth_server: Option<LocalOAuthServer>,
     pub(crate) device_flow_user_code: Option<String>,
     pub(crate) device_flow_verification_uri: Option<String>,
     pub(crate) device_flow_canceller: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -135,6 +134,31 @@ pub(crate) fn project_auth_token(
     let Some(reference) = &project.credential_ref else {
         return Ok(None);
     };
+    if reference.starts_with("gcm:") {
+        if project
+            .provider
+            .credential_manager_reference(project.custom_host.as_deref())
+            .as_deref()
+            != Some(reference)
+        {
+            return Err("Git Credential Manager account belongs to another provider".into());
+        }
+        let host = project
+            .provider
+            .credential_manager_host()
+            .ok_or("Unsupported browser account")?;
+        let path = (project.provider == ProviderChoice::AzureDevOps).then(|| {
+            project
+                .custom_host
+                .as_deref()
+                .unwrap_or_default()
+                .trim_start_matches("https://dev.azure.com/")
+                .trim_matches('/')
+        });
+        let (_, token) = OsSecretStore::credential_manager_account(host, path)
+            .map_err(|error| error.to_string())?;
+        return Ok(Some(token));
+    }
     match secret_store.get_secret(reference) {
         Ok(Some(token)) if !token.is_empty() => Ok(Some(token)),
         Ok(_) => Err("Selected project credential is missing. Connect the account again.".into()),
@@ -374,7 +398,6 @@ impl ReleaseDesk {
             auth_status_message: None,
             detected_system_credential: None,
             credential_discovery_revision: 0,
-            local_oauth_server: None,
             device_flow_user_code: None,
             device_flow_verification_uri: None,
             device_flow_canceller: None,
@@ -726,8 +749,12 @@ impl Render for ReleaseDesk {
             )
             .into_any_element(),
             _ if self.setup_active => {
-                let saved_accounts =
-                    find_saved_accounts_for_provider(&self.projects, self.setup_provider);
+                let endpoint = self.custom_host_input.read(cx).value().trim().to_string();
+                let saved_accounts = find_saved_accounts_for_provider(
+                    &self.projects,
+                    self.setup_provider,
+                    (!endpoint.is_empty()).then_some(endpoint.as_str()),
+                );
                 let has_existing_credential = self
                     .editing_project_id
                     .and_then(|id| self.projects.iter().find(|p| p.id == id))
@@ -738,6 +765,12 @@ impl Render for ReleaseDesk {
                         editing: self.editing_project_id.is_some(),
                         step: self.setup_step,
                         provider: self.setup_provider,
+                        supported_providers: ProviderChoice::ALL
+                            .into_iter()
+                            .filter(|provider| {
+                                release_desk_store::provider_sources::supports(provider.as_str())
+                            })
+                            .collect(),
                         disk_layout: self.setup_layout,
                         name: &self.name_input,
                         directory: &self.directory_input,
@@ -750,10 +783,6 @@ impl Render for ReleaseDesk {
                         auth_mode: self.auth_mode_choice,
                         auth_status_message: self.auth_status_message.clone(),
                         has_existing_credential,
-                        is_oauth_listening: self
-                            .local_oauth_server
-                            .as_ref()
-                            .is_some_and(|s| s.is_listening()),
                         device_user_code: self.device_flow_user_code.clone(),
                     },
                     cx,
@@ -772,6 +801,9 @@ impl Render for ReleaseDesk {
                         },
                         on_connect_system_credential: |this: &mut Self, window, cx| {
                             this.connect_system_credential(window, cx);
+                        },
+                        on_find_system_credential: |this: &mut Self, cx| {
+                            this.find_setup_credential(cx);
                         },
                         on_disconnect_credential: |this: &mut Self, window, cx| {
                             this.disconnect_credential(window, cx);
