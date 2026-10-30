@@ -51,7 +51,6 @@ pub struct ReleaseDesk {
     pub(crate) directory_input: Entity<InputState>,
     pub(crate) account_input: Entity<InputState>,
     pub(crate) custom_host_input: Entity<InputState>,
-    pub(crate) oauth_client_id_input: Entity<InputState>,
     pub(crate) token_input: Entity<InputState>,
     pub(crate) source_input: Entity<InputState>,
     pub(crate) source_search: Entity<InputState>,
@@ -160,7 +159,24 @@ pub(crate) fn project_auth_token(
         return Ok(Some(token));
     }
     match secret_store.get_secret(reference) {
-        Ok(Some(token)) if !token.is_empty() => Ok(Some(token)),
+        Ok(Some(stored)) if !stored.is_empty() => {
+            if let Some(mut oauth) =
+                release_desk_store::auth::StoredOAuthCredential::decode(&stored)
+            {
+                let token = oauth.resolve_access_token()?.to_string();
+                let refreshed = oauth.encode()?;
+                if refreshed != stored {
+                    secret_store
+                        .set_secret(reference, &refreshed)
+                        .map_err(|error| {
+                            format!("Cannot save refreshed OAuth credential: {error}")
+                        })?;
+                }
+                Ok(Some(token))
+            } else {
+                Ok(Some(stored))
+            }
+        }
         Ok(_) => Err("Selected project credential is missing. Connect the account again.".into()),
         Err(error) => Err(format!("Cannot read selected project credential: {error}")),
     }
@@ -227,8 +243,6 @@ impl ReleaseDesk {
             cx.new(|cx| InputState::new(window, cx).placeholder("Account or organization"));
         let custom_host_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://git.example.com"));
-        let oauth_client_id_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("e.g. 178c6fc7... (optional)"));
         let token_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Personal access token"));
         let source_input =
@@ -339,7 +353,6 @@ impl ReleaseDesk {
             directory_input,
             account_input,
             custom_host_input,
-            oauth_client_id_input,
             token_input,
             source_input,
             source_search,
@@ -765,6 +778,10 @@ impl Render for ReleaseDesk {
                         editing: self.editing_project_id.is_some(),
                         step: self.setup_step,
                         provider: self.setup_provider,
+                        browser_auth_available:
+                            crate::controllers::auth_controller::browser_auth_available(
+                                self.setup_provider,
+                            ),
                         supported_providers: ProviderChoice::ALL
                             .into_iter()
                             .filter(|provider| {
@@ -775,7 +792,6 @@ impl Render for ReleaseDesk {
                         name: &self.name_input,
                         directory: &self.directory_input,
                         custom_host: &self.custom_host_input,
-                        oauth_client_id: &self.oauth_client_id_input,
                         token: &self.token_input,
                         system_credential: self.detected_system_credential.clone(),
                         saved_accounts,

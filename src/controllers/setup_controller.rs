@@ -16,6 +16,9 @@ impl ReleaseDesk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(cancelled) = self.device_flow_canceller.take() {
+            cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let original = editing
             .and_then(|id| self.projects.iter().find(|project| project.id == id))
             .cloned();
@@ -60,7 +63,9 @@ impl ReleaseDesk {
                 orig.credential_ref.as_ref().map(|_| orig.account.clone());
             self.auth_mode_choice = if self.saved_credential_ref.is_some() {
                 AuthModeChoice::SavedAccount
-            } else if self.setup_provider == ProviderChoice::GitHub {
+            } else if crate::controllers::auth_controller::browser_auth_available(
+                self.setup_provider,
+            ) {
                 AuthModeChoice::OAuthBrowser
             } else {
                 AuthModeChoice::Token
@@ -69,11 +74,13 @@ impl ReleaseDesk {
         } else {
             self.selected_saved_account = None;
             self.saved_credential_ref = None;
-            self.auth_mode_choice = if self.setup_provider == ProviderChoice::GitHub {
-                AuthModeChoice::OAuthBrowser
-            } else {
-                AuthModeChoice::Token
-            };
+            self.auth_mode_choice =
+                if crate::controllers::auth_controller::browser_auth_available(self.setup_provider)
+                {
+                    AuthModeChoice::OAuthBrowser
+                } else {
+                    AuthModeChoice::Token
+                };
             self.auth_status_message = None;
         }
 
@@ -93,8 +100,6 @@ impl ReleaseDesk {
             .update(cx, |input, cx| input.set_value(initial_account, window, cx));
         self.custom_host_input
             .update(cx, |input, cx| input.set_value(host, window, cx));
-        self.oauth_client_id_input
-            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
         self.token_input
             .update(cx, |input, cx| input.set_value(String::new(), window, cx));
         cx.notify();
@@ -106,17 +111,21 @@ impl ReleaseDesk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(cancelled) = self.device_flow_canceller.take() {
+            cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         self.setup_provider = provider;
         self.detected_system_credential = None;
         self.discover_setup_credential(false, cx);
 
         self.selected_saved_account = None;
         self.saved_credential_ref = None;
-        self.auth_mode_choice = if provider == ProviderChoice::GitHub {
-            AuthModeChoice::OAuthBrowser
-        } else {
-            AuthModeChoice::Token
-        };
+        self.auth_mode_choice =
+            if crate::controllers::auth_controller::browser_auth_available(provider) {
+                AuthModeChoice::OAuthBrowser
+            } else {
+                AuthModeChoice::Token
+            };
         self.auth_status_message = None;
         self.account_input
             .update(cx, |input, cx| input.set_value(String::new(), window, cx));
@@ -317,6 +326,14 @@ impl ReleaseDesk {
                     .requires_endpoint()
                     .then_some(host.as_str()),
             );
+            let expected_oauth =
+                release_desk_store::provider_sources::connection::oauth_credential_key(
+                    self.setup_provider.as_str(),
+                    &account,
+                    self.setup_provider
+                        .requires_endpoint()
+                        .then_some(host.as_str()),
+                );
             let unchanged_legacy = previous.is_some_and(|project| {
                 project.provider == self.setup_provider
                     && project.account == account
@@ -336,7 +353,11 @@ impl ReleaseDesk {
                 )
                 .as_deref()
                 == Some(reference);
-            if reference != expected && !unchanged_legacy && !managed_browser {
+            if reference != expected
+                && reference != expected_oauth
+                && !unchanged_legacy
+                && !managed_browser
+            {
                 self.message =
                     "The saved credential belongs to another account or provider address. Connect again."
                         .into();

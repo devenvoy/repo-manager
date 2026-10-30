@@ -3,89 +3,6 @@
 use super::*;
 
 impl ReleaseDesk {
-    pub(super) fn connect_credential_manager(
-        &mut self,
-        host: &'static str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let provider = self.setup_provider;
-        let endpoint = self.custom_host_input.read(cx).value().trim().to_string();
-        let Some(reference) = provider
-            .credential_manager_reference((!endpoint.is_empty()).then_some(endpoint.as_str()))
-        else {
-            self.auth_status_message =
-                Some("Enter a valid provider address before browser sign-in.".into());
-            cx.notify();
-            return;
-        };
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.auth_status_message = Some(format!(
-            "Waiting for {} browser sign-in through Git Credential Manager…",
-            provider.label()
-        ));
-        std::thread::spawn(move || {
-            let result = (|| {
-                let path = (provider == ProviderChoice::AzureDevOps).then(|| {
-                    endpoint
-                        .trim_start_matches("https://dev.azure.com/")
-                        .trim_matches('/')
-                });
-                let (_, token) = OsSecretStore::credential_manager_account(host, path)
-                    .map_err(|error| error.to_string())?;
-                let login = release_desk_store::provider_sources::connection::validate_token(
-                    provider.as_str(),
-                    &token,
-                    (!endpoint.is_empty()).then_some(endpoint.as_str()),
-                )
-                .map_err(|error| error.to_string())?;
-                Ok::<_, String>(login)
-            })();
-            let _ = tx.send(result);
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(100))
-                    .await;
-                match rx.try_recv() {
-                    Ok(result) => {
-                        let _ = this.update_in(cx, |this, window, cx| {
-                            if !this.setup_active || this.setup_provider != provider {
-                                return;
-                            }
-                            match result {
-                                Ok(login) => {
-                                    this.saved_credential_ref = Some(reference);
-                                    this.selected_saved_account = Some(login.clone());
-                                    this.auth_mode_choice = AuthModeChoice::SavedAccount;
-                                    this.account_input.update(cx, |input, cx| {
-                                        input.set_value(login.clone(), window, cx)
-                                    });
-                                    this.auth_status_message = Some(format!(
-                                        "Connected to {} as @{login} through Git Credential Manager.",
-                                        provider.label()
-                                    ));
-                                }
-                                Err(error) => {
-                                    this.auth_status_message = Some(format!(
-                                        "Browser sign-in could not complete: {error}"
-                                    ));
-                                }
-                            }
-                            cx.notify();
-                        });
-                        return;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
     pub(crate) fn connect_system_credential(
         &mut self,
         window: &mut Window,
@@ -219,15 +136,30 @@ impl ReleaseDesk {
                     .map_err(|error| error.to_string())
             };
             let result = secret.and_then(|secret| {
-                if let Some(ref token) = secret {
-                    release_desk_store::provider_sources::connection::validate_token(
-                        provider.as_str(),
-                        token,
-                        (!endpoint.is_empty()).then_some(endpoint.as_str()),
-                    )
-                    .map_err(|error| error.to_string())?;
-                }
-                Ok(secret)
+                let Some(stored) = secret else {
+                    return Ok(None);
+                };
+                let token = if let Some(mut oauth) =
+                    release_desk_store::auth::StoredOAuthCredential::decode(&stored)
+                {
+                    let token = oauth.resolve_access_token()?.to_string();
+                    let refreshed = oauth.encode()?;
+                    if refreshed != stored {
+                        secret_store
+                            .set_secret(&key_for_lookup, &refreshed)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    token
+                } else {
+                    stored
+                };
+                release_desk_store::provider_sources::connection::validate_token(
+                    provider.as_str(),
+                    &token,
+                    (!endpoint.is_empty()).then_some(endpoint.as_str()),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(Some(token))
             });
             let _ = tx.send(result);
         });

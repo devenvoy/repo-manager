@@ -1,16 +1,12 @@
 //! GitHub OAuth Device Authorization Grant (RFC 8628).
 //!
-//! This is the exact authentication workflow utilized by GitHub CLI (`gh auth login`).
-//! It initiates a device authorization flow, returns a one-time user code to enter at
-//! `https://github.com/login/device`, and polls GitHub for the OAuth token without
-//! requiring the user to manually create, copy, or paste personal access tokens.
+//! This uses GitHub's device authorization grant with Release Desk's registered public
+//! client ID. It returns a one-time code for `https://github.com/login/device` and polls
+//! for the token without asking users to create or paste personal access tokens.
 
 use release_desk_core::error::DomainError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-
-/// Official GitHub CLI public Client ID (registered with GitHub for OAuth Device Flow).
-pub const DEFAULT_GITHUB_CLIENT_ID: &str = "178c6fc778ccc68e1d6a";
 
 /// Response payload returned by GitHub's `https://github.com/login/device/code` endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,11 +69,13 @@ impl GitHubDeviceFlow {
         client_id: &str,
         scopes: &[&str],
     ) -> Result<DeviceCodeResponse, DomainError> {
-        let cid = if client_id.trim().is_empty() {
-            DEFAULT_GITHUB_CLIENT_ID
-        } else {
-            client_id.trim()
-        };
+        let cid = client_id.trim();
+        if cid.is_empty() {
+            return Err(DomainError::PortFailure {
+                port: "github_device_auth",
+                message: "Release Desk's GitHub OAuth client ID is not configured".into(),
+            });
+        }
 
         let scope_str = if scopes.is_empty() {
             "repo read:user".to_string()
@@ -119,11 +117,13 @@ impl GitHubDeviceFlow {
         client_id: &str,
         device_code: &str,
     ) -> Result<DevicePollOutcome, DomainError> {
-        let cid = if client_id.trim().is_empty() {
-            DEFAULT_GITHUB_CLIENT_ID
-        } else {
-            client_id.trim()
-        };
+        let cid = client_id.trim();
+        if cid.is_empty() {
+            return Err(DomainError::PortFailure {
+                port: "github_device_auth",
+                message: "Release Desk's GitHub OAuth client ID is not configured".into(),
+            });
+        }
 
         let url = format!("{}/login/oauth/access_token", self.auth_base_url);
         let resp = self
@@ -241,13 +241,6 @@ pub fn copy_to_macos_clipboard(text: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_client_id() {
-        assert_eq!(DEFAULT_GITHUB_CLIENT_ID, "178c6fc778ccc68e1d6a");
-    }
-
     #[test]
     fn test_outcome_parsing_pending() {
         let json = r#"{"error":"authorization_pending","error_description":"The authorization request is still pending."}"#;

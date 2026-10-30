@@ -77,7 +77,9 @@ pub(super) fn render_provider_step<T: 'static>(
     }
 
     // Connection state display
-    let is_connected = props.selected_saved_account.is_some() || props.has_existing_credential;
+    let uses_aws_credentials = props.provider == ProviderChoice::AwsCodeCommit;
+    let is_connected = !uses_aws_credentials
+        && (props.selected_saved_account.is_some() || props.has_existing_credential);
 
     if is_connected {
         let current_user = props
@@ -114,54 +116,56 @@ pub(super) fn render_provider_step<T: 'static>(
         );
     } else {
         // If a system credential (e.g. example from macOS Keychain / gh CLI) was detected:
-        if let Some((ref username, _)) = props.system_credential {
-            let user_label = username.clone();
-            content = content.child(
-                div()
-                    .p_3()
-                    .rounded(px(8.))
-                    .bg(cx.theme().secondary)
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_bold()
-                                    .child(format!(
-                                        "Detected system account: @{user_label}"
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(
-                                        "Available in your macOS Git Keychain. Click to connect this account, or choose an option below.",
-                                    ),
-                            ),
-                    )
-                    .child(
-                        Button::new("btn-connect-system-cred")
-                            .label(format!("Use @{user_label}"))
-                            .primary()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                on_connect_system_credential(this, window, cx)
-                            })),
-                    ),
-            );
+        if !uses_aws_credentials {
+            if let Some((ref username, _)) = props.system_credential {
+                let user_label = username.clone();
+                content = content.child(
+                    div()
+                        .p_3()
+                        .rounded(px(8.))
+                        .bg(cx.theme().secondary)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .font_bold()
+                                        .child(format!(
+                                            "Detected system account: @{user_label}"
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(
+                                            "Available in your macOS Git Keychain. Click to connect this account, or choose an option below.",
+                                        ),
+                                ),
+                        )
+                        .child(
+                            Button::new("btn-connect-system-cred")
+                                .label(format!("Use @{user_label}"))
+                                .primary()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    on_connect_system_credential(this, window, cx)
+                                })),
+                        ),
+                );
+            }
         }
 
         // If saved Keychain accounts exist from other projects:
-        if !props.saved_accounts.is_empty() {
+        if !uses_aws_credentials && !props.saved_accounts.is_empty() {
             let mut saved_row = div().flex().items_center().gap_2().flex_wrap();
             saved_row = saved_row.child(
                 div()

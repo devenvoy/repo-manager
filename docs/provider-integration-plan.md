@@ -6,15 +6,14 @@ Enable project creation and the complete account-to-repository workflow for GitH
 
 The project directory remains local. “Project creation” here means connecting a host and selecting its existing repositories; it does not create a remote repository.
 
-## Current failure and reuse points
+## Current implementation and remaining architecture work
 
-- `src/views/project_setup.rs` hard-codes only GitHub and GitLab as enabled.
-- `crates/release-desk-store/src/source_fetcher.rs` discovers only GitHub and GitLab. Bitbucket URLs are recognized but fetching still returns unsupported; other hosts parse as unsupported.
-- The desktop does not use `ProviderRegistry`; the CLI registers three gateways, but its discovery use case is still constructed with the GitHub gateway.
-- `GitHostGateway` combines repository listing, pull requests, and releases, while the desktop has a second set of source and release functions. Keep existing adapters during migration, then remove the duplicate path.
-- `GitCredentialContext` accepts only GitHub and GitLab HTTPS hosts. `src/repository_git.rs` guesses a host from URL substrings when no project credential is attached.
-- The generic setup auth UI has GitHub-specific copy. Non-GitHub browser OAuth does not exchange authorization codes. Token save currently means “stored,” not “validated.”
-- Release fetching already covers GitHub, GitLab, Bitbucket Downloads, and Gitea/Forgejo-compatible APIs. Azure and CodeCommit use declared artifacts because neither has a universal repository release-asset API.
+- Project setup now enables providers with a registered source adapter. `provider_sources` contains provider-specific discovery for GitHub, GitLab, Bitbucket, Gitea/Forgejo/Codeberg/custom Gitea-compatible servers, Azure DevOps, and AWS CodeCommit.
+- Authentication has provider-specific adapters for configured Release Desk clients: GitHub device authorization, GitLab/Gitea/Codeberg PKCE, Microsoft Entra PKCE, validated provider tokens, and AWS CLI credentials. Client IDs are app-owned build configuration, never user input. Bitbucket confidential OAuth is withheld until a secure server-side exchange exists.
+- The desktop still dispatches directly through `provider_sources`; it does not yet use the application `ProviderRegistry`. The CLI registry and desktop discovery path therefore remain separate.
+- `GitHostGateway` combines repository listing, pull requests, and releases, while the desktop also has source and release adapters. Keep existing paths stable during migration, then consolidate only after both clients use shared application use cases.
+- Continue auditing host-scoped credential handling and URL parsing for every adapter. Never infer a provider from substring matches or send credentials across origins.
+- Release fetching covers GitHub, GitLab, Bitbucket Downloads, and Gitea/Forgejo-compatible APIs. Azure and CodeCommit use declared artifacts because neither has a universal repository release-asset API.
 
 ## Architecture
 
@@ -62,16 +61,16 @@ Use a typed `ProviderError` with validation, missing/expired credentials, forbid
 | Provider | Discovery target and adapter | Connection and Git credential | Release path |
 | --- | --- | --- | --- |
 | GitHub | User/org/repository, existing API mapper | Existing device flow or validated token; HTTPS helper scoped to `github.com` | Existing Releases API |
-| GitLab | User, nested group, or repository | Validated token; complete OAuth exchange only if offered; HTTPS helper scoped to configured GitLab origin | Existing Releases API |
-| Bitbucket Cloud | Workspace/repository; follow opaque `next` links, use slug and UUID | Scoped Atlassian API token or OAuth; validate against `/2.0/user`/workspace access; Git helper uses Bitbucket token username convention | Existing Downloads adapter; label as downloads, not semantic releases |
-| Gitea | User/org/repository on `gitea.com` or configured origin | Scoped API token, optional OAuth after complete exchange; origin-scoped Git helper | Existing `/api/v1` releases |
-| Forgejo | User/org/repository on a **configured Forgejo origin** | Scoped API token; origin-scoped Git helper | Forgejo-compatible release API at that origin |
-| Codeberg | User/org/repository at `codeberg.org`, using Forgejo adapter configuration | Codeberg API token; Git helper scoped to `codeberg.org` | Forgejo-compatible releases at Codeberg |
-| Azure DevOps | Organization/project/repository via Core Projects and Git Repositories APIs | Prefer Microsoft Entra/Git Credential Manager; allow validated PAT as fallback. Git remote policy uses `dev.azure.com`/verified legacy origin | Declared artifact manifest until pipeline artifact mapping exists |
+| GitLab | User, nested group, or repository | Release Desk public-client PKCE when configured in the app build, or validated token; HTTPS helper scoped to configured GitLab origin | Existing Releases API |
+| Bitbucket Cloud | Workspace/repository; follow opaque `next` links, use slug and UUID | Scoped Atlassian API token; confidential OAuth requires a server-side exchange; Git helper uses API-token username convention | Existing Downloads adapter; label as downloads, not semantic releases |
+| Gitea | User/org/repository on `gitea.com` | Release Desk public-client PKCE when configured in the app build, or scoped API token; origin-scoped Git helper | Existing `/api/v1` releases |
+| Forgejo | User/org/repository on a **configured Forgejo origin** | Scoped API token; per-instance OAuth app is not bundled | Forgejo-compatible release API at that origin |
+| Codeberg | User/org/repository at `codeberg.org`, using Forgejo adapter configuration | Release Desk public-client PKCE when configured in the app build, or Codeberg API token; Git helper scoped to `codeberg.org` | Forgejo-compatible releases at Codeberg |
+| Azure DevOps | Organization/project/repository via Core Projects and Git Repositories APIs | Release Desk Microsoft Entra delegated OAuth with PKCE when configured, or validated PAT; Git remote policy uses `dev.azure.com`/verified legacy origin | Declared artifact manifest until pipeline artifact mapping exists |
 | AWS CodeCommit | AWS account/region/repository via `ListRepositories` and repository metadata | IAM credential chain and AWS SDK/CLI signing; Git credential helper or `git-remote-codecommit`, not generic PAT | Declared signed artifact URL until a pipeline mapping exists |
 | Custom Git server | User/org/repository only for a detected, supported API flavor (initially Gitea/Forgejo); otherwise exact Git URL import | Explicit HTTPS origin and matching auth strategy; never infer GitHub credentials | Flavor adapter or declared artifact manifest |
 
-Bitbucket API tokens replace app passwords. Update the token creation link, explain required read scopes, and never assume a saved token is valid. Forgejo must not silently map to Codeberg. The current `token_creation_url` fallback to GitHub for unrelated providers must be removed. Browser and webview OAuth buttons must appear only when an exchange implementation and client configuration are available; token and system-credential methods can ship without OAuth parity.
+Bitbucket API tokens replace app passwords. Explain required read scopes and never assume a saved token is valid. Forgejo must not silently map to Codeberg. The `token_creation_url` fallback to GitHub for unrelated providers has been removed. Browser OAuth is shown only when an exchange implementation and a Release Desk-owned client configuration exist. End users authorize Release Desk; they do not register OAuth apps or provide client IDs. Bitbucket OAuth requires a confidential consumer secret, so it needs a secure server-side exchange before it can be offered.
 
 ## Coordinated implementation sequence
 

@@ -233,6 +233,7 @@ fn git_client(target: &RepositoryTarget) -> Result<GitClient, String> {
         let username = match target.provider.as_str() {
             "github" => "x-access-token",
             "gitlab" => "oauth2",
+            "bitbucket" if reference.starts_with("oauth_") => "x-token-auth",
             "bitbucket" => "x-bitbucket-api-token-auth",
             "azure_devops" => "release-desk",
             _ => target.account.as_str(),

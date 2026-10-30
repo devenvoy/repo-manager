@@ -17,7 +17,7 @@ pub(super) fn render_auth_methods<T: 'static>(
     let on_find_system_credential = actions.on_find_system_credential;
     let mut content = div().flex().flex_col().gap_3();
     // Authentication Methods Switcher
-    let has_browser = props.provider.browser_auth() != BrowserAuth::Unavailable;
+    let has_browser = props.browser_auth_available;
     let is_browser = has_browser && props.auth_mode == AuthModeChoice::OAuthBrowser;
     let is_webview =
         props.provider == ProviderChoice::GitHub && props.auth_mode == AuthModeChoice::OAuthWebview;
@@ -62,39 +62,72 @@ pub(super) fn render_auth_methods<T: 'static>(
             div()
                 .text_size(px(11.))
                 .text_color(cx.theme().muted_foreground)
-                .child("Browser sign-in is not configured for this server. Use an access token or a detected Git account."),
+                .child("Release Desk browser sign-in is not configured for this provider. Use a scoped access token or a detected Git account."),
         );
     }
 
     if is_browser && props.provider != ProviderChoice::GitHub {
-        content = content.child(
-            div()
-                .p_4()
-                .rounded(px(8.))
-                .bg(cx.theme().secondary)
-                .border_1()
-                .border_color(cx.theme().border)
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!(
-                            "Sign in to {} in your browser through Git Credential Manager. It stores and refreshes the credential; Release Desk requests it when needed. Git Credential Manager must be installed.",
-                            props.provider.label()
-                        )),
-                )
-                .child(
-                    Button::new("btn-start-managed-browser-login")
-                        .label("Sign in with Git Credential Manager")
-                        .primary()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            on_auth_browser(this, window, cx)
-                        })),
-                ),
-        );
+        let (description, callback_hint) = match props.provider.browser_auth() {
+            BrowserAuth::GitLabPkce => (
+                "Continue with Release Desk's GitLab sign-in. Release Desk uses PKCE and returns to this app through a local callback.",
+                "Release Desk's registered callback: http://127.0.0.1:7171/oauth/callback",
+            ),
+            BrowserAuth::AzureEntra => (
+                "Continue with your work or school account using Release Desk's Microsoft Entra integration.",
+                "Release Desk's registered desktop redirect URI: http://localhost",
+            ),
+            BrowserAuth::ForgePkce => (
+                "Continue with Release Desk's sign-in for this forge. Release Desk uses PKCE and a local callback.",
+                "Release Desk's registered integration handles the loopback callback.",
+            ),
+            _ => (
+                "This provider does not have a native browser OAuth flow configured.",
+                "",
+            ),
+        };
+        let mut browser_card = div()
+            .p_4()
+            .rounded(px(8.))
+            .bg(cx.theme().secondary)
+            .border_1()
+            .border_color(cx.theme().border)
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(description),
+            );
+        browser_card = browser_card
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(callback_hint),
+            )
+            .child(
+                Button::new("btn-start-provider-oauth")
+                    .label("Continue in Browser")
+                    .primary()
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| on_auth_browser(this, window, cx)),
+                    ),
+            );
+        content = content.child(browser_card);
+        if props
+            .auth_status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("secure callback"))
+        {
+            content = content.child(
+                Button::new("btn-cancel-provider-oauth")
+                    .label("Cancel sign-in")
+                    .ghost()
+                    .on_click(cx.listener(move |this, _, _, cx| on_cancel_browser_auth(this, cx))),
+            );
+        }
     } else if is_browser {
         let mut browser_box = div()
             .p_4()
@@ -192,15 +225,6 @@ pub(super) fn render_auth_methods<T: 'static>(
                                 on_auth_browser(this, window, cx)
                             })),
                     ),
-            )
-            .child(
-                Form::new().child(
-                    Field::new()
-                        .label(
-                            "OAuth Client ID (optional, defaults to official GitHub CLI Client ID)",
-                        )
-                        .child(Input::new(props.oauth_client_id)),
-                ),
             );
         }
         content = content.child(browser_box);

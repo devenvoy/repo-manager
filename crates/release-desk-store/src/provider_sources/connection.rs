@@ -16,6 +16,11 @@ pub fn credential_key(provider: &str, account: &str, endpoint: Option<&str>) -> 
     }
 }
 
+/// Mark OAuth-managed credentials so provider-specific Git username conventions can apply.
+pub fn oauth_credential_key(provider: &str, account: &str, endpoint: Option<&str>) -> String {
+    format!("oauth_{}", credential_key(provider, account, endpoint))
+}
+
 pub fn validate_token(
     provider: &str,
     token: &str,

@@ -62,7 +62,17 @@ pub fn dispatch() -> Option<i32> {
     let stdout = io::stdout();
     let store = OsSecretStore::new();
     let result = respond(&operation, &scope, stdin.lock(), stdout.lock(), |key| {
-        store.get_secret(key).ok().flatten()
+        let stored = store.get_secret(key).ok().flatten()?;
+        let Some(mut oauth) = release_desk_store::auth::StoredOAuthCredential::decode(&stored)
+        else {
+            return Some(stored);
+        };
+        let token = oauth.resolve_access_token().ok()?.to_string();
+        let refreshed = oauth.encode().ok()?;
+        if refreshed != stored {
+            store.set_secret(key, &refreshed).ok()?;
+        }
+        Some(token)
     });
     Some(if result.is_ok() { 0 } else { 1 })
 }

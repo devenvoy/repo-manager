@@ -24,7 +24,9 @@ pub enum ProviderChoice {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BrowserAuth {
     GitHubDevice,
-    GitCredentialManager(&'static str),
+    GitLabPkce,
+    AzureEntra,
+    ForgePkce,
     Unavailable,
 }
 
@@ -148,17 +150,20 @@ impl ProviderChoice {
     pub const fn browser_auth(self) -> BrowserAuth {
         match self {
             Self::GitHub => BrowserAuth::GitHubDevice,
-            Self::GitLab => BrowserAuth::GitCredentialManager("gitlab.com"),
-            Self::Bitbucket => BrowserAuth::GitCredentialManager("bitbucket.org"),
-            Self::AzureDevOps => BrowserAuth::GitCredentialManager("dev.azure.com"),
+            Self::GitLab => BrowserAuth::GitLabPkce,
+            Self::AzureDevOps => BrowserAuth::AzureEntra,
+            Self::Gitea | Self::Codeberg => BrowserAuth::ForgePkce,
             _ => BrowserAuth::Unavailable,
         }
     }
 
-    /// Hosts with a browser flow implemented by Git Credential Manager.
+    /// Hosts that may still have credentials saved by the earlier GCM-based flow.
     pub const fn credential_manager_host(self) -> Option<&'static str> {
-        match self.browser_auth() {
-            BrowserAuth::GitCredentialManager(host) => Some(host),
+        match self {
+            // Retain the ability to read credentials created by the earlier GCM-based build.
+            Self::GitLab => Some("gitlab.com"),
+            Self::Bitbucket => Some("bitbucket.org"),
+            Self::AzureDevOps => Some("dev.azure.com"),
             _ => None,
         }
     }
@@ -205,34 +210,6 @@ impl ProviderChoice {
             Self::GitHub => {
                 "https://github.com/settings/tokens/new?description=Release%20Desk&scopes=repo,read:user"
             }
-        }
-    }
-
-    pub fn oauth_authorize_url(self, client_id: &str, redirect_uri: &str) -> String {
-        let cid = client_id.trim();
-        if cid.is_empty() {
-            return self.token_creation_url().to_string();
-        }
-        match self {
-            Self::GitHub => format!(
-                "https://github.com/login/oauth/authorize?client_id={cid}&redirect_uri={redirect_uri}&scope=repo%20read:user&response_type=code"
-            ),
-            Self::GitLab => format!(
-                "https://gitlab.com/oauth/authorize?client_id={cid}&redirect_uri={redirect_uri}&response_type=code&scope=read_user%20read_repository"
-            ),
-            Self::Bitbucket => format!(
-                "https://bitbucket.org/site/oauth2/authorize?client_id={cid}&response_type=code"
-            ),
-            Self::Codeberg | Self::Forgejo => format!(
-                "https://codeberg.org/login/oauth/authorize?client_id={cid}&redirect_uri={redirect_uri}&response_type=code"
-            ),
-            Self::Gitea => format!(
-                "https://gitea.com/login/oauth/authorize?client_id={cid}&redirect_uri={redirect_uri}&response_type=code"
-            ),
-            _ => format!(
-                "https://{}/login/oauth/authorize?client_id={cid}&redirect_uri={redirect_uri}&response_type=code",
-                self.default_host()
-            ),
         }
     }
 }
@@ -476,6 +453,39 @@ mod tests {
             ProviderChoice::AzureDevOps
                 .credential_manager_reference(Some("https://evil.example.com/first"))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn browser_auth_describes_provider_protocol_capabilities() {
+        assert_eq!(
+            ProviderChoice::GitHub.browser_auth(),
+            BrowserAuth::GitHubDevice
+        );
+        assert_eq!(
+            ProviderChoice::GitLab.browser_auth(),
+            BrowserAuth::GitLabPkce
+        );
+        assert_eq!(ProviderChoice::Gitea.browser_auth(), BrowserAuth::ForgePkce);
+        assert_eq!(
+            ProviderChoice::Forgejo.browser_auth(),
+            BrowserAuth::Unavailable
+        );
+        assert_eq!(
+            ProviderChoice::Codeberg.browser_auth(),
+            BrowserAuth::ForgePkce
+        );
+        assert_eq!(
+            ProviderChoice::Custom.browser_auth(),
+            BrowserAuth::Unavailable
+        );
+        assert_eq!(
+            ProviderChoice::Bitbucket.browser_auth(),
+            BrowserAuth::Unavailable
+        );
+        assert_eq!(
+            ProviderChoice::AzureDevOps.browser_auth(),
+            BrowserAuth::AzureEntra
         );
     }
 

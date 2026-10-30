@@ -19,17 +19,18 @@ impl ReleaseDesk {
             let _ = child.kill();
         }
 
-        let custom_client_id = self
-            .oauth_client_id_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
+        let Some(client_id) = release_desk_store::auth::providers::github_client_id() else {
+            self.auth_status_message =
+                Some("Release Desk's GitHub OAuth client is not configured in this build.".into());
+            cx.notify();
+            return;
+        };
+        let client_id = client_id.to_string();
 
         if self.setup_provider == ProviderChoice::GitHub {
             let flow = GitHubDeviceFlow::default();
             let scopes = ["repo", "read:user"];
-            match flow.request_code(&custom_client_id, &scopes) {
+            match flow.request_code(&client_id, &scopes) {
                 Ok(resp) => {
                     let user_code = resp.user_code;
                     let device_code = resp.device_code;
@@ -66,7 +67,7 @@ impl ReleaseDesk {
                     self.device_flow_canceller = Some(cancel_token.clone());
 
                     cx.spawn_in(window, async move |this, cx| {
-                        let cid = custom_client_id.clone();
+                        let cid = client_id.clone();
                         let dcode = device_code.clone();
                         for _ in 0..180 {
                             cx.background_executor()
@@ -82,9 +83,9 @@ impl ReleaseDesk {
                             let dcode_clone = dcode.clone();
                             let outcome = cx
                                 .background_executor()
-                                .spawn(async move {
-                                    flow_bg.poll_token(&cid_clone, &dcode_clone)
-                                })
+                                    .spawn(async move {
+                                        flow_bg.poll_token(&cid_clone, &dcode_clone)
+                                    })
                                 .await;
 
                             match outcome {
