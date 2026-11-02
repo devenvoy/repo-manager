@@ -1,10 +1,40 @@
-# Release Desk
+<p align="center">
+  <img src="resources/social-preview.png" alt="Release Desk" width="100%">
+</p>
 
-Release Desk is a Rust desktop app for managing projects, repositories, and their releases.
+<h1 align="center">Release Desk</h1>
+
+<p align="center">
+  A Rust desktop app for managing projects, repositories, and their releases.
+</p>
+
+<p align="center">
+  <a href="https://github.com/devenvoy/repo-manager/actions/workflows/ci.yml"><img src="https://github.com/devenvoy/repo-manager/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/devenvoy/repo-manager" alt="License"></a>
+  <img src="https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust" alt="Rust 1.85+">
+  <a href="https://github.com/devenvoy/repo-manager/commits/main"><img src="https://img.shields.io/github/last-commit/devenvoy/repo-manager" alt="Last commit"></a>
+  <a href="https://github.com/devenvoy/repo-manager/stargazers"><img src="https://img.shields.io/github/stars/devenvoy/repo-manager?style=flat" alt="Stars"></a>
+</p>
+
+## Features
+
+- **Project Hub** — create projects, connect repositories, and keep every codebase in one workspace.
+- **Multi-provider support** — GitHub, GitLab, Bitbucket Cloud, Gitea, Forgejo, Codeberg, Azure DevOps, AWS CodeCommit, and Gitea-compatible custom servers.
+- **Unified releases** — refresh release listings from any connected provider, with the last known listing kept when a request fails.
+- **App Store** — a local SQLite catalog of repositories that publish verified desktop installers.
+- **Install and update** — install or update macOS DMG releases into the configured Applications directory; other package formats are downloaded to the project's release shelf.
+- **Store metadata** — repositories opt in to a store page with a `release-desk-store.json` manifest.
+
+## Requirements
+
+- Rust 1.85 or newer (edition 2024).
+- A desktop environment supported by [`gpui`](https://github.com/zed-industries/zed).
 
 ## Run
 
 ```sh
+git clone https://github.com/devenvoy/repo-manager.git
+cd repo-manager
 cargo run
 ```
 
@@ -32,6 +62,12 @@ Artwork paths are relative to the repository and must resolve to files within it
 
 See [provider release flows](docs/provider-releases.md) for each provider's artifact source, authentication, and the optional manifest format for hosts without release attachments.
 
+## Documentation
+
+- [Provider connections](docs/provider-connections.md)
+- [Provider release flows](docs/provider-releases.md)
+- [Development guidance](AGENTS.md)
+
 ## Verify
 
 ```sh
@@ -40,4 +76,10 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Project development guidance is in [AGENTS.md](AGENTS.md).
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+Released under the [MIT License](LICENSE).
