@@ -1,5 +1,6 @@
 //! Desktop GUI workspace views.
 
+pub mod git_update_queue;
 pub mod hub;
 pub mod installers;
 pub mod onboarding;
@@ -11,6 +12,7 @@ pub mod project_workspace;
 pub mod pull_requests;
 pub mod reconcile;
 pub mod repositories;
+pub mod repository_action_dialog;
 pub mod settings;
 pub mod store;
 pub mod welcome;
@@ -34,7 +36,6 @@ pub use welcome::render_welcome;
 pub use project_repository_status::render_project_repository_status;
 
 pub mod project_releases;
-pub use project_releases::{ReleaseShelfControls, render_live_releases};
 
 pub mod import_dialog;
 pub use import_dialog::{ImportDialogState, render_import_dialog};

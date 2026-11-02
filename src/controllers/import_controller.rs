@@ -101,7 +101,7 @@ impl ReleaseDesk {
             }
         }
 
-        let (new_source, initial_releases) =
+        let (new_source, _initial_releases) =
             crate::modules::importer::build_confirmed_source(&discovered, &confirmed_handle);
 
         let discovered_repos_count = new_source.repositories.len();
@@ -137,26 +137,6 @@ impl ReleaseDesk {
             cx,
         );
 
-        // Preload release state if snapshot has releases
-        if !initial_releases.is_empty() {
-            let mut loaded_repos = Vec::new();
-            for (repo_name, releases) in initial_releases {
-                loaded_repos.push(crate::workspace_releases::RepositoryReleases {
-                    provider: "github".to_string(),
-                    owner: source_handle_clean.clone(),
-                    repository: repo_name,
-                    result: Ok(releases),
-                });
-            }
-            let extension = self.settings.installer_extension.clone();
-            self.release_state = crate::workspace_releases::ReleaseViewState::Loaded {
-                repositories: loaded_repos,
-                presentations: Vec::new(),
-                extension,
-            };
-            self.refresh_release_presentations(cx);
-        }
-
         // Cache avatar in background
         if let Some((url, path)) = avatar_req {
             std::thread::spawn(move || {
@@ -168,7 +148,8 @@ impl ReleaseDesk {
 
         self.message =
             format!("Imported {discovered_repos_count} repositories from @{source_handle_clean}.");
-        self.check_repository_updates(None, true, cx);
+        self.check_repository_updates(true, cx);
+        self.refresh_releases(cx);
         cx.notify();
     }
 }

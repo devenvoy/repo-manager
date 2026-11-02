@@ -735,7 +735,7 @@ pub fn download_asset(
         name,
         url,
         expected_size,
-        &mut |_, _| {},
+        &mut |_, _| Ok(()),
     )
 }
 
@@ -749,7 +749,7 @@ pub fn download_asset_with_progress(
     name: &str,
     url: &str,
     expected_size: Option<u64>,
-    on_progress: &mut dyn FnMut(u64, Option<u64>),
+    on_progress: &mut dyn FnMut(u64, Option<u64>) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     let parsed = safe_download_url(url)?;
     let client = reqwest::blocking::Client::builder()
@@ -812,7 +812,7 @@ pub fn download_github_asset(
         name,
         expected_size,
         token,
-        &mut |_, _| {},
+        &mut |_, _| Ok(()),
     )
 }
 
@@ -826,7 +826,7 @@ pub fn download_github_asset_with_progress(
     name: &str,
     expected_size: Option<u64>,
     token: &str,
-    on_progress: &mut dyn FnMut(u64, Option<u64>),
+    on_progress: &mut dyn FnMut(u64, Option<u64>) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     if token.trim().is_empty() {
         return Err("GitHub authentication is required.".into());
@@ -965,7 +965,7 @@ pub fn download_gitlab_asset(
         original_url,
         expected_size,
         token,
-        &mut |_, _| {},
+        &mut |_, _| Ok(()),
     )
 }
 
@@ -980,7 +980,7 @@ pub fn download_gitlab_asset_with_progress(
     original_url: &str,
     expected_size: Option<u64>,
     token: &str,
-    on_progress: &mut dyn FnMut(u64, Option<u64>),
+    on_progress: &mut dyn FnMut(u64, Option<u64>) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     if token.trim().is_empty() {
         return Err("GitLab authentication is required.".into());
@@ -1084,7 +1084,7 @@ pub fn download_provider_asset_with_progress(
     token: &str,
     username: Option<&str>,
     custom_host: Option<&str>,
-    on_progress: &mut dyn FnMut(u64, Option<u64>),
+    on_progress: &mut dyn FnMut(u64, Option<u64>) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     if provider == "aws_codecommit" {
         // CodeCommit has no release-asset endpoint. A repository declaration may
@@ -1293,7 +1293,7 @@ fn save_asset(
         name,
         expected_size,
         input,
-        &mut |_, _| {},
+        &mut |_, _| Ok(()),
     )
 }
 
@@ -1306,7 +1306,7 @@ fn save_asset_with_progress(
     name: &str,
     expected_size: Option<u64>,
     input: &mut impl Read,
-    on_progress: &mut dyn FnMut(u64, Option<u64>),
+    on_progress: &mut dyn FnMut(u64, Option<u64>) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     let root = project
         .canonicalize()
@@ -1562,14 +1562,14 @@ fn copy_verified(
     output: &mut impl Write,
     expected_size: Option<u64>,
 ) -> Result<(), String> {
-    copy_verified_with_progress(input, output, expected_size, &mut |_, _| {})
+    copy_verified_with_progress(input, output, expected_size, &mut |_, _| Ok(()))
 }
 
 fn copy_verified_with_progress(
     input: &mut impl Read,
     output: &mut impl Write,
     expected_size: Option<u64>,
-    on_progress: &mut dyn FnMut(u64, Option<u64>),
+    on_progress: &mut dyn FnMut(u64, Option<u64>) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut buffer = [0u8; 64 * 1024];
     let mut total = 0u64;
@@ -1589,7 +1589,7 @@ fn copy_verified_with_progress(
         output
             .write_all(&buffer[..count])
             .map_err(|e| format!("Cannot save download: {e}"))?;
-        on_progress(total, expected_size);
+        on_progress(total, expected_size)?;
     }
     if let Some(size) = expected_size {
         if total != size {
@@ -1753,7 +1753,10 @@ mod tests {
             &mut bytes.as_slice(),
             &mut output,
             Some(bytes.len() as u64),
-            &mut |received, total| updates.push((received, total)),
+            &mut |received, total| {
+                updates.push((received, total));
+                Ok(())
+            },
         )
         .unwrap();
         assert_eq!(output, bytes);

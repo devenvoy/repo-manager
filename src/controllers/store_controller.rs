@@ -320,7 +320,7 @@ impl ReleaseDesk {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut last_percent = None;
-            let mut on_progress = |bytes: u64, total: Option<u64>| {
+            let mut on_progress = |bytes: u64, total: Option<u64>| -> Result<(), String> {
                 let percent = total
                     .filter(|size| *size > 0)
                     .map(|size| (bytes.saturating_mul(100) / size).min(100) as u8);
@@ -328,6 +328,7 @@ impl ReleaseDesk {
                     last_percent = percent;
                     let _ = tx.send(StoreEvent::Progress(percent));
                 }
+                Ok(())
             };
             let mut on_installing = || {
                 let _ = tx.send(StoreEvent::Installing);
@@ -525,7 +526,7 @@ fn install_or_download(
     custom_host: Option<&str>,
     applications_dir: &std::path::Path,
     local_asset: Option<std::path::PathBuf>,
-    on_progress: &mut dyn FnMut(u64, Option<u64>),
+    on_progress: &mut dyn FnMut(u64, Option<u64>) -> Result<(), String>,
     on_installing: &mut dyn FnMut(),
 ) -> Result<StoreOutcome, String> {
     let release = app

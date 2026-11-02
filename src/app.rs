@@ -55,6 +55,12 @@ pub struct ReleaseDesk {
     pub(crate) source_input: Entity<InputState>,
     pub(crate) source_search: Entity<InputState>,
     pub(crate) repo_search: Entity<InputState>,
+    pub(crate) repository_action_confirmation: Entity<InputState>,
+    pub(crate) repository_action_dialog: Option<(
+        usize,
+        usize,
+        views::project_repository_status::RepositoryAction,
+    )>,
     pub(crate) source_dialog: views::project_sources::SourceDialog,
     pub(crate) source_busy: bool,
     pub(crate) source_destinations: std::collections::HashMap<(usize, usize), bool>,
@@ -95,12 +101,19 @@ pub struct ReleaseDesk {
     pub(crate) available_editors: Vec<views::project_repository_status::ExternalEditor>,
     pub(crate) editor_menu_open: bool,
     pub(crate) git_busy: bool,
+    pub(crate) git_queue_busy: bool,
+    pub(crate) git_update_queue: Vec<crate::git_update_queue::GitUpdateJob>,
+    pub(crate) git_update_queue_open: bool,
+    pub(crate) git_update_project_id: Option<u128>,
     pub(crate) project_cache_status: Option<crate::controllers::git_controller::ProjectCacheStatus>,
     pub(crate) workspace_revision: u64,
     pub(crate) workspace_cancel: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) icon_revision: u64,
     pub(crate) release_state: crate::workspace_releases::ReleaseViewState,
     pub(crate) release_busy: bool,
+    pub(crate) release_downloading: std::collections::HashSet<String>,
+    pub(crate) release_queue: Vec<crate::release_queue::DownloadJob>,
+    pub(crate) release_queue_open: bool,
     pub(crate) release_type_busy: bool,
     pub(crate) release_type_menu_open: bool,
     pub(crate) release_scroll_handle: gpui_kit::ScrollHandle,
@@ -252,6 +265,8 @@ impl ReleaseDesk {
         cx.observe(&source_search, |_, _, cx| cx.notify()).detach();
         let repo_search = cx.new(|cx| InputState::new(window, cx).placeholder("Find a repository"));
         cx.observe(&repo_search, |_, _, cx| cx.notify()).detach();
+        let repository_action_confirmation =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Type repository name"));
         let store_search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search apps and releases"));
         cx.observe(&store_search, |_, _, cx| cx.notify()).detach();
@@ -357,6 +372,8 @@ impl ReleaseDesk {
             source_input,
             source_search,
             repo_search,
+            repository_action_confirmation,
+            repository_action_dialog: None,
             source_dialog: Default::default(),
             source_busy: false,
             source_destinations: Default::default(),
@@ -389,12 +406,19 @@ impl ReleaseDesk {
             available_editors: Vec::new(),
             editor_menu_open: false,
             git_busy: false,
+            git_queue_busy: false,
+            git_update_queue: Vec::new(),
+            git_update_queue_open: false,
+            git_update_project_id: None,
             project_cache_status: None,
             workspace_revision: 0,
             workspace_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             icon_revision: 0,
             release_state: Default::default(),
             release_busy: false,
+            release_downloading: Default::default(),
+            release_queue: Vec::new(),
+            release_queue_open: false,
             release_type_busy: false,
             release_type_menu_open: false,
             release_scroll_handle: gpui_kit::ScrollHandle::new(),
@@ -554,7 +578,7 @@ impl ReleaseDesk {
                 crate::workspace_releases::ReleaseViewState::NotLoaded
             ),
         ) {
-            ProjectLoadAction::Inspect => self.check_repository_updates(None, true, cx),
+            ProjectLoadAction::Inspect => self.check_repository_updates(true, cx),
             ProjectLoadAction::Releases => self.refresh_releases(cx),
             ProjectLoadAction::None => {}
         }
@@ -895,7 +919,7 @@ impl Render for ReleaseDesk {
                                 &self.repository_presentations,
                                 self.selected_repository,
                                 &self.repo_search,
-                                self.git_busy,
+                                self.git_busy || self.git_queue_busy,
                                 self.git_check_completed,
                                 self.git_check_total,
                                 self.git_activity,
@@ -908,15 +932,15 @@ impl Render for ReleaseDesk {
                                 self.editor_menu_open,
                                 cx,
                                 |this: &mut Self, _window, cx| {
-                                    this.check_repository_updates(None, false, cx)
+                                    this.check_repository_updates(false, cx)
                                 },
                                 |source, repo, this: &mut Self, _window, cx| {
                                     this.check_one_repository(source, repo, cx)
                                 },
-                                |source, repo, this: &mut Self, _window, cx| {
-                                    this.check_repository_updates(Some((source, repo)), false, cx)
+                                |source, repo, this: &mut Self, window, cx| {
+                                    this.pull_repository_updates(source, repo, window, cx)
                                 },
-                                |this: &mut Self, _window, cx| this.pull_all_updates(cx),
+                                |this: &mut Self, window, cx| this.pull_all_updates(window, cx),
                                 |source, repo, this: &mut Self, window, cx| {
                                     this.clone_single_repository(source, repo, window, cx)
                                 },
@@ -958,14 +982,21 @@ impl Render for ReleaseDesk {
                                     });
                                     cx.notify();
                                 },
+                                |source, repo, action, this: &mut Self, window, cx| {
+                                    this.begin_repository_action(source, repo, action, window, cx)
+                                },
                             )
                             .into_any_element(),
                         ),
                         ProjectSection::Releases => Some(
-                            views::render_live_releases(
+                            views::project_releases::render_live_releases(
                                 &self.release_state,
-                                views::ReleaseShelfControls {
+                                views::project_releases::ReleaseShelfControls {
                                     busy: self.release_busy || self.release_type_busy,
+                                    downloading: &self.release_downloading,
+                                    project_id: self.selected_project_id.unwrap_or_default(),
+                                    queue: &self.release_queue,
+                                    queue_open: self.release_queue_open,
                                     extension: &self.settings.installer_extension,
                                     type_menu_open: self.release_type_menu_open,
                                     scroll_handle: &self.release_scroll_handle,
@@ -994,6 +1025,15 @@ impl Render for ReleaseDesk {
                                         provider, owner, repo, tag, name, url, size, window, cx,
                                     )
                                 },
+                                |requests, this: &mut Self, window, cx| {
+                                    for (provider, owner, repo, tag, name, url, size) in requests {
+                                        this.download_release(
+                                            provider, owner, repo, tag, name, url, size, window, cx,
+                                        );
+                                    }
+                                },
+                                |this: &mut Self, cx| this.toggle_release_queue(cx),
+                                |key, this: &mut Self, cx| this.cancel_release_download(key, cx),
                             )
                             .into_any_element(),
                         ),
@@ -1116,6 +1156,23 @@ impl Render for ReleaseDesk {
             ));
         }
 
+        if let Some((source_index, repo_index, action)) = self.repository_action_dialog
+            && let Some(repo) = self
+                .selected_project_id
+                .and_then(|id| self.projects.iter().find(|project| project.id == id))
+                .and_then(|project| project.sources.get(source_index))
+                .and_then(|source| source.repositories.get(repo_index))
+        {
+            root = root.child(views::repository_action_dialog::render(
+                &repo.name,
+                action,
+                &self.repository_action_confirmation,
+                cx,
+                |this: &mut Self, cx| this.cancel_repository_action(cx),
+                |this: &mut Self, window, cx| this.confirm_repository_action(window, cx),
+            ));
+        }
+
         if let Some((item, index)) = self
             .selected_app_id
             .as_deref()
@@ -1133,6 +1190,20 @@ impl Render for ReleaseDesk {
                     this.selected_store_image = next;
                     cx.notify();
                 },
+            ));
+        }
+
+        if self.selected_project_id.is_some()
+            && self.project_section == ProjectSection::Repositories
+            && self.git_update_project_id == self.selected_project_id
+        {
+            root = root.child(views::git_update_queue::render(
+                &self.git_update_queue,
+                self.git_update_queue_open,
+                cx,
+                |this: &mut Self, cx| this.toggle_git_update_queue(cx),
+                |key, this: &mut Self, cx| this.cancel_git_update(key, cx),
+                |this: &mut Self, cx| this.cancel_all_git_updates(cx),
             ));
         }
 

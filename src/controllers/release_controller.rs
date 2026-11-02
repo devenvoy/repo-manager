@@ -4,6 +4,22 @@ use crate::app::{ReleaseDesk, project_auth_token};
 use gpui_kit::{Context, Window};
 
 impl ReleaseDesk {
+    pub(crate) fn toggle_release_queue(&mut self, cx: &mut Context<Self>) {
+        self.release_queue_open = !self.release_queue_open;
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_release_download(&mut self, key: String, cx: &mut Context<Self>) {
+        if let Some(job) = self.release_queue.iter_mut().find(|job| job.key == key) {
+            job.cancel.store(true, std::sync::atomic::Ordering::Release);
+            if matches!(job.status, crate::release_queue::DownloadStatus::Queued) {
+                job.status = crate::release_queue::DownloadStatus::Cancelled;
+                self.release_downloading.remove(&job.key);
+            }
+        }
+        cx.notify();
+    }
+
     pub(crate) fn select_release_type(&mut self, extension: String, cx: &mut Context<Self>) {
         self.release_type_menu_open = false;
         let mut changed = false;
@@ -224,7 +240,15 @@ impl ReleaseDesk {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.release_busy {
+        let download_key = format!(
+            "{}/{owner}/{repo}/{tag}/{name}",
+            self.selected_project_id.unwrap_or_default()
+        );
+        if self
+            .release_queue
+            .iter()
+            .any(|job| job.key == download_key && job.is_active())
+        {
             return;
         }
         let Some(project) = self
@@ -264,11 +288,29 @@ impl ReleaseDesk {
             .flatten();
         let auth_project = project.clone();
         let secret_store = self.secret_store.clone();
-        self.release_busy = true;
+        self.release_downloading.insert(download_key.clone());
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.release_queue.push(crate::release_queue::DownloadJob {
+            key: download_key.clone(),
+            project_id: self.selected_project_id.unwrap_or_default(),
+            repository: format!("{owner}/{repo}"),
+            asset: name.clone(),
+            status: crate::release_queue::DownloadStatus::Queued,
+            received: 0,
+            total: size,
+            cancel: cancel.clone(),
+        });
         self.message = format!("Downloading {name}…");
         cx.notify();
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        crate::release_queue::submit(move || {
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = tx.send(crate::release_queue::DownloadUpdate::Finished(Err(
+                    "Download cancelled.".into(),
+                )));
+                return;
+            }
+            let _ = tx.send(crate::release_queue::DownloadUpdate::Progress(0, size));
             let result = (|| {
                 let (token, username) = if private && auth_project.provider.as_str() == provider {
                     (
@@ -301,15 +343,24 @@ impl ReleaseDesk {
                         "Connect a {provider} account with access to download this private asset."
                     ));
                 }
+                let mut progress = |received, total| -> Result<(), String> {
+                    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        return Err("Download cancelled.".into());
+                    }
+                    let _ = tx.send(crate::release_queue::DownloadUpdate::Progress(
+                        received, total,
+                    ));
+                    Ok(())
+                };
                 match (provider.as_str(), token) {
                 ("github", Some(token)) => {
-                    release_desk_store::workspace_releases::download_github_asset(
-                        &directory, &owner, &repo, &tag, &name, size, &token,
+                    release_desk_store::workspace_releases::download_github_asset_with_progress(
+                        &directory, &owner, &repo, &tag, &name, size, &token, &mut progress,
                     )
                 }
                 ("gitlab", Some(token)) => {
-                    release_desk_store::workspace_releases::download_gitlab_asset(
-                        &directory, &owner, &repo, &tag, &name, &url, size, &token,
+                    release_desk_store::workspace_releases::download_gitlab_asset_with_progress(
+                        &directory, &owner, &repo, &tag, &name, &url, size, &token, &mut progress,
                     )
                 }
                 (provider, Some(token)) => {
@@ -325,15 +376,15 @@ impl ReleaseDesk {
                         &token,
                         username.as_deref(),
                         custom_host.as_deref(),
-                        &mut |_, _| {},
+                        &mut progress,
                     )
                 }
-                (_, None) => release_desk_store::workspace_releases::download_asset(
-                    &directory, &owner, &repo, &tag, &name, &url, size,
+                (_, None) => release_desk_store::workspace_releases::download_asset_with_progress(
+                    &directory, &owner, &repo, &tag, &name, &url, size, &mut progress,
                 ),
                 }
             })();
-            let _ = tx.send(result);
+            let _ = tx.send(crate::release_queue::DownloadUpdate::Finished(result));
         });
         cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -341,10 +392,38 @@ impl ReleaseDesk {
                     .timer(std::time::Duration::from_millis(100))
                     .await;
                 match rx.try_recv() {
-                    Ok(result) => {
+                    Ok(crate::release_queue::DownloadUpdate::Progress(received, total)) => {
                         let _ = this.update_in(cx, |this, _, cx| {
-                            this.release_busy = false;
+                            if let Some(job) = this
+                                .release_queue
+                                .iter_mut()
+                                .find(|job| job.key == download_key)
+                            {
+                                job.status = crate::release_queue::DownloadStatus::Downloading;
+                                job.received = received;
+                                job.total = total;
+                            }
+                            cx.notify();
+                        });
+                    }
+                    Ok(crate::release_queue::DownloadUpdate::Finished(result)) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            this.release_downloading.remove(&download_key);
                             let succeeded = result.is_ok();
+                            if let Some(job) = this
+                                .release_queue
+                                .iter_mut()
+                                .find(|job| job.key == download_key)
+                            {
+                                job.status =
+                                    if job.cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                        crate::release_queue::DownloadStatus::Cancelled
+                                    } else if let Err(error) = &result {
+                                        crate::release_queue::DownloadStatus::Failed(error.clone())
+                                    } else {
+                                        crate::release_queue::DownloadStatus::Complete
+                                    };
+                            }
                             this.message = match result {
                                 Ok(path) => format!("Downloaded to {}", path.display()),
                                 Err(error) => format!("Download failed: {error}"),
@@ -359,7 +438,16 @@ impl ReleaseDesk {
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         let _ = this.update_in(cx, |this, _, cx| {
-                            this.release_busy = false;
+                            this.release_downloading.remove(&download_key);
+                            if let Some(job) = this
+                                .release_queue
+                                .iter_mut()
+                                .find(|job| job.key == download_key)
+                            {
+                                job.status = crate::release_queue::DownloadStatus::Failed(
+                                    "Download worker stopped unexpectedly.".into(),
+                                );
+                            }
                             this.message = "Download stopped unexpectedly.".into();
                             cx.notify();
                         });

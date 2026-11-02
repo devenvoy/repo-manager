@@ -78,6 +78,13 @@ pub struct RepositoryPresentation {
     pub recent_commits: Vec<crate::repository_git::GitCommit>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepositoryAction {
+    RemoveFromProject,
+    DeleteFromDisk,
+    RemoveAndDelete,
+}
+
 /// Build one row's local presentation so it can be delivered with its status.
 pub fn build_repository_presentation(
     project: &WorkspaceProject,
@@ -257,31 +264,6 @@ fn editor_icon(kind: EditorIconKind) -> UiIcon {
     }
 }
 
-fn format_date_short(raw: &str) -> String {
-    if raw.len() >= 10 {
-        let parts: Vec<&str> = raw[..10].split('-').collect();
-        if parts.len() == 3 {
-            let month = match parts[1] {
-                "01" => "Jan",
-                "02" => "Feb",
-                "03" => "Mar",
-                "04" => "Apr",
-                "05" => "May",
-                "06" => "Jun",
-                "07" => "Jul",
-                "08" => "Aug",
-                "09" => "Sep",
-                "10" => "Oct",
-                "11" => "Nov",
-                "12" => "Dec",
-                _ => parts[1],
-            };
-            return format!("{month} {}, {}", parts[2].trim_start_matches('0'), parts[0]);
-        }
-    }
-    raw.to_string()
-}
-
 pub(crate) fn status_text(status: Option<&RepositoryStatus>) -> (&'static str, String, bool) {
     match status {
         None => (
@@ -368,6 +350,7 @@ pub fn render_project_repository_status<
     FToggleEditorMenu: Fn(&mut T, &mut Context<T>) + Copy + 'static,
     FSelectEditor: Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
     FOpenInEditor: Fn(std::path::PathBuf, String, &mut T, &mut Context<T>) + Copy + 'static,
+    FRepositoryAction: Fn(usize, usize, RepositoryAction, &mut T, &mut Window, &mut Context<T>) + Copy + 'static,
 >(
     project: &WorkspaceProject,
     statuses: &[RepositoryStatus],
@@ -400,6 +383,7 @@ pub fn render_project_repository_status<
     on_toggle_editor_menu: FToggleEditorMenu,
     on_select_editor: FSelectEditor,
     on_open_in_editor: FOpenInEditor,
+    on_repository_action: FRepositoryAction,
 ) -> impl IntoElement {
     let all_repositories: Vec<_> = project
         .sources
@@ -1227,6 +1211,16 @@ pub fn render_project_repository_status<
                 .text_size(px(13.))
                 .text_color(cx.theme().muted_foreground)
                 .child("Inspecting this repository locally…")
+        } else if is_checking {
+            div()
+                .p_4()
+                .rounded_xl()
+                .border_1()
+                .border_color(cx.theme().primary.opacity(0.3))
+                .bg(cx.theme().primary.opacity(0.05))
+                .text_size(px(13.))
+                .text_color(cx.theme().primary)
+                .child("Checking this repository with its remote…")
         } else if !is_cloned {
             div()
                 .p_4()
@@ -1627,6 +1621,8 @@ pub fn render_project_repository_status<
                                     format!("{} commits", commits.len())
                                 } else if is_inspecting {
                                     "Inspecting…".to_string()
+                                } else if is_checking {
+                                    "Checking…".to_string()
                                 } else {
                                     "Not cloned".to_string()
                                 }),
@@ -1664,6 +1660,8 @@ pub fn render_project_repository_status<
                         .text_color(cx.theme().muted_foreground)
                         .child(if is_inspecting {
                             "Inspecting local commit history…"
+                        } else if is_checking {
+                            "Checking remote state; local repository details are loading…"
                         } else {
                             "Repository is not cloned locally yet. Clone this repository to view commit history."
                         })
@@ -1769,171 +1767,96 @@ pub fn render_project_repository_status<
             container
         };
 
-        // Changelog / Scorecard Card
-        let changelog_card = {
-            let latest_snapshot_release = presentations
-                .get(&(source_index, repo_index))
-                .and_then(|item| item.latest_snapshot.as_ref());
-
-            if let Some(rel) = latest_snapshot_release {
-                let version_label = rel.tag_name.clone();
-                let published_date = rel
-                    .published_at
-                    .as_deref()
-                    .map(format_date_short)
-                    .unwrap_or_else(|| "Recent".to_string());
-
-                let changelog_items: Vec<String> = if let Some(desc) = &rel.description {
-                    let items: Vec<String> = desc
-                        .lines()
-                        .map(|l| l.trim().trim_start_matches(['*', '-', ' ']).to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    if items.is_empty() {
-                        vec![desc.clone()]
-                    } else {
-                        items
-                    }
-                } else {
-                    vec!["No release notes provided for this version.".to_string()]
-                };
-
-                let mut notes_list = div().flex().flex_col().gap_2();
-                for item in changelog_items {
-                    notes_list = notes_list.child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .gap_2p5()
-                            .child(
-                                div()
-                                    .w(px(5.))
-                                    .h(px(5.))
-                                    .mt(px(6.))
-                                    .rounded_full()
-                                    .bg(cx.theme().primary),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(item),
-                            ),
-                    );
-                }
-
-                let asset_count = rel.assets.len();
-                let header_title = format!(
-                    "{} {} · {} package{}",
-                    repo.name,
-                    version_label,
-                    asset_count,
-                    if asset_count == 1 { "" } else { "s" }
-                );
-
-                let mut assets_list = div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .pt_3()
-                    .border_t_1()
-                    .border_color(cx.theme().border);
-
-                for asset in &rel.assets {
-                    let formatted_size = match asset.size {
-                        Some(b) if b >= 1_000_000_000 => {
-                            format!("{:.1} GB", b as f64 / 1_000_000_000.0)
-                        }
-                        Some(b) if b >= 1_000_000 => format!("{} MB", b / (1024 * 1024)),
-                        Some(b) if b >= 1_000 => format!("{} KB", b / 1024),
-                        Some(b) => format!("{b} B"),
-                        None => "Unknown size".to_string(),
-                    };
-                    assets_list = assets_list.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(download_icon().w(px(14.)).h(px(14.)))
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .child(format!("{} · {}", asset.name, formatted_size)),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded_full()
-                                    .bg(cx.theme().primary.opacity(0.1))
-                                    .text_color(cx.theme().primary)
-                                    .text_size(px(11.))
-                                    .font_bold()
-                                    .child("Ready in shelf"),
-                            ),
-                    );
-                }
-
-                div()
-                    .p_5()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().background)
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(div().font_bold().text_size(px(15.)).child(header_title))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(published_date),
-                            ),
-                    )
-                    .child(notes_list)
-                    .child(assets_list)
+        let action_row = |id: &'static str,
+                          title: &'static str,
+                          description: &'static str,
+                          label: &'static str,
+                          action: RepositoryAction,
+                          destructive: bool| {
+            let button = Button::new(id).label(label);
+            let button = if destructive {
+                button.danger()
             } else {
+                button.outline()
+            };
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .px_4()
+                .py_3()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(div().font_medium().text_size(px(13.)).child(title))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(description),
+                        ),
+                )
+                .child(button.on_click(cx.listener(move |this, _, window, cx| {
+                    on_repository_action(source_index, repo_index, action, this, window, cx)
+                })))
+        };
+        let danger_zone = div()
+            .rounded_xl()
+            .border_1()
+            .border_color(cx.theme().danger.opacity(0.35))
+            .overflow_hidden()
+            .child(
                 div()
-                    .p_5()
-                    .rounded_xl()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .bg(cx.theme().background)
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.theme().danger.opacity(0.25))
+                    .child(div().font_bold().text_size(px(17.)).child("Danger zone"))
                     .child(
                         div()
-                            .font_bold()
-                            .text_size(px(14.))
-                            .child(if is_inspecting {
-                                "Loading local release information…"
-                            } else {
-                                "No releases published yet"
-                            }),
-                    )
-                    .child(
-                        div()
+                            .mt_1()
                             .text_size(px(12.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("Release notes and packages will appear here when published upstream or recorded in the snapshot."),
-                    )
-            }
-        };
+                            .child("Changes below affect project tracking or the local checkout."),
+                    ),
+            )
+            .child(action_row(
+                "repo-remove-from-project",
+                "Remove from project",
+                "Stop tracking this repository. Files on disk stay untouched.",
+                "Remove from project",
+                RepositoryAction::RemoveFromProject,
+                false,
+            ))
+            .child(
+                div()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(action_row(
+                        "repo-delete-from-disk",
+                        "Delete local checkout",
+                        "Delete files from disk and keep the repository in this project.",
+                        "Delete from disk…",
+                        RepositoryAction::DeleteFromDisk,
+                        true,
+                    )),
+            )
+            .child(
+                div()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(action_row(
+                        "repo-remove-and-delete",
+                        "Remove and delete",
+                        "Remove it from this project and delete its local checkout.",
+                        "Remove and delete…",
+                        RepositoryAction::RemoveAndDelete,
+                        true,
+                    )),
+            );
 
         div()
             .flex_1()
@@ -1949,7 +1872,7 @@ pub fn render_project_repository_status<
             .child(directory_row)
             .child(git_card)
             .child(commits_section)
-            .child(changelog_card)
+            .child(danger_zone)
             .into_any_element()
     } else {
         div()

@@ -165,6 +165,33 @@ fn validate_target_path(root: &Path, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Delete one repository checkout after verifying that it is a real directory
+/// strictly beneath the project root. The project root itself is never removed.
+pub fn delete_repository_checkout(project_root: &Path, path: &Path) -> Result<(), String> {
+    validate_target_path(project_root, path)?;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Cannot inspect repository directory: {error}")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Repository checkout must be a real directory, not a symbolic link".into());
+    }
+    let project_root = project_root
+        .canonicalize()
+        .map_err(|error| format!("Cannot resolve project directory: {error}"))?;
+    let checkout = path
+        .canonicalize()
+        .map_err(|error| format!("Cannot resolve repository directory: {error}"))?;
+    if checkout == project_root || !checkout.starts_with(&project_root) {
+        return Err(
+            "Repository checkout must be inside, and separate from, the project folder".into(),
+        );
+    }
+    std::fs::remove_dir_all(&checkout)
+        .map_err(|error| format!("Could not delete repository checkout: {error}"))
+}
+
 fn git_client(target: &RepositoryTarget) -> Result<GitClient, String> {
     let mut client = GitClient::new();
     if target.provider == "aws_codecommit" {
@@ -334,6 +361,24 @@ pub fn pull_existing(target: &RepositoryTarget) -> Result<SyncOutcome, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Run a pull that can terminate an active Git fetch or fast-forward process.
+pub fn pull_existing_cancellable(
+    target: &RepositoryTarget,
+    cancelled: &std::sync::atomic::AtomicBool,
+    progress: impl FnMut(&'static str),
+) -> Result<SyncOutcome, String> {
+    validate_target_path(&target.project_root, &target.path)?;
+    git_client(target)?
+        .sync_existing_cancellable(
+            &target.url,
+            &target.path,
+            &target.branch,
+            cancelled,
+            progress,
+        )
+        .map_err(|error| error.to_string())
+}
+
 /// Read recent commits from a local repository clone.
 pub fn load_recent_commits(target_path: &Path, count: usize) -> Vec<GitCommit> {
     GitClient::new()
@@ -343,7 +388,10 @@ pub fn load_recent_commits(target_path: &Path, count: usize) -> Vec<GitCommit> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RepositoryStatus, can_pull, safe_component, safe_namespace};
+    use super::{
+        RepositoryStatus, can_pull, delete_repository_checkout, resolve_target_path,
+        safe_component, safe_namespace,
+    };
     use release_desk_git::{CloneState, CloneStatus};
 
     #[test]
@@ -379,5 +427,37 @@ mod tests {
         assert!(safe_namespace("group/subgroup"));
         assert!(!safe_namespace("group/../outside"));
         assert!(!safe_namespace("group/evil\\name"));
+    }
+
+    #[test]
+    fn existing_repository_at_project_root_is_detected_as_the_checkout() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("lightcraft");
+        std::fs::create_dir_all(root.join(".git")).expect("repository metadata directory");
+
+        let resolved = resolve_target_path(
+            &root,
+            release_desk_core::project::DiskLayout::Grouped,
+            "storytold",
+            "lightcraft",
+        );
+
+        assert_eq!(resolved, root);
+    }
+
+    #[test]
+    fn checkout_deletion_is_limited_to_a_child_directory() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().join("project");
+        let checkout = root.join("repo");
+        std::fs::create_dir_all(&checkout).expect("checkout directory");
+        std::fs::write(checkout.join("README.md"), "repository").expect("checkout file");
+        std::fs::write(root.join("project.txt"), "keep").expect("project file");
+
+        delete_repository_checkout(&root, &checkout).expect("delete checkout");
+
+        assert!(!checkout.exists());
+        assert!(root.join("project.txt").exists());
+        assert!(delete_repository_checkout(&root, &root).is_err());
     }
 }

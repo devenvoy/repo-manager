@@ -13,6 +13,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// The observed state of a managed clone relative to its tracked default branch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +77,7 @@ pub enum SyncOutcome {
 /// Git process and input failures. Command arguments and remote URLs are never stored here.
 #[derive(Debug)]
 pub enum GitError {
+    Cancelled,
     InvalidInput(&'static str),
     Io {
         operation: &'static str,
@@ -89,6 +92,7 @@ pub enum GitError {
 impl fmt::Display for GitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => f.write_str("Git operation cancelled"),
             Self::InvalidInput(message) => write!(f, "invalid Git input: {message}"),
             Self::Io { operation, source } => write!(f, "Git {operation} failed: {source}"),
             Self::Command { operation, code } => {
@@ -522,6 +526,118 @@ impl GitClient {
         self.sync_inner(remote_url, path, default_branch, false)
     }
 
+    /// Fetch and fast-forward an existing checkout with cancellable Git subprocesses.
+    pub fn sync_existing_cancellable(
+        &self,
+        remote_url: &str,
+        path: &Path,
+        default_branch: &str,
+        cancelled: &AtomicBool,
+        mut progress: impl FnMut(&'static str),
+    ) -> Result<SyncOutcome, GitError> {
+        validate_branch(default_branch)?;
+        self.validate_credential_remote(remote_url)?;
+        if remote_url.is_empty()
+            || remote_url.starts_with('-')
+            || remote_url.chars().any(char::is_control)
+            || has_embedded_credentials(remote_url)
+        {
+            return Err(GitError::InvalidInput("remote URL is empty or unsafe"));
+        }
+        if cancelled.load(Ordering::Acquire) {
+            return Err(GitError::Cancelled);
+        }
+        if !path.exists() {
+            return Ok(SyncOutcome::Skipped(CloneState::new(
+                CloneStatus::NotCloned,
+            )));
+        }
+
+        progress("Checking local changes");
+        let before = self.inspect(path, default_branch)?;
+        if before.status == CloneStatus::Error
+            && !(before.local_revision.is_none() && before.remote_revision.is_some())
+        {
+            return Ok(SyncOutcome::Skipped(before));
+        }
+        let origin = self.run(Some(path), "read origin", ["remote", "get-url", "origin"])?;
+        if !origin.status.success() || stdout(&origin) != remote_url {
+            let mut state = before;
+            state.status = CloneStatus::Error;
+            state.message = Some("Clone origin does not match the expected remote".into());
+            return Ok(SyncOutcome::Skipped(state));
+        }
+
+        progress("Fetching remote");
+        self.run_cancellable(
+            Some(path),
+            "fetch",
+            ["fetch", "--prune", "origin"],
+            cancelled,
+        )?;
+        progress("Comparing revisions");
+        let state = self.inspect(path, default_branch)?;
+        if state.status == CloneStatus::Error
+            && state.local_revision.is_none()
+            && let Some(remote_revision) = state.remote_revision.as_ref()
+        {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(GitError::Cancelled);
+            }
+            let remote_ref = format!("origin/{default_branch}");
+            success(
+                "set up local branch",
+                self.run(
+                    Some(path),
+                    "set up local branch",
+                    [
+                        "switch",
+                        "-C",
+                        default_branch,
+                        "--track",
+                        remote_ref.as_str(),
+                    ],
+                )?,
+            )?;
+            return Ok(SyncOutcome::FastForwarded {
+                from: String::new(),
+                to: remote_revision.clone(),
+            });
+        }
+        match state.status {
+            CloneStatus::Current => Ok(SyncOutcome::AlreadyCurrent),
+            CloneStatus::Behind => {
+                let from = state
+                    .local_revision
+                    .clone()
+                    .ok_or(GitError::InvalidInput("missing local revision"))?;
+                let to = state
+                    .remote_revision
+                    .clone()
+                    .ok_or(GitError::InvalidInput("missing remote revision"))?;
+                if cancelled.load(Ordering::Acquire) {
+                    return Err(GitError::Cancelled);
+                }
+                let before_merge = self.inspect(path, default_branch)?;
+                if before_merge.status != CloneStatus::Behind {
+                    return Ok(SyncOutcome::Skipped(before_merge));
+                }
+                progress("Applying fast-forward");
+                let remote_ref = format!("refs/remotes/origin/{default_branch}");
+                success(
+                    "fast-forward",
+                    self.run(
+                        Some(path),
+                        "fast-forward",
+                        ["merge", "--ff-only", "--", remote_ref.as_str()],
+                    )?,
+                )?;
+                Ok(SyncOutcome::FastForwarded { from, to })
+            }
+            _ => Ok(SyncOutcome::Skipped(state)),
+        }
+    }
+
     fn sync_inner(
         &self,
         remote_url: &str,
@@ -696,6 +812,59 @@ impl GitClient {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.command(path, args)?
+            .output()
+            .map_err(|source| GitError::Io { operation, source })
+    }
+
+    fn run_cancellable<I, S>(
+        &self,
+        path: Option<&Path>,
+        operation: &'static str,
+        args: I,
+        cancelled: &AtomicBool,
+    ) -> Result<Output, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(GitError::Cancelled);
+        }
+        let mut child = self
+            .command(path, args)?
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|source| GitError::Io { operation, source })?;
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GitError::Cancelled);
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|source| GitError::Io { operation, source })?
+            {
+                if cancelled.load(Ordering::Acquire) {
+                    return Err(GitError::Cancelled);
+                }
+                return Ok(Output {
+                    status,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn command<I, S>(&self, path: Option<&Path>, args: I) -> Result<Command, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let mut command = Command::new(&self.executable);
         if let Some(credential) = &self.credential {
             let helper = format!(
@@ -791,9 +960,7 @@ impl GitClient {
         if let Some(path) = path {
             command.current_dir(path);
         }
-        command
-            .output()
-            .map_err(|source| GitError::Io { operation, source })
+        Ok(command)
     }
 }
 
@@ -1036,6 +1203,62 @@ mod tests {
             CloneStatus::Current
         );
         assert!(fixture.clone.join("remote.txt").exists());
+    }
+
+    #[test]
+    fn cancellable_sync_reports_stages_and_fast_forwards_only_after_fetch() {
+        let fixture = Fixture::new();
+        fixture.clone();
+        fixture.push_new_commit();
+        let client = GitClient::new();
+        let cancelled = AtomicBool::new(false);
+        let mut stages = Vec::new();
+        let outcome = client
+            .sync_existing_cancellable(
+                fixture.remote.to_str().expect("UTF-8 test path"),
+                &fixture.clone,
+                "main",
+                &cancelled,
+                |stage| stages.push(stage),
+            )
+            .expect("cancellable sync");
+
+        assert!(matches!(outcome, SyncOutcome::FastForwarded { .. }));
+        assert_eq!(
+            stages,
+            [
+                "Checking local changes",
+                "Fetching remote",
+                "Comparing revisions",
+                "Applying fast-forward"
+            ]
+        );
+        assert_eq!(
+            client
+                .inspect(&fixture.clone, "main")
+                .expect("inspect")
+                .status,
+            CloneStatus::Current
+        );
+    }
+
+    #[test]
+    fn cancellable_sync_stops_before_running_git_when_cancelled() {
+        let fixture = Fixture::new();
+        fixture.clone();
+        fixture.push_new_commit();
+        let original = git(&fixture.clone, &["rev-parse", "HEAD"]);
+        let cancelled = AtomicBool::new(true);
+        let result = GitClient::new().sync_existing_cancellable(
+            fixture.remote.to_str().expect("UTF-8 test path"),
+            &fixture.clone,
+            "main",
+            &cancelled,
+            |_| {},
+        );
+
+        assert!(matches!(result, Err(GitError::Cancelled)));
+        assert_eq!(git(&fixture.clone, &["rev-parse", "HEAD"]), original);
     }
 
     #[test]

@@ -340,24 +340,27 @@ impl ReleaseDesk {
         .detach();
     }
 
-    pub(crate) fn check_repository_updates(
-        &mut self,
-        update: Option<(usize, usize)>,
-        local_only: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let activity = if update.is_some() {
-            GitActivity::Pulling
-        } else if local_only {
+    pub(crate) fn check_repository_updates(&mut self, local_only: bool, cx: &mut Context<Self>) {
+        let activity = if local_only {
             GitActivity::Inspecting
         } else {
             GitActivity::Checking
         };
-        self.run_repository_operation(activity, update, cx);
+        self.run_repository_operation(activity, None, cx);
     }
 
-    pub(crate) fn pull_all_updates(&mut self, cx: &mut Context<Self>) {
-        self.run_repository_operation(GitActivity::Pulling, None, cx);
+    pub(crate) fn pull_repository_updates(
+        &mut self,
+        source_index: usize,
+        repo_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.enqueue_repository_pull(source_index, repo_index, window, cx);
+    }
+
+    pub(crate) fn pull_all_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.enqueue_available_repository_pulls(window, cx);
     }
 
     pub(crate) fn check_one_repository(
@@ -375,7 +378,7 @@ impl ReleaseDesk {
         update: Option<(usize, usize)>,
         cx: &mut Context<Self>,
     ) {
-        if self.git_busy {
+        if self.git_busy || self.git_queue_busy {
             return;
         }
         let Some(project) = self
@@ -710,6 +713,9 @@ impl ReleaseDesk {
                                         GitActivity::Checking => "Repository check finished. See each repository for its status.",
                                         GitActivity::Pulling => "Repository pulls finished. See each repository for its status.",
                                     }.into());
+                                    if activity == GitActivity::Inspecting {
+                                        this.check_repository_updates(false, cx);
+                                    }
                                     cx.notify();
                                 }
                             });
@@ -943,7 +949,7 @@ impl ReleaseDesk {
                                 }
                                 this.message = outcome_msg;
                                 this.refresh_project_icon_views(project_id, cx);
-                                this.check_repository_updates(None, true, cx);
+                                this.check_repository_updates(true, cx);
                             }
                             cx.notify();
                         });
@@ -1069,7 +1075,7 @@ impl ReleaseDesk {
                                 if finished {
                                     this.git_busy = false;
                                     this.refresh_project_icon_views(project_id, cx);
-                                    this.check_repository_updates(None, true, cx);
+                                    this.check_repository_updates(true, cx);
                                 }
                                 this.message = message;
                             }
