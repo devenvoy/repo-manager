@@ -2,6 +2,7 @@
 /dist/
 .DS_Store
 bin/release-desk-webview
+__pycache__/
 
 /.agents/
 /.planning/

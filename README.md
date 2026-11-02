@@ -70,6 +70,7 @@ See [provider release flows](docs/provider-releases.md) for each provider's arti
 
 - [Provider connections](docs/provider-connections.md)
 - [Provider release flows](docs/provider-releases.md)
+- [Releasing](docs/releasing.md)
 - [Development guidance](AGENTS.md)
 
 ## Verify

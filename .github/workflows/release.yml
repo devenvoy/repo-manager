@@ -1,0 +1,216 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to package (for example 0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - platform: linux
+            arch: aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - platform: macos
+            arch: aarch64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - platform: macos
+            arch: x86_64
+            os: macos-15
+            target: x86_64-apple-darwin
+          - platform: windows
+            arch: x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve and verify version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="$GITHUB_REF_NAME"
+          fi
+          version="${version#v}"
+          if [ -z "$version" ]; then
+            echo "::error::Could not determine a release version."
+            exit 1
+          fi
+
+          manifest_version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "$version" != "$manifest_version" ]; then
+            echo "::error::Release version '$version' does not match Cargo.toml '$manifest_version'."
+            exit 1
+          fi
+
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-release-
+            ${{ runner.os }}-${{ matrix.target }}-
+
+      - name: Install Linux desktop build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            libclang-dev \
+            libasound2-dev \
+            libfontconfig1-dev \
+            libssl-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb-composite0-dev \
+            libxcb-damage0-dev \
+            libxcb-glx0-dev \
+            libxcb-randr0-dev \
+            libxcb-render-util0-dev \
+            libxcb-res0-dev \
+            libxcb-shape0-dev \
+            libxcb-shm0-dev \
+            libxcb-util-dev \
+            libxcb-xfixes0-dev \
+            libxcb-xinput-dev \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libzstd-dev
+
+      - name: Build CLI, TUI, and desktop app
+        run: >-
+          cargo build --locked --release
+          --target ${{ matrix.target }}
+          -p repo-manager
+          -p release-desk-cli
+          -p release-desk-tui
+
+      - name: Build macOS webview helper
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            x86_64-apple-darwin) swift_target="x86_64-apple-macos14.0" ;;
+            *) swift_target="arm64-apple-macos14.0" ;;
+          esac
+          swiftc bin/release-desk-webview.swift \
+            -target "$swift_target" \
+            -o "target/${{ matrix.target }}/release/release-desk-webview" \
+            -O
+
+      - name: Package versioned folders and archives
+        shell: bash
+        run: |
+          PY=python3
+          if ! command -v "$PY" >/dev/null 2>&1; then
+            PY=python
+          fi
+          "$PY" scripts/package_release.py \
+            --version "$VERSION" \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --target "${{ matrix.target }}" \
+            --binary-dir "target/${{ matrix.target }}/release" \
+            --out dist
+
+      - name: Upload packaged release
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-desk-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/**
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged builds
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-desk-*
+          merge-multiple: true
+
+      - name: Build combined checksum manifest
+        working-directory: dist
+        run: |
+          find . -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.dmg' \) -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | awk '{ name = $2; sub(/^.*\//, "", name); print $1 "  " name }' \
+            > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Locate release notes
+        id: notes
+        shell: bash
+        run: |
+          notes="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes" ]; then
+            echo "body_path=$notes" >> "$GITHUB_OUTPUT"
+          else
+            echo "body_path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release Desk ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.body_path }}
+          generate_release_notes: ${{ steps.notes.outputs.body_path == '' }}
+          files: |
+            dist/**/*.tar.gz
+            dist/**/*.zip
+            dist/**/*.dmg
+            dist/SHA256SUMS.txt
