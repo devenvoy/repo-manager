@@ -12,8 +12,12 @@
   <a href="https://github.com/devenvoy/repo-manager/actions/workflows/ci.yml"><img src="https://github.com/devenvoy/repo-manager/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/devenvoy/repo-manager" alt="License"></a>
   <img src="https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust" alt="Rust 1.85+">
-  <a href="https://github.com/devenvoy/repo-manager/commits/main"><img src="https://img.shields.io/github/last-commit/devenvoy/repo-manager" alt="Last commit"></a>
+  <a href="https://github.com/devenvoy/repo-manager/commits/development"><img src="https://img.shields.io/github/last-commit/devenvoy/repo-manager/development" alt="Last commit"></a>
   <a href="https://github.com/devenvoy/repo-manager/stargazers"><img src="https://img.shields.io/github/stars/devenvoy/repo-manager?style=flat" alt="Stars"></a>
+</p>
+
+<p align="center">
+  <a href="https://devenvoy.github.io/repo-manager/"><strong>Website</strong></a>
 </p>
 
 ## Features
