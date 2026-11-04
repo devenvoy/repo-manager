@@ -15,6 +15,11 @@ impl ReleaseDesk {
             if matches!(job.status, crate::release_queue::DownloadStatus::Queued) {
                 job.status = crate::release_queue::DownloadStatus::Cancelled;
                 self.release_downloading.remove(&job.key);
+            } else if matches!(
+                job.status,
+                crate::release_queue::DownloadStatus::Downloading
+            ) {
+                job.status = crate::release_queue::DownloadStatus::Cancelling;
             }
         }
         cx.notify();
@@ -379,9 +384,25 @@ impl ReleaseDesk {
                         &mut progress,
                     )
                 }
-                (_, None) => release_desk_store::workspace_releases::download_asset_with_progress(
-                    &directory, &owner, &repo, &tag, &name, &url, size, &mut progress,
-                ),
+                (_, None) => {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| format!("Cannot start cancellable downloader: {error}"))?;
+                    runtime.block_on(
+                        release_desk_store::workspace_releases::download_asset_cancellable_with_progress(
+                            &directory,
+                            &owner,
+                            &repo,
+                            &tag,
+                            &name,
+                            &url,
+                            size,
+                            &cancel,
+                            &mut progress,
+                        ),
+                    )
+                }
                 }
             })();
             let _ = tx.send(crate::release_queue::DownloadUpdate::Finished(result));
@@ -399,7 +420,12 @@ impl ReleaseDesk {
                                 .iter_mut()
                                 .find(|job| job.key == download_key)
                             {
-                                job.status = crate::release_queue::DownloadStatus::Downloading;
+                                job.status =
+                                    if job.cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                        crate::release_queue::DownloadStatus::Cancelling
+                                    } else {
+                                        crate::release_queue::DownloadStatus::Downloading
+                                    };
                                 job.received = received;
                                 job.total = total;
                             }
@@ -424,9 +450,22 @@ impl ReleaseDesk {
                                         crate::release_queue::DownloadStatus::Complete
                                     };
                             }
-                            this.message = match result {
-                                Ok(path) => format!("Downloaded to {}", path.display()),
-                                Err(error) => format!("Download failed: {error}"),
+                            this.message = if this
+                                .release_queue
+                                .iter()
+                                .find(|job| job.key == download_key)
+                                .is_some_and(|job| {
+                                    matches!(
+                                        job.status,
+                                        crate::release_queue::DownloadStatus::Cancelled
+                                    )
+                                }) {
+                                "Download cancelled.".into()
+                            } else {
+                                match result {
+                                    Ok(path) => format!("Downloaded to {}", path.display()),
+                                    Err(error) => format!("Download failed: {error}"),
+                                }
                             };
                             if succeeded {
                                 this.refresh_release_presentations(cx);

@@ -38,6 +38,7 @@ pub(crate) fn submit(task: impl FnOnce() + Send + 'static) {
 pub(crate) enum DownloadStatus {
     Queued,
     Downloading,
+    Cancelling,
     Complete,
     Failed(String),
     Cancelled,
@@ -70,7 +71,7 @@ impl DownloadJob {
     pub fn is_active(&self) -> bool {
         matches!(
             self.status,
-            DownloadStatus::Queued | DownloadStatus::Downloading
+            DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Cancelling
         )
     }
 }

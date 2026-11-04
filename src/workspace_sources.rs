@@ -198,10 +198,16 @@ impl WorkspaceSource {
     /// Replace discovered metadata while keeping the user's existing choices.
     /// Newly discovered repositories remain unselected until explicitly chosen.
     pub fn refresh_from_fetched(&mut self, profile: FetchedProfile) {
-        let mut refreshed = Self::from_fetched(profile, None);
+        self.refresh_from_source(Self::from_fetched(profile, None));
+    }
+
+    /// Replace a source with a freshly scanned source, preserving choices for known repositories.
+    pub fn refresh_from_source(&mut self, mut refreshed: WorkspaceSource) {
         for repo in &mut refreshed.repositories {
             if let Some(previous) = self.repositories.iter().find(|previous| {
-                if !repo.full_name.is_empty() && !previous.full_name.is_empty() {
+                if self.provider == "local" {
+                    repo.name.eq_ignore_ascii_case(&previous.name)
+                } else if !repo.full_name.is_empty() && !previous.full_name.is_empty() {
                     repo.full_name.eq_ignore_ascii_case(&previous.full_name)
                 } else {
                     repo.name.eq_ignore_ascii_case(&previous.name)
@@ -209,6 +215,15 @@ impl WorkspaceSource {
             }) {
                 repo.selected = previous.selected;
             }
+        }
+        if refreshed.display_name.is_none() {
+            refreshed.display_name = self.display_name.clone();
+        }
+        if refreshed.avatar_url.is_none() {
+            refreshed.avatar_url = self.avatar_url.clone();
+        }
+        if refreshed.bio.is_none() {
+            refreshed.bio = self.bio.clone();
         }
         *self = refreshed;
     }
@@ -447,6 +462,110 @@ mod tests {
         assert!(source.repositories[1].selected);
         assert_eq!(source.repositories[1].stars, 42);
         assert!(!source.repositories[2].selected);
+    }
+
+    #[test]
+    fn refresh_preserves_metadata_and_choices() {
+        use release_desk_store::FetchedProfile;
+        let mut source = WorkspaceSource {
+            handle: "storytold".into(),
+            display_name: Some("ArtCraft".into()),
+            avatar_url: Some("https://example.com/avatar.png".into()),
+            bio: Some("Creative software suite".into()),
+            provider: "github".into(),
+            repositories: vec![
+                SourceRepository {
+                    name: "photocraft".into(),
+                    full_name: "storytold/photocraft".into(),
+                    description: None,
+                    stars: 10,
+                    forks: 2,
+                    primary_language: None,
+                    is_private: false,
+                    is_fork: false,
+                    clone_url: "https://github.com/storytold/photocraft.git".into(),
+                    default_branch: "main".into(),
+                    selected: true,
+                },
+                SourceRepository {
+                    name: "lightcraft".into(),
+                    full_name: "storytold/lightcraft".into(),
+                    description: None,
+                    stars: 5,
+                    forks: 1,
+                    primary_language: None,
+                    is_private: false,
+                    is_fork: false,
+                    clone_url: "https://github.com/storytold/lightcraft.git".into(),
+                    default_branch: "main".into(),
+                    selected: false,
+                },
+            ],
+        };
+
+        let fresh_profile = FetchedProfile {
+            handle: "storytold".into(),
+            display_name: None,
+            avatar_url: None,
+            bio: None,
+            provider: "github".into(),
+            repositories: vec![
+                release_desk_store::FetchedRepo {
+                    name: "photocraft".into(),
+                    full_name: "storytold/photocraft".into(),
+                    description: Some("Photo editor".into()),
+                    stars: 20,
+                    forks: 4,
+                    primary_language: Some("Rust".into()),
+                    is_private: false,
+                    is_fork: false,
+                    clone_url: "https://github.com/storytold/photocraft.git".into(),
+                    default_branch: "main".into(),
+                },
+                release_desk_store::FetchedRepo {
+                    name: "lightcraft".into(),
+                    full_name: "storytold/lightcraft".into(),
+                    description: None,
+                    stars: 8,
+                    forks: 2,
+                    primary_language: Some("Rust".into()),
+                    is_private: false,
+                    is_fork: false,
+                    clone_url: "https://github.com/storytold/lightcraft.git".into(),
+                    default_branch: "main".into(),
+                },
+                release_desk_store::FetchedRepo {
+                    name: "newcraft".into(),
+                    full_name: "storytold/newcraft".into(),
+                    description: Some("New repo".into()),
+                    stars: 0,
+                    forks: 0,
+                    primary_language: Some("Rust".into()),
+                    is_private: false,
+                    is_fork: false,
+                    clone_url: "https://github.com/storytold/newcraft.git".into(),
+                    default_branch: "main".into(),
+                },
+            ],
+        };
+
+        source.refresh_from_fetched(fresh_profile);
+
+        assert_eq!(source.display_name.as_deref(), Some("ArtCraft"));
+        assert_eq!(
+            source.avatar_url.as_deref(),
+            Some("https://example.com/avatar.png")
+        );
+        assert_eq!(source.bio.as_deref(), Some("Creative software suite"));
+        assert_eq!(source.repositories.len(), 3);
+
+        // Previous selections preserved
+        assert!(source.repositories[0].selected);
+        assert_eq!(source.repositories[0].stars, 20);
+        assert!(!source.repositories[1].selected);
+        // Newly discovered repo is not selected by default
+        assert!(!source.repositories[2].selected);
+        assert_eq!(source.repositories[2].name, "newcraft");
     }
 
     #[test]

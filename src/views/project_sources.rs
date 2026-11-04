@@ -180,7 +180,7 @@ pub fn render_project_sources<
     cx: &Context<T>,
     on_add: FAdd,
     on_remove: FRemove,
-    _on_refresh: FRefresh,
+    on_refresh: FRefresh,
     on_toggle: FToggle,
     on_review: FReview,
     on_dialog: FDialog,
@@ -228,8 +228,17 @@ pub fn render_project_sources<
             Button::new(format!("source-repos-{source_index}"))
                 .label(format!("Choose repositories ({selected})"))
                 .primary()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    on_dialog(SourceDialog::Select(source_index), this, cx)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    on_refresh(source_index, this, window, cx)
+                })),
+        );
+        left_actions = left_actions.child(
+            Button::new(format!("source-refresh-{source_index}"))
+                .icon(crate::components::icons::refresh_icon())
+                .tooltip(format!("Refresh @{} repositories", source.handle))
+                .outline()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    on_refresh(source_index, this, window, cx)
                 })),
         );
         actions = actions.child(left_actions).child(
@@ -420,6 +429,7 @@ pub fn render_project_sources<
                     .primary().disabled(busy)
                     .on_click(cx.listener(move |this, _, window, cx| on_add(this, window, cx)))))
             .into_any_element(),
+        SourceDialog::Select(_source_index) if busy => div().absolute().inset_0().bg(cx.theme().background.opacity(0.96)).flex().flex_col().gap_3().items_center().justify_center().child("Fetching repository list…").child(Button::new("cancel-fetching-repositories").label("Cancel").outline().on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Closed, this, cx)))).into_any_element(),
         SourceDialog::Select(_source_index) if destinations_pending => div().absolute().inset_0().bg(cx.theme().background.opacity(0.96)).flex().flex_col().gap_3().items_center().justify_center().child("Checking repository destinations…").child(Button::new("cancel-checking-destinations").label("Cancel").outline().on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Closed, this, cx)))).into_any_element(),
         SourceDialog::Select(source_index) => {
             if let Some(source) = sources.get(source_index) {
@@ -430,11 +440,14 @@ pub fn render_project_sources<
                 let mut actionable_count = 0;
                 for (repo_index, repo) in source.repositories.iter().enumerate() {
                     let selected = repo.selected;
-                    let already_managed = selected && destinations.get(&(source_index, repo_index)).copied().unwrap_or(true);
+                    let destination_occupied = destinations
+                        .get(&(source_index, repo_index))
+                        .copied()
+                        .unwrap_or(false);
+                    let already_managed = selected && destination_occupied;
                     if selected && !already_managed { actionable_count += 1; }
-                    if already_managed {
+                    if destination_occupied {
                         already_managed_count += 1;
-                        continue;
                     }
                     if !matches_repository(repo, &query, SourceFilter::All) { continue; }
                     visible += 1;
@@ -447,6 +460,31 @@ pub fn render_project_sources<
                     header = header.child(div().flex().flex_col().gap_1().min_w_0()
                         .child(div().font_bold().text_size(px(15.)).child(repo.name.clone()))
                         .child(div().text_size(px(11.)).text_color(cx.theme().muted_foreground).child(repo.full_name.clone())));
+                    if destination_occupied {
+                        header = header.child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(cx.theme().success.opacity(0.12))
+                                .text_color(cx.theme().success)
+                                .text_size(px(10.))
+                                .font_medium()
+                                .child("Already cloned"),
+                        );
+                    } else if selected {
+                        header = header.child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(cx.theme().primary.opacity(0.12))
+                                .text_color(cx.theme().primary)
+                                .text_size(px(10.))
+                                .font_medium()
+                                .child("Ready to clone"),
+                        );
+                    }
                     let mut meta = div().flex().items_center().flex_wrap().gap_4().text_size(px(11.)).text_color(cx.theme().muted_foreground)
                         .child(div().flex().items_center().gap_1().child(star_icon()).child(repo.stars.to_string()))
                         .child(div().flex().items_center().gap_1().child(fork_icon()).child(repo.forks.to_string()))
@@ -538,8 +576,8 @@ pub fn render_project_sources<
                 }
                 if visible == 0 {
                     repos = repos.child(div().p_5().text_size(px(12.)).text_color(cx.theme().muted_foreground)
-                        .child(if already_managed_count == source.repositories.len() {
-                            "All repositories from this source are already cloned and selected."
+                        .child(if source.repositories.is_empty() {
+                            "No repositories were discovered for this source."
                         } else {
                             "No repositories match your search."
                         }));
@@ -618,9 +656,27 @@ pub fn render_project_sources<
                                 .child(div().flex().flex_col().gap_1()
                                     .child(div().font_bold().text_size(px(20.)).child(format!("Choose repositories from @{}", source.handle)))
                                     .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground)
-                                        .child(format!("{} found · {} already cloned and selected", source.repositories.len(), already_managed_count)))))
-                            .child(Button::new("close-repository-picker").label("Done").primary()
-                                .on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Closed, this, cx)))))
+                                        .child(format!("{} found · {} selected · {} cloned on disk", source.repositories.len(), total_selected, already_managed_count)))))
+                            .child(
+                                div().flex().items_center().gap_2()
+                                    .child(
+                                        Button::new("refresh-source-modal")
+                                            .icon(crate::components::icons::refresh_icon())
+                                            .outline()
+                                            .tooltip(format!("Refresh @{} repositories", source.handle))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                on_refresh(source_index, this, window, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("close-repository-picker")
+                                            .label("Done")
+                                            .primary()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                on_dialog(SourceDialog::Closed, this, cx)
+                                            })),
+                                    ),
+                            ))
                         .child(Input::new(search))
                         .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(repos))
                         .child(footer))
@@ -640,7 +696,7 @@ pub fn render_project_sources<
                     crate::repository_git::repository_owner(source, repo),
                     &repo.name,
                 );
-                if destinations.get(&(source_index, repo_index)).copied().unwrap_or(true) { continue; }
+                if destinations.get(&(source_index, repo_index)).copied().unwrap_or(false) { continue; }
                 count += 1;
                 plans = plans.child(div().p_3().rounded_lg().border_1().border_color(cx.theme().border)
                     .flex().flex_col().gap_1()

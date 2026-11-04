@@ -792,6 +792,131 @@ pub fn download_asset_with_progress(
     )
 }
 
+/// Download a public asset asynchronously, reporting each chunk and polling cancellation while
+/// waiting for the network. The temporary file is dropped on cancellation or failure.
+#[allow(clippy::too_many_arguments)]
+pub async fn download_asset_cancellable_with_progress(
+    project: &Path,
+    owner: &str,
+    repo: &str,
+    tag: &str,
+    name: &str,
+    url: &str,
+    expected_size: Option<u64>,
+    cancelled: &std::sync::atomic::AtomicBool,
+    on_progress: &mut dyn FnMut(u64, Option<u64>) -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    use std::sync::atomic::Ordering;
+
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Download cancelled.".into());
+    }
+    let parsed = safe_download_url(url)?;
+    let owner = storage_component(owner)?;
+    let tag = storage_component(tag)?;
+    let repo_component = component(repo)?;
+    let name_component = component(name)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(300))
+        .user_agent("Release-Desk/1.0")
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.error("Too many redirects")
+            } else if attempt.url().scheme() != "https"
+                || !attempt.url().username().is_empty()
+                || attempt.url().password().is_some()
+            {
+                attempt.error("Unsafe download redirect")
+            } else {
+                attempt.follow()
+            }
+        }))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut response = client
+        .get(parsed)
+        .send()
+        .await
+        .map_err(|error| format!("Download failed: {}", error.without_url()))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Download failed: HTTP {}. Private assets may require authentication.",
+            response.status()
+        ));
+    }
+
+    let expected_size = expected_size.or_else(|| response.content_length());
+    let root = project
+        .canonicalize()
+        .map_err(|error| format!("Cannot access project folder: {error}"))?;
+    let asset_type = release_asset_type(name);
+    let folder = match asset_type {
+        Some(kind) => ensure_project_dir(&root, &[kind.folder])?,
+        None => ensure_project_dir(
+            &root,
+            &[".release-desk", "installers", &owner, repo_component, &tag],
+        )?,
+    };
+    let mut temp = tempfile::NamedTempFile::new_in(&folder)
+        .map_err(|error| format!("Cannot create temporary download: {error}"))?;
+    let mut received = 0u64;
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Download cancelled.".into());
+        }
+        let mut pending_chunk = std::pin::pin!(response.chunk());
+        let chunk_result = loop {
+            match tokio::time::timeout(Duration::from_millis(100), &mut pending_chunk).await {
+                Ok(result) => break result,
+                Err(_) if cancelled.load(Ordering::Acquire) => {
+                    return Err("Download cancelled.".into());
+                }
+                // Keep polling the same body read; recreating it can interrupt response progress.
+                Err(_) => continue,
+            }
+        };
+        let chunk = match chunk_result {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => return Err(format!("Download interrupted: {}", error.without_url())),
+        };
+        received = received
+            .checked_add(chunk.len() as u64)
+            .ok_or("Download size overflow.")?;
+        if expected_size.is_some_and(|size| received > size) {
+            return Err("Download exceeded the expected asset size.".into());
+        }
+        temp.write_all(&chunk)
+            .map_err(|error| format!("Cannot save download: {error}"))?;
+        on_progress(received, expected_size)?;
+    }
+    if let Some(size) = expected_size
+        && received != size
+    {
+        return Err(format!(
+            "Download size mismatch: expected {size} bytes, received {received}."
+        ));
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Download cancelled.".into());
+    }
+    temp.flush()
+        .map_err(|error| format!("Cannot flush download: {error}"))?;
+
+    let destination = folder.join(name_component);
+    let archived = if let Some(kind) = asset_type {
+        rotate_previous_build(&root, &folder, kind, repo, &tag, name_component)?
+    } else {
+        Vec::new()
+    };
+    temp.persist(&destination)
+        .map_err(|error| format!("Cannot save download: {}", error.error))?;
+    if let Some(kind) = asset_type {
+        write_shelf_manifest(&root, kind, repo, &tag, name_component, &archived)?;
+    }
+    Ok(destination)
+}
+
 /// Download a GitHub release asset with a token. The token is sent only to the
 /// fixed GitHub API host, never to the redirected download host.
 #[allow(clippy::too_many_arguments)]

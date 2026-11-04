@@ -13,7 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Animation, AnimationExt as _, Context, ElementId, InteractiveElement as _, IntoElement,
     ParentElement as _, ScrollHandle, StatefulInteractiveElement as _, Styled as _, Window,
-    deferred, div, px,
+    anchored, deferred, div, point, px,
 };
 use release_desk_core::app_catalog::find_known_app;
 use release_desk_store::workspace_releases::{
@@ -173,6 +173,7 @@ pub(crate) fn render_download_queue<T: 'static>(
     queue: &[crate::release_queue::DownloadJob],
     project_id: u128,
     open: bool,
+    window: &Window,
     cx: &Context<T>,
     on_toggle: impl Fn(&mut T, &mut Context<T>) + Copy + 'static,
     on_cancel: impl Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
@@ -208,6 +209,7 @@ pub(crate) fn render_download_queue<T: 'static>(
         );
     }
     if open {
+        let viewport = window.viewport_size();
         let mut rows = div()
             .flex()
             .flex_col()
@@ -271,6 +273,9 @@ pub(crate) fn render_download_queue<T: 'static>(
                                                         })
                                                 )
                                             }
+                                            crate::release_queue::DownloadStatus::Cancelling => {
+                                                "Stopping download…".to_string()
+                                            }
                                             crate::release_queue::DownloadStatus::Complete => {
                                                 "Complete".to_string()
                                             }
@@ -285,8 +290,9 @@ pub(crate) fn render_download_queue<T: 'static>(
                                 .when(job.is_active(), |element| {
                                     element.child(
                                         Button::new(format!("cancel-{}", job.key))
-                                            .label("Cancel")
+                                            .label(if matches!(job.status, crate::release_queue::DownloadStatus::Cancelling) { "Stopping…" } else { "Cancel" })
                                             .outline()
+                                            .disabled(matches!(job.status, crate::release_queue::DownloadStatus::Cancelling))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 on_cancel(job_key.clone(), this, cx)
                                             })),
@@ -313,47 +319,68 @@ pub(crate) fn render_download_queue<T: 'static>(
             rows = rows.child(row);
         }
         root = root.child(
-            div()
-                .id("release-queue-backdrop")
-                .absolute()
-                .inset_0()
-                .bg(cx.theme().background.opacity(0.55))
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_click(cx.listener(move |this, _, _, cx| on_toggle(this, cx)))
-                .child(
-                    div()
-                        .id("release-queue-dialog")
-                        .w(px(560.))
-                        .max_h(px(560.))
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .rounded_2xl()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().background)
-                        .shadow_lg()
-                        .p_5()
-                        .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(div().text_size(px(17.)).font_bold().child("Download queue"))
-                                .child(
-                                    Button::new("close-release-queue")
-                                        .label("Close")
-                                        .ghost()
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| on_toggle(this, cx)),
-                                        ),
-                                ),
-                        )
-                        .child(rows),
-                ),
+            deferred(
+                anchored()
+                    .position(point(px(0.), px(0.)))
+                    .snap_to_window()
+                    .child(
+                        div()
+                            .occlude()
+                            .id("release-queue-backdrop")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w(viewport.width)
+                            .h(viewport.height)
+                            .bg(cx.theme().background.opacity(0.55))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .p_4()
+                            .on_click(cx.listener(move |this, _, _, cx| on_toggle(this, cx)))
+                            .child(
+                                div()
+                                    .occlude()
+                                    .id("release-queue-dialog")
+                                    .w_full()
+                                    .max_w(px(560.))
+                                    .max_h(viewport.height - px(32.))
+                                    .flex()
+                                    .flex_col()
+                                    .overflow_hidden()
+                                    .gap_3()
+                                    .rounded_2xl()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().background)
+                                    .shadow_lg()
+                                    .p_5()
+                                    .on_click(|_, _, cx| cx.stop_propagation())
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .text_size(px(17.))
+                                                    .font_bold()
+                                                    .child("Download queue"),
+                                            )
+                                            .child(
+                                                Button::new("close-release-queue")
+                                                    .label("Close")
+                                                    .ghost()
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| on_toggle(this, cx),
+                                                    )),
+                                            ),
+                                    )
+                                    .child(rows),
+                            ),
+                    ),
+            )
+            .priority(100),
         );
     }
     root
@@ -364,6 +391,7 @@ pub(crate) fn render_download_queue<T: 'static>(
 pub(crate) fn render_live_releases<T: 'static>(
     state: &ReleaseViewState,
     controls: ReleaseShelfControls<'_>,
+    window: &Window,
     cx: &Context<T>,
     on_refresh: impl Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     on_toggle_type_menu: impl Fn(&mut T, &mut Context<T>) + Copy + 'static,
@@ -887,6 +915,7 @@ pub(crate) fn render_live_releases<T: 'static>(
         queue,
         project_id,
         queue_open,
+        window,
         cx,
         on_toggle_queue,
         on_cancel_queue_item,

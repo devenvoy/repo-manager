@@ -182,9 +182,11 @@ impl ReleaseDesk {
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let res = (|| {
+            let res = {
                 let token = if use_token {
-                    project_auth_token(&auth_project, &secret_store)?
+                    project_auth_token(&auth_project, &secret_store)
+                        .ok()
+                        .flatten()
                 } else {
                     None
                 };
@@ -197,7 +199,7 @@ impl ReleaseDesk {
                     },
                 )
                 .map_err(|error| error.to_string())
-            })();
+            };
             if let Ok((profile, _)) = &res {
                 if let Some((url, path)) =
                     WorkspaceSource::from_fetched(profile.clone(), None).avatar_cache_request()
@@ -297,6 +299,7 @@ impl ReleaseDesk {
         let Some(project) = self
             .selected_project_id
             .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            .cloned()
         else {
             return;
         };
@@ -304,68 +307,159 @@ impl ReleaseDesk {
             return;
         };
         let project_id = project.id;
+        let workspace_revision = self.workspace_revision;
         let handle = source.handle.clone();
         let provider = source.provider.clone();
         let use_token = provider == project.provider.as_str();
-        let auth_project = project.clone();
         let secret_store = self.secret_store.clone();
-        let fetch_handle = handle.clone();
-        let fetch_provider = provider.clone();
-        let endpoint_for_fetch = project.custom_host.clone();
+        let endpoint = project.custom_host.clone();
+        let source_handle = handle.clone();
+        let source_provider = provider.clone();
+        let project_for_fetch = project.clone();
+
+        // Show a loading state instead of presenting a stale list as freshly discovered.
+        self.source_dialog = views::project_sources::SourceDialog::Select(index);
+        self.source_destination_revision = self.source_destination_revision.wrapping_add(1);
+        self.source_destination_pending = false;
+        self.source_destinations.clear();
         self.source_busy = true;
-        self.message = format!("Refreshing @{handle}…");
+        self.message = if provider == "local" {
+            "Scanning local repositories…".into()
+        } else {
+            format!("Fetching repositories for @{handle}…")
+        };
         cx.notify();
+
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = (|| {
+            let result = if source_provider == "local" {
+                crate::workspace_sources::scan_local_repositories(&project_for_fetch.directory)
+                    .into_iter()
+                    .find(|source| source.handle.eq_ignore_ascii_case(&source_handle))
+                    .map(|mut source| {
+                        for repo in &mut source.repositories {
+                            repo.selected = false;
+                        }
+                        source
+                    })
+                    .ok_or_else(|| {
+                        "No local Git repositories were found in this project folder.".to_string()
+                    })
+            } else {
                 let token = if use_token {
-                    project_auth_token(&auth_project, &secret_store)?
+                    project_auth_token(&project_for_fetch, &secret_store)
+                        .ok()
+                        .flatten()
                 } else {
                     None
                 };
                 release_desk_store::provider_sources::discover(
                     &release_desk_store::provider_sources::SourceRequest {
-                        provider: &fetch_provider,
-                        input: &fetch_handle,
+                        provider: &source_provider,
+                        input: &source_handle,
                         credential: token.as_deref(),
-                        endpoint: endpoint_for_fetch.as_deref(),
+                        endpoint: endpoint.as_deref(),
                     },
                 )
-                .map(|(profile, _)| profile)
+                .map(|(profile, _)| WorkspaceSource::from_fetched(profile, None))
                 .map_err(|error| error.to_string())
-            })();
-            if let Ok(profile) = &result {
-                if let Some((url, path)) =
-                    WorkspaceSource::from_fetched(profile.clone(), None).avatar_cache_request()
-                {
+            };
+            if let Ok(source) = &result {
+                if let Some((url, path)) = source.avatar_cache_request() {
                     let _ = release_desk_store::source_fetcher::cache_avatar(&url, &path);
                 }
             }
             let _ = tx.send(result);
         });
-        cx.spawn_in(window, async move |this, cx| { loop {
-            cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
-            match rx.try_recv() {
-                Ok(result) => { let _ = this.update_in(cx, |this, _, cx| {
-                    this.source_busy = false;
-                    match result {
-                        Err(error) => this.message = format!("Could not refresh @{handle}: {error}"),
-                        Ok(profile) => {
-                            let mut updated = this.settings.clone();
-                            if let Some(source) = updated.projects.iter_mut().find(|p| p.id == project_id).and_then(|p| p.sources.iter_mut().find(|s| s.provider == provider && s.handle.eq_ignore_ascii_case(&handle))) {
-                                source.refresh_from_fetched(profile);
-                                match settings::save(&updated) {
-                                    Ok(()) => { this.settings = updated; this.projects = this.settings.projects.clone(); this.workspace_revision = this.workspace_revision.wrapping_add(1); this.git_statuses.clear(); this.languages_expanded.clear(); this.language_breakdowns.clear(); this.release_state = Default::default(); this.message = format!("Refreshed @{handle}; your selections were kept."); }
-                                    Err(error) => this.message = error,
+
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(75))
+                    .await;
+                match rx.try_recv() {
+                    Ok(result) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            this.source_busy = false;
+                            if this.workspace_revision != workspace_revision
+                                || this.selected_project_id != Some(project_id)
+                            {
+                                this.source_dialog = views::project_sources::SourceDialog::Closed;
+                                this.message = "Project changed while refreshing repositories.".into();
+                                cx.notify();
+                                return;
+                            }
+                            match result {
+                                Ok(refreshed) => {
+                                    let mut updated = this.settings.clone();
+                                    let existing = updated
+                                        .projects
+                                        .iter_mut()
+                                        .find(|project| project.id == project_id)
+                                        .and_then(|project| project.sources.get_mut(index));
+                                    if let Some(existing) = existing {
+                                        let count = refreshed.repositories.len();
+                                        existing.refresh_from_source(refreshed);
+                                        match settings::save(&updated) {
+                                            Ok(()) => {
+                                                this.settings = updated;
+                                                this.projects = this.settings.projects.clone();
+                                                this.workspace_revision = this.workspace_revision.wrapping_add(1);
+                                                this.git_statuses.clear();
+                                                this.languages_expanded.clear();
+                                                this.language_breakdowns.clear();
+                                                this.release_state = Default::default();
+                                                this.set_source_dialog(
+                                                    views::project_sources::SourceDialog::Select(index),
+                                                    cx,
+                                                );
+                                                this.message = format!("Updated @{handle}: {count} repositories discovered.");
+                                            }
+                                            Err(error) => {
+                                                this.message = format!("Could not save refreshed @{handle}: {error}");
+                                                this.set_source_dialog(
+                                                    views::project_sources::SourceDialog::Select(index),
+                                                    cx,
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        this.source_dialog = views::project_sources::SourceDialog::Closed;
+                                        this.message = format!("@{handle} was removed while refreshing.");
+                                    }
                                 }
-                            } else { this.message = format!("@{handle} was removed while refreshing."); }
-                        }
-                    } cx.notify();
-                }); return; }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => { let _ = this.update_in(cx, |this, _, cx| { this.source_busy = false; this.message = "Source refresh stopped unexpectedly.".into(); cx.notify(); }); return; }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                                Err(error) => {
+                                    this.message = format!("Could not refresh @{handle}: {error}");
+                                    // Leave the cached list available, but mark destinations freshly.
+                                    this.set_source_dialog(
+                                        views::project_sources::SourceDialog::Select(index),
+                                        cx,
+                                    );
+                                }
+                            }
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let _ = this.update_in(cx, |this, _, cx| {
+                            if this.workspace_revision == workspace_revision {
+                                this.source_busy = false;
+                                this.message = format!("Refresh of @{handle} stopped unexpectedly.");
+                                this.set_source_dialog(
+                                    views::project_sources::SourceDialog::Select(index),
+                                    cx,
+                                );
+                            }
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
             }
-        }}).detach();
+        })
+        .detach();
     }
 
     pub(crate) fn remove_source(&mut self, source_index: usize, cx: &mut Context<Self>) {

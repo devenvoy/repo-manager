@@ -1002,6 +1002,7 @@ impl Render for ReleaseDesk {
                                     scroll_handle: &self.release_scroll_handle,
                                     scroll_generation: &self.release_scroll_generation,
                                 },
+                                window,
                                 cx,
                                 |this: &mut Self, _window, cx| this.refresh_releases(cx),
                                 |this: &mut Self, cx| {

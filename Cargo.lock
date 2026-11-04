@@ -5937,7 +5937,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "release-desk-application"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "release-desk-core",
  "serde",
@@ -5949,7 +5949,7 @@ dependencies = [
 
 [[package]]
 name = "release-desk-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "release-desk-application",
@@ -5966,7 +5966,7 @@ dependencies = [
 
 [[package]]
 name = "release-desk-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5974,14 +5974,14 @@ dependencies = [
 
 [[package]]
 name = "release-desk-git"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "release-desk-core",
 ]
 
 [[package]]
 name = "release-desk-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "release-desk-application",
@@ -5995,12 +5995,13 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "uuid",
 ]
 
 [[package]]
 name = "release-desk-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -6021,7 +6022,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "repo-manager"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bigcolor",
  "gpui-kit",
@@ -6035,6 +6036,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "url",
 ]
 
