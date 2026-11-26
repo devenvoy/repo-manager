@@ -73,25 +73,14 @@ pub(crate) fn render<T: 'static>(
         let max_dialog_h = (viewport.height - px(32.)).min(px(560.)).max(px(220.));
         let reserved_chrome = px(185.);
         let available_list_h = (max_dialog_h - reserved_chrome).max(px(80.));
-        let est_row_h: f32 = queue
-            .iter()
-            .map(|job| {
-                let long_err = matches!(
-                    &job.status,
-                    GitUpdateStatus::Failed(err) | GitUpdateStatus::Skipped(err) if err.len() > 48
-                );
-                if long_err { 116.0 } else { 88.0 }
-            })
-            .sum::<f32>()
-            + 24.0;
-        let list_height = px(est_row_h.max(108.0)).min(available_list_h).max(px(96.));
         let mut rows = div()
             .id("git-update-queue-rows")
+            .w_full()
+            .max_h(available_list_h)
             .flex()
             .flex_col()
             .gap_2()
-            .pb_6()
-            .size_full()
+            .pb_2()
             .overflow_y_scroll()
             .track_scroll(scroll_handle);
         for job in queue {
@@ -240,14 +229,15 @@ pub(crate) fn render<T: 'static>(
                                         .h(px(5.))
                                         .rounded_full()
                                         .bg(cx.theme().primary)
-                                        .w(px(510. * ratio)),
+                                        .w(gpui_kit::relative(ratio)),
                                 ),
                         )
                         .child(
                             div()
                                 .relative()
                                 .w_full()
-                                .h(list_height)
+                                .min_h(px(64.))
+                                .max_h(available_list_h)
                                 .flex()
                                 .flex_col()
                                 .min_h_0()

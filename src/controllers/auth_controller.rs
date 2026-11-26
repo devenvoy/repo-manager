@@ -3,6 +3,7 @@
 //! Authentication and credential coordination controller.
 
 use crate::app::{ReleaseDesk, find_webview_binary};
+use crate::controllers::job_registry::StatusToast;
 use crate::workspace::{AuthModeChoice, BrowserAuth, ProviderChoice};
 use gpui_kit::{Context, Window};
 use release_desk_core::port::{BrowserAuthPort as _, SecretStorePort as _};

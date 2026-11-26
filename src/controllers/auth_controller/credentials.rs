@@ -97,14 +97,16 @@ impl ReleaseDesk {
             })
             .and_then(|project| project.credential_ref.clone())
         else {
-            self.message = "No saved credential belongs to this provider address.".into();
+            self.set_toast(StatusToast::warning(
+                "No saved credential belongs to this provider address.",
+            ));
             cx.notify();
             return;
         };
         let secret_store = self.secret_store.clone();
         let provider = self.setup_provider;
         let (tx, rx) = std::sync::mpsc::channel();
-        self.message = "Checking saved account…".into();
+        self.set_quiet_message("Checking saved account…");
         cx.notify();
         let key_for_lookup = cred_key.clone();
         std::thread::spawn(move || {
@@ -188,11 +190,14 @@ impl ReleaseDesk {
                                     this.message.clear();
                                 }
                                 Ok(None) => {
-                                    this.message =
-                                        "Saved account credential is missing. Connect again.".into()
+                                    this.set_toast(StatusToast::warning(
+                                        "Saved account credential is missing. Connect again.",
+                                    ));
                                 }
                                 Err(error) => {
-                                    this.message = format!("Cannot read saved account: {error}")
+                                    this.set_toast(StatusToast::error(format!(
+                                        "Cannot read saved account: {error}"
+                                    )));
                                 }
                             }
                             cx.notify();
@@ -222,7 +227,7 @@ impl ReleaseDesk {
             .update(cx, |input, cx| input.set_value(String::new(), window, cx));
         self.token_input
             .update(cx, |input, cx| input.set_value(String::new(), window, cx));
-        self.message = "Disconnected account credentials.".into();
+        self.set_toast(StatusToast::info("Disconnected account credentials."));
         cx.notify();
     }
 
@@ -233,7 +238,9 @@ impl ReleaseDesk {
 
     pub(crate) fn copy_user_code(&mut self, code: String, cx: &mut Context<Self>) {
         copy_to_macos_clipboard(&code);
-        self.message = format!("Code {code} copied to clipboard.");
+        self.set_toast(StatusToast::info(format!(
+            "Code {code} copied to clipboard."
+        )));
         cx.notify();
     }
 }

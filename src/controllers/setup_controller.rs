@@ -1,6 +1,7 @@
 //! Project setup wizard, project management, and directory coordination controller.
 
 use crate::app::ReleaseDesk;
+use crate::controllers::job_registry::StatusToast;
 use crate::settings;
 use crate::workspace::{
     AuthModeChoice, ProjectSection, ProviderChoice, WorkspaceProject, expand_directory,
@@ -268,12 +269,17 @@ impl ReleaseDesk {
         let host = self.custom_host_input.read(cx).value().trim().to_string();
 
         if self.setup_step == 0 && (name.is_empty() || !directory.is_dir()) {
-            self.message = "Enter a name and choose an existing directory.".into();
+            self.set_toast(StatusToast::warning(
+                "Enter a name and choose an existing directory.",
+            ));
             cx.notify();
             return;
         }
         if self.setup_step == 1 && self.setup_provider.requires_endpoint() && host.is_empty() {
-            self.message = format!("Enter {}.", self.setup_provider.endpoint_label());
+            self.set_toast(StatusToast::warning(format!(
+                "Enter {}.",
+                self.setup_provider.endpoint_label()
+            )));
             cx.notify();
             return;
         }
@@ -295,8 +301,9 @@ impl ReleaseDesk {
         let account = self.account_input.read(cx).value().trim().to_string();
         let token = self.token_input.read(cx).value().trim().to_string();
         if !token.is_empty() && self.saved_credential_ref.is_none() {
-            self.message =
-                "Click Save Token to validate this credential before creating the project.".into();
+            self.set_toast(StatusToast::warning(
+                "Click Save Token to validate this credential before creating the project.",
+            ));
             cx.notify();
             return;
         }
@@ -310,9 +317,9 @@ impl ReleaseDesk {
                 && self.saved_credential_ref == previous.credential_ref
                 && self.saved_credential_ref.is_some()
             {
-                self.message =
-                    "Provider address changed. Connect a token for the new address or disconnect the old credential."
-                        .into();
+                self.set_toast(StatusToast::warning(
+                    "Provider address changed. Connect a token for the new address or disconnect the old credential.",
+                ));
                 cx.notify();
                 return;
             }
@@ -358,9 +365,9 @@ impl ReleaseDesk {
                 && !unchanged_legacy
                 && !managed_browser
             {
-                self.message =
-                    "The saved credential belongs to another account or provider address. Connect again."
-                        .into();
+                self.set_toast(StatusToast::warning(
+                    "The saved credential belongs to another account or provider address. Connect again.",
+                ));
                 cx.notify();
                 return;
             }
@@ -387,7 +394,7 @@ impl ReleaseDesk {
                 }),
         };
         if let Err(error) = project.validate() {
-            self.message = error;
+            self.set_toast(StatusToast::warning(error));
             cx.notify();
             return;
         }
@@ -396,7 +403,9 @@ impl ReleaseDesk {
             .iter()
             .any(|other| other.id != id && other.directory == project.directory)
         {
-            self.message = "That directory already belongs to another project.".into();
+            self.set_toast(StatusToast::warning(
+                "That directory already belongs to another project.",
+            ));
             cx.notify();
             return;
         }
@@ -411,7 +420,7 @@ impl ReleaseDesk {
             updated.projects.push(project);
         }
         if let Err(error) = settings::save(&updated) {
-            self.message = error;
+            self.set_toast(StatusToast::error(error));
             cx.notify();
             return;
         }
@@ -421,7 +430,7 @@ impl ReleaseDesk {
         self.project_section = ProjectSection::Overview;
         self.setup_active = false;
         self.editing_project_id = None;
-        self.message = "Project saved on this computer.".into();
+        self.set_toast(StatusToast::success("Project saved on this computer."));
         cx.notify();
     }
 
@@ -440,7 +449,7 @@ impl ReleaseDesk {
         let mut updated = self.settings.clone();
         updated.projects.retain(|project| project.id != id);
         if let Err(error) = settings::save(&updated) {
-            self.message = error;
+            self.set_toast(StatusToast::error(error));
             cx.notify();
             return;
         }
@@ -452,7 +461,9 @@ impl ReleaseDesk {
         }
         self.selected_project_id = None;
         self.delete_confirm = false;
-        self.message = "Project removed. Files on disk were left in place.".into();
+        self.set_toast(StatusToast::success(
+            "Project removed. Files on disk were left in place.",
+        ));
         cx.notify();
     }
 
@@ -477,11 +488,13 @@ impl ReleaseDesk {
         }
         self.release_state = Default::default();
         if let Err(error) = settings::save(&updated) {
-            self.message = error;
+            self.set_toast(StatusToast::error(error));
         } else {
             self.projects = updated.projects.clone();
             self.settings = updated;
-            self.message = "Project choices saved on this computer.".into();
+            self.set_toast(StatusToast::success(
+                "Project choices saved on this computer.",
+            ));
         }
         cx.notify();
     }

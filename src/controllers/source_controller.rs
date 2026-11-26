@@ -1,6 +1,7 @@
 //! Source discovery and repository selection controller.
 
 use crate::app::{ReleaseDesk, project_auth_token};
+use crate::controllers::job_registry::StatusToast;
 use crate::settings;
 use crate::views;
 use crate::workspace_sources::WorkspaceSource;
@@ -71,7 +72,9 @@ impl ReleaseDesk {
                                         this.source_destinations = states;
                                     } else {
                                         this.source_dialog = views::project_sources::SourceDialog::Closed;
-                                        this.message = "Project changed while checking destinations. Open the picker again.".into();
+                                        this.set_toast(StatusToast::warning(
+                                            "Project changed while checking destinations. Open the picker again.",
+                                        ));
                                     }
                                     cx.notify();
                                 }
@@ -84,8 +87,9 @@ impl ReleaseDesk {
                             this.update(cx, |this, cx| {
                                 if this.source_destination_revision == revision {
                                     this.source_destination_pending = false;
-                                    this.message =
-                                        "Could not check repository destinations.".into();
+                                    this.set_toast(StatusToast::error(
+                                        "Could not check repository destinations.",
+                                    ));
                                     cx.notify();
                                 }
                             });
@@ -105,7 +109,9 @@ impl ReleaseDesk {
         }
         let raw = self.source_input.read(cx).value().trim().to_string();
         if raw.is_empty() {
-            self.message = "Enter a user handle, organization, or repository URL.".into();
+            self.set_toast(StatusToast::warning(
+                "Enter a user handle, organization, or repository URL.",
+            ));
             cx.notify();
             return;
         }
@@ -114,7 +120,7 @@ impl ReleaseDesk {
             .selected_project_id
             .and_then(|id| self.projects.iter().find(|project| project.id == id))
         else {
-            self.message = "No project selected.".into();
+            self.set_toast(StatusToast::warning("No project selected."));
             cx.notify();
             return;
         };
@@ -130,7 +136,7 @@ impl ReleaseDesk {
             match release_desk_store::provider_sources::identify(&source_request) {
                 Ok(target) => target,
                 Err(error) => {
-                    self.message = error.to_string();
+                    self.set_toast(StatusToast::error(error.to_string()));
                     cx.notify();
                     return;
                 }
@@ -140,7 +146,9 @@ impl ReleaseDesk {
             || owner.contains(['?', '#', ' ', '\\'])
             || owner.chars().any(char::is_control)
         {
-            self.message = "Enter a valid user or organization handle, or profile URL.".into();
+            self.set_toast(StatusToast::warning(
+                "Enter a valid user or organization handle, or profile URL.",
+            ));
             cx.notify();
             return;
         }
@@ -153,9 +161,9 @@ impl ReleaseDesk {
                 views::project_sources::SourceDialog::Select(existing_index),
                 cx,
             );
-            self.message = format!(
+            self.set_toast(StatusToast::warning(format!(
                 "@{owner} is already a source. Choose repositories from its existing profile."
-            );
+            )));
             cx.notify();
             return;
         }
@@ -169,7 +177,9 @@ impl ReleaseDesk {
         let endpoint_for_fetch = project.custom_host.clone();
 
         self.source_busy = true;
-        self.message = format!("Fetching live repositories for @{owner} from {provider}...");
+        self.set_quiet_message(format!(
+            "Fetching live repositories for @{owner} from {provider}..."
+        ));
         cx.notify();
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -220,7 +230,7 @@ impl ReleaseDesk {
                                         specific_repo.as_deref(),
                                     );
                                     if specific_repo.is_some() && !source.repositories.iter().any(|repo| repo.selected) {
-                                        this.message = format!("Repository {} was not found or is not accessible.", specific_repo.as_deref().unwrap_or_default());
+                                        this.set_toast(StatusToast::warning(format!("Repository {} was not found or is not accessible.", specific_repo.as_deref().unwrap_or_default())));
                                         cx.notify();
                                         return;
                                     }
@@ -248,16 +258,17 @@ impl ReleaseDesk {
                                                     if this.selected_project_id == Some(project_id) && this.source_input.read(cx).value().trim() == raw {
                                                         this.source_input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
                                                     }
-                                                    this.message = format!("Discovered {repo_count} repositories for @{handle}.");
+                                                    this.set_toast(StatusToast::success(format!("Discovered {repo_count} repositories for @{handle}.")));
                                                 }
-                                                Err(error) => this.message = error,
+                                                Err(error) => this.set_toast(StatusToast::error(error)),
                                             }
-                                        } else { this.message = format!("Source @{handle} is already in this project."); }
-                                    } else { this.message = "The project was removed while the source was loading.".into(); }
+                                        } else { this.set_toast(StatusToast::warning(format!("Source @{handle} is already in this project."))); }
+                                    } else { this.set_toast(StatusToast::warning("The project was removed while the source was loading.")); }
                                 }
                                 Err(err) => {
-                                    this.message =
-                                        format!("Could not fetch source @{display_owner}: {err}");
+                                    this.set_toast(StatusToast::error(format!(
+                                        "Could not fetch source @{display_owner}: {err}"
+                                    )));
                                 }
                             }
                             cx.notify();
@@ -268,9 +279,9 @@ impl ReleaseDesk {
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         let _ = this.update_in(cx, |this, _window, cx| {
                             this.source_busy = false;
-                            this.message = format!(
+                            this.set_toast(StatusToast::error(format!(
                                 "Failed to fetch source @{display_owner}: request aborted."
-                            );
+                            )));
                             cx.notify();
                         });
                         return;
@@ -317,11 +328,11 @@ impl ReleaseDesk {
         self.source_destination_pending = false;
         self.source_destinations.clear();
         self.source_busy = true;
-        self.message = if provider == "local" {
+        self.set_quiet_message(if provider == "local" {
             "Scanning local repositories…".into()
         } else {
             format!("Fetching repositories for @{handle}…")
-        };
+        });
         cx.notify();
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -379,7 +390,9 @@ impl ReleaseDesk {
                                 || this.selected_project_id != Some(project_id)
                             {
                                 this.source_dialog = views::project_sources::SourceDialog::Closed;
-                                this.message = "Project changed while refreshing repositories.".into();
+                                this.set_toast(StatusToast::warning(
+                                    "Project changed while refreshing repositories.",
+                                ));
                                 cx.notify();
                                 return;
                             }
@@ -414,10 +427,10 @@ impl ReleaseDesk {
                                                     views::project_sources::SourceDialog::Select(index),
                                                     cx,
                                                 );
-                                                this.message = format!("Updated @{handle}: {count} repositories discovered.");
+                                                this.set_toast(StatusToast::success(format!("Updated @{handle}: {count} repositories discovered.")));
                                             }
                                             Err(error) => {
-                                                this.message = format!("Could not save refreshed @{handle}: {error}");
+                                                this.set_toast(StatusToast::error(format!("Could not save refreshed @{handle}: {error}")));
                                                 this.set_source_dialog(
                                                     views::project_sources::SourceDialog::Select(index),
                                                     cx,
@@ -426,11 +439,11 @@ impl ReleaseDesk {
                                         }
                                     } else {
                                         this.source_dialog = views::project_sources::SourceDialog::Closed;
-                                        this.message = format!("@{handle} was removed while refreshing.");
+                                        this.set_toast(StatusToast::warning(format!("@{handle} was removed while refreshing.")));
                                     }
                                 }
                                 Err(error) => {
-                                    this.message = format!("Could not refresh @{handle}: {error}");
+                                    this.set_toast(StatusToast::error(format!("Could not refresh @{handle}: {error}")));
                                     // Leave the cached list available, but mark destinations freshly.
                                     this.set_source_dialog(
                                         views::project_sources::SourceDialog::Select(index),
@@ -446,7 +459,7 @@ impl ReleaseDesk {
                         let _ = this.update_in(cx, |this, _, cx| {
                             if this.workspace_revision == workspace_revision {
                                 this.source_busy = false;
-                                this.message = format!("Refresh of @{handle} stopped unexpectedly.");
+                                this.set_toast(StatusToast::error(format!("Refresh of @{handle} stopped unexpectedly.")));
                                 this.set_source_dialog(
                                     views::project_sources::SourceDialog::Select(index),
                                     cx,
@@ -483,7 +496,9 @@ impl ReleaseDesk {
                 && parsed.password().is_none()
         });
         if !safe {
-            self.message = "Could not open this provider link safely.".into();
+            self.set_toast(StatusToast::error(
+                "Could not open this provider link safely.",
+            ));
             cx.notify();
             return;
         }
@@ -498,7 +513,7 @@ impl ReleaseDesk {
         }
         self.last_browser_open = Some((url.to_string(), now));
 
-        self.message = format!("Opening {url} in browser…");
+        self.set_quiet_message(format!("Opening {url} in browser…"));
         cx.open_url(url);
         cx.notify();
     }

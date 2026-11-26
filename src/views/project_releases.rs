@@ -225,26 +225,14 @@ pub(crate) fn render_download_queue<T: 'static>(
         let max_dialog_h = (viewport.height - px(32.)).min(px(560.)).max(px(220.));
         let reserved_chrome = px(100.);
         let available_list_h = (max_dialog_h - reserved_chrome).max(px(80.));
-        let est_row_h: f32 = project_jobs
-            .iter()
-            .map(|job| {
-                if matches!(&job.status, crate::release_queue::DownloadStatus::Failed(err) if err.len() > 60)
-                {
-                    110.0
-                } else {
-                    82.0
-                }
-            })
-            .sum::<f32>()
-            .max(80.0);
-        let queue_list_height = px(est_row_h).min(available_list_h).max(px(80.));
         let mut rows = div()
             .id("release-queue-rows")
+            .w_full()
+            .max_h(available_list_h)
             .flex()
             .flex_col()
             .gap_2()
-            .pb_4()
-            .size_full()
+            .pb_2()
             .overflow_y_scroll()
             .track_scroll(queue_scroll_handle);
         for job in project_jobs {
@@ -347,7 +335,7 @@ pub(crate) fn render_download_queue<T: 'static>(
                                 .h(px(4.))
                                 .rounded_full()
                                 .bg(cx.theme().primary)
-                                .w(px(320. * progress)),
+                                .w(gpui_kit::relative(progress)),
                         ),
                 );
             }
@@ -425,7 +413,8 @@ pub(crate) fn render_download_queue<T: 'static>(
                                         div()
                                             .relative()
                                             .w_full()
-                                            .h(queue_list_height)
+                                            .min_h(px(64.))
+                                            .max_h(available_list_h)
                                             .flex()
                                             .flex_col()
                                             .min_h_0()

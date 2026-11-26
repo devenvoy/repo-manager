@@ -57,7 +57,9 @@ impl ReleaseDesk {
                     self.auth_status_message = Some(format!(
                         "Enter code {user_code} on GitHub (copied to clipboard). Waiting for authorization..."
                     ));
-                    self.message = format!("One-time code {user_code} copied to clipboard.");
+                    self.set_toast(StatusToast::info(format!(
+                        "One-time code {user_code} copied to clipboard."
+                    )));
 
                     #[cfg(target_os = "macos")]
                     let _ = std::process::Command::new("open").arg(&verify_url).spawn();
@@ -106,7 +108,9 @@ impl ReleaseDesk {
                                     let _ = this.update_in(cx, |this, window, cx| {
                                         let cred_key = format!("release_desk_github_{user_login}");
                                         if let Err(error) = this.secret_store.set_secret(&cred_key, &access_token) {
-                                            this.message = format!("Could not save account credential: {error}");
+                                            this.set_toast(StatusToast::error(format!(
+                                                "Could not save account credential: {error}"
+                                            )));
                                             cx.notify();
                                             return;
                                         }
@@ -115,7 +119,9 @@ impl ReleaseDesk {
                                         this.auth_status_message = Some(format!(
                                             "Successfully authorized via GitHub OAuth (@{user_login})."
                                         ));
-                                        this.message = format!("Connected to GitHub as @{user_login}.");
+                                        this.set_toast(StatusToast::success(format!(
+                                            "Connected to GitHub as @{user_login}."
+                                        )));
                                         this.account_input.update(cx, |input, cx| {
                                             input.set_value(user_login, window, cx);
                                         });

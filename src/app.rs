@@ -140,10 +140,10 @@ pub struct ReleaseDesk {
     pub(crate) release_scroll_handle: gpui_kit::ScrollHandle,
     pub(crate) release_scroll_generation: std::rc::Rc<std::cell::Cell<u64>>,
     pub(crate) message: String,
-    pub(crate) pending_toast: Option<crate::controllers::job_registry::StatusToast>,
+    pub(crate) pending_toasts:
+        std::collections::VecDeque<crate::controllers::job_registry::StatusToast>,
     #[allow(dead_code)]
     pub(crate) last_toast: Option<crate::controllers::job_registry::StatusToast>,
-    last_notified_message: String,
     pub(crate) nav_history: Vec<NavLocation>,
     pub(crate) nav_index: usize,
     pub(crate) secret_store: Arc<OsSecretStore>,
@@ -476,9 +476,8 @@ impl ReleaseDesk {
             release_scroll_handle: gpui_kit::ScrollHandle::new(),
             release_scroll_generation: std::rc::Rc::new(std::cell::Cell::new(0)),
             message,
-            pending_toast: None,
+            pending_toasts: std::collections::VecDeque::new(),
             last_toast: None,
-            last_notified_message: String::new(),
             nav_history: vec![initial_loc],
             nav_index: 0,
             secret_store,
@@ -629,7 +628,11 @@ impl ReleaseDesk {
     pub(crate) fn set_toast(&mut self, toast: crate::controllers::job_registry::StatusToast) {
         self.message = toast.text.clone();
         self.last_toast = Some(toast.clone());
-        self.pending_toast = Some(toast);
+        self.pending_toasts.push_back(toast);
+    }
+
+    pub(crate) fn set_quiet_message(&mut self, message: impl Into<String>) {
+        self.message = message.into();
     }
 
     pub fn set_repo_cache(&mut self, cache: Arc<crate::modules::repo_cache::RepoCache>) {
@@ -807,6 +810,7 @@ impl ReleaseDesk {
                 theme.success = hsla(150.0 / 360.0, 0.58, 0.60, 1.0);
                 theme.warning = hsla(38.0 / 360.0, 0.86, 0.62, 1.0);
                 theme.danger = hsla(5.0 / 360.0, 1.0, 0.75, 1.0);
+                theme.info = theme.primary;
             } else {
                 theme.background = hsla(216.0 / 360.0, 0.23, 0.96, 1.0);
                 theme.secondary = hsla(0.0, 0.0, 1.0, 1.0);
@@ -819,7 +823,9 @@ impl ReleaseDesk {
                 theme.success = hsla(151.0 / 360.0, 0.68, 0.28, 1.0);
                 theme.warning = hsla(35.0 / 360.0, 1.0, 0.30, 1.0);
                 theme.danger = hsla(5.0 / 360.0, 0.71, 0.40, 1.0);
+                theme.info = theme.primary;
             }
+            theme.tokens.popover = theme.secondary.into();
             theme.button = theme.secondary;
             theme.button_foreground = theme.foreground;
             theme.button_primary = theme.primary;
@@ -844,7 +850,9 @@ impl ReleaseDesk {
         self.settings.appearance = appearance;
         let _ = settings::save(&self.settings);
         self.apply_appearance(window, cx);
-        self.message = format!("Theme changed to {:?}", appearance);
+        self.set_toast(crate::controllers::job_registry::StatusToast::success(
+            format!("Theme changed to {:?}", appearance),
+        ));
         cx.notify();
     }
 
@@ -876,40 +884,10 @@ impl ReleaseDesk {
 
 impl Render for ReleaseDesk {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(toast) = self.pending_toast.take() {
+        while let Some(toast) = self.pending_toasts.pop_front() {
             let text = toast.text.trim().to_string();
-            self.last_notified_message = self.message.clone();
             if !text.is_empty() {
-                use crate::controllers::job_registry::ToastSeverity;
-                let notification = match toast.severity {
-                    ToastSeverity::Error => Notification::error(text),
-                    ToastSeverity::Warning => Notification::warning(text),
-                    ToastSeverity::Success => Notification::success(text),
-                    ToastSeverity::Info => Notification::info(text),
-                };
-                cx.spawn_in(window, async move |_, cx| {
-                    let _ = cx.update(|window, cx| window.push_notification(notification, cx));
-                })
-                .detach();
-            }
-        } else if self.message != self.last_notified_message {
-            self.last_notified_message.clone_from(&self.message);
-            let message = self.message.trim();
-            if !message.is_empty()
-                && !message.ends_with('…')
-                && !message.ends_with("...")
-                && message != "Local repository inspection finished."
-            {
-                let lower = message.to_ascii_lowercase();
-                let notification = if lower.contains("failed")
-                    || lower.contains("error")
-                    || lower.starts_with("cannot ")
-                    || lower.starts_with("could not ")
-                {
-                    Notification::error(message.to_string())
-                } else {
-                    Notification::info(message.to_string())
-                };
+                let notification = notification_for_toast(toast.severity, text);
                 cx.spawn_in(window, async move |_, cx| {
                     let _ = cx.update(|window, cx| window.push_notification(notification, cx));
                 })
@@ -995,18 +973,24 @@ impl Render for ReleaseDesk {
                 |this: &mut Self, start_view, cx| {
                     this.settings.start_view = start_view;
                     let _ = settings::save(&this.settings);
-                    this.message = format!("Startup view changed to {start_view:?}");
+                    this.set_toast(crate::controllers::job_registry::StatusToast::success(
+                        format!("Startup view changed to {start_view:?}"),
+                    ));
                     cx.notify();
                 },
                 |this: &mut Self, layout, cx| {
                     this.settings.hub_view_mode = layout;
                     let _ = settings::save(&this.settings);
-                    this.message = format!("Default layout changed to {layout:?}");
+                    this.set_toast(crate::controllers::job_registry::StatusToast::success(
+                        format!("Default layout changed to {layout:?}"),
+                    ));
                     cx.notify();
                 },
                 |this: &mut Self, cx| {
                     let _ = settings::save(&this.settings);
-                    this.message = "Settings saved successfully.".into();
+                    this.set_toast(crate::controllers::job_registry::StatusToast::success(
+                        "Settings saved successfully.",
+                    ));
                     cx.notify();
                 },
             )
@@ -1553,6 +1537,19 @@ impl Render for ReleaseDesk {
     }
 }
 
+pub(crate) fn notification_for_toast(
+    severity: crate::controllers::job_registry::ToastSeverity,
+    text: String,
+) -> Notification {
+    use crate::controllers::job_registry::ToastSeverity;
+    match severity {
+        ToastSeverity::Error => Notification::error(text),
+        ToastSeverity::Warning => Notification::warning(text),
+        ToastSeverity::Success => Notification::success(text),
+        ToastSeverity::Info => Notification::info(text),
+    }
+}
+
 #[cfg(test)]
 mod project_loading_tests {
     use super::{ProjectLoadAction, project_load_action};
@@ -1589,5 +1586,104 @@ mod project_loading_tests {
             project_load_action(ProjectSection::Releases, false, true, false, false),
             ProjectLoadAction::None
         );
+    }
+
+    #[test]
+    fn toast_queue_preserves_order_and_ignores_quiet_messages() {
+        use super::notification_for_toast;
+        use crate::controllers::git_queue_controller::classify_queue_toast;
+        use crate::controllers::job_registry::{StatusToast, ToastSeverity};
+
+        assert_eq!(
+            classify_queue_toast(0, 0, 1, 0).severity,
+            ToastSeverity::Error
+        );
+        assert_eq!(
+            classify_queue_toast(2, 0, 1, 0).severity,
+            ToastSeverity::Warning
+        );
+        assert_eq!(
+            classify_queue_toast(0, 1, 0, 0).severity,
+            ToastSeverity::Warning
+        );
+        assert_eq!(
+            classify_queue_toast(0, 0, 0, 1).severity,
+            ToastSeverity::Warning
+        );
+        assert_eq!(
+            classify_queue_toast(2, 0, 0, 0).severity,
+            ToastSeverity::Success
+        );
+
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(StatusToast::error("error-handler repo check"));
+        queue.push_back(StatusToast::warning("offline-sync warning"));
+        queue.push_back(StatusToast::success("done"));
+        queue.push_back(StatusToast::info("note"));
+        assert_eq!(queue.len(), 4);
+        assert_eq!(queue.pop_front().unwrap().severity, ToastSeverity::Error);
+        assert_eq!(queue.pop_front().unwrap().severity, ToastSeverity::Warning);
+        assert_eq!(queue.pop_front().unwrap().severity, ToastSeverity::Success);
+        assert_eq!(queue.pop_front().unwrap().severity, ToastSeverity::Info);
+
+        let _ = notification_for_toast(ToastSeverity::Error, "err".into());
+        let _ = notification_for_toast(ToastSeverity::Warning, "warn".into());
+        let _ = notification_for_toast(ToastSeverity::Success, "ok".into());
+        let _ = notification_for_toast(ToastSeverity::Info, "info".into());
+    }
+
+    #[gpui_kit::test]
+    async fn render_drains_toast_fifo_without_falling_back_to_quiet_messages(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use super::{ReleaseDesk, SchedulerConfig};
+        use crate::controllers::job_registry::{StatusToast, ToastSeverity};
+        use gpui_kit::AppContext as _;
+
+        cx.update(gpui_kit::init);
+        let config = SchedulerConfig {
+            auto_start: false,
+            ..Default::default()
+        };
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| ReleaseDesk::new_with_config(config, window, cx))
+            })
+            .unwrap()
+        });
+        let vcx = gpui_kit::VisualTestContext::from_window(window, cx);
+
+        view.update(cx, |this, cx| {
+            this.set_quiet_message("Quiet background failure word without toast");
+            this.set_toast(StatusToast::error("error-handler repo failed"));
+            this.set_toast(StatusToast::warning("Offline — showing cached state."));
+            this.set_toast(StatusToast::success("Repository check finished."));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+
+        view.read_with(cx, |this, _| {
+            assert!(
+                this.pending_toasts.is_empty(),
+                "all queued toasts should be drained during render"
+            );
+            assert_eq!(
+                this.last_toast.as_ref().map(|t| t.severity),
+                Some(ToastSeverity::Success)
+            );
+        });
+
+        view.update(cx, |this, cx| {
+            this.set_quiet_message("error keyword inside quiet label");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        view.read_with(cx, |this, _| {
+            assert!(this.pending_toasts.is_empty());
+            assert_eq!(
+                this.last_toast.as_ref().map(|t| t.text.as_str()),
+                Some("Repository check finished.")
+            );
+        });
     }
 }

@@ -1,6 +1,7 @@
 //! Upstream release shelf and asset downloading controller.
 
 use crate::app::{ReleaseDesk, project_auth_token};
+use crate::controllers::job_registry::StatusToast;
 use gpui_kit::{Context, Window};
 
 impl ReleaseDesk {
@@ -33,7 +34,9 @@ impl ReleaseDesk {
                 self.settings.installer_extension = extension;
                 changed = true;
                 if let Err(error) = crate::settings::save(&self.settings) {
-                    self.message = format!("Cannot save release file type: {error}");
+                    self.set_toast(StatusToast::error(format!(
+                        "Cannot save release file type: {error}"
+                    )));
                 }
             }
         }
@@ -131,7 +134,7 @@ impl ReleaseDesk {
                                 {
                                     this.release_busy = false;
                                     this.release_state = Default::default();
-                                    this.message = error;
+                                    this.set_toast(StatusToast::error(error));
                                     cx.notify();
                                 }
                             });
@@ -144,7 +147,9 @@ impl ReleaseDesk {
                                 if this.workspace_revision == revision {
                                     this.release_busy = false;
                                     this.release_state = Default::default();
-                                    this.message = "Release fetch stopped unexpectedly.".into();
+                                    this.set_toast(StatusToast::error(
+                                        "Release fetch stopped unexpectedly.",
+                                    ));
                                 }
                                 cx.notify();
                             });
@@ -305,7 +310,7 @@ impl ReleaseDesk {
             total: size,
             cancel: cancel.clone(),
         });
-        self.message = format!("Downloading {name}…");
+        self.set_quiet_message(format!("Downloading {name}…"));
         cx.notify();
         let (tx, rx) = std::sync::mpsc::channel();
         crate::release_queue::submit(move || {
@@ -448,7 +453,7 @@ impl ReleaseDesk {
                                 crate::release_queue::DownloadStatus::Complete
                             };
                         }
-                        this.message = if this
+                        let toast = if this
                             .release_queue
                             .iter()
                             .find(|job| job.key == download_key)
@@ -458,13 +463,19 @@ impl ReleaseDesk {
                                     crate::release_queue::DownloadStatus::Cancelled
                                 )
                             }) {
-                            "Download cancelled.".into()
+                            StatusToast::info("Download cancelled.")
                         } else {
                             match result {
-                                Ok(path) => format!("Downloaded to {}", path.display()),
-                                Err(error) => format!("Download failed: {error}"),
+                                Ok(path) => StatusToast::success(format!(
+                                    "Downloaded to {}",
+                                    path.display()
+                                )),
+                                Err(error) => {
+                                    StatusToast::error(format!("Download failed: {error}"))
+                                }
                             }
                         };
+                        this.set_toast(toast);
                         if succeeded {
                             this.refresh_release_presentations(cx);
                         } else {
@@ -485,7 +496,7 @@ impl ReleaseDesk {
                                 "Download worker stopped unexpectedly.".into(),
                             );
                         }
-                        this.message = "Download stopped unexpectedly.".into();
+                        this.set_toast(StatusToast::error("Download stopped unexpectedly."));
                         cx.notify();
                     });
                     return;

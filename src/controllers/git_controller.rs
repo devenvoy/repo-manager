@@ -52,7 +52,9 @@ impl ReleaseDesk {
             .as_ref()
             .is_some_and(|status| status.running)
         {
-            self.message = "An icon operation is already running. Wait for it to finish.".into();
+            self.set_toast(StatusToast::warning(
+                "An icon operation is already running. Wait for it to finish.",
+            ));
             cx.notify();
             return;
         }
@@ -78,12 +80,11 @@ impl ReleaseDesk {
             .into(),
             failed: false,
         });
-        self.message = if recreate {
+        self.set_quiet_message(if recreate {
             "Recreating repository icons…"
         } else {
             "Clearing project cache…"
-        }
-        .into();
+        });
         cx.notify();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -185,7 +186,11 @@ impl ReleaseDesk {
                                                 this.refresh_project_icon_views(project_id, cx);
                                             }
                                             if this.selected_project_id == Some(project_id) {
-                                                this.message = message.clone();
+                                                this.set_toast(if failed {
+                                                    StatusToast::warning(message.clone())
+                                                } else {
+                                                    StatusToast::success(message.clone())
+                                                });
                                             }
                                             if let Some(status) = &mut this.project_cache_status {
                                                 status.running = false;
@@ -197,7 +202,7 @@ impl ReleaseDesk {
                                             let message =
                                                 format!("Project cache action failed: {error}");
                                             if this.selected_project_id == Some(project_id) {
-                                                this.message = message.clone();
+                                                this.set_toast(StatusToast::error(message.clone()));
                                             }
                                             if let Some(status) = &mut this.project_cache_status {
                                                 status.running = false;
@@ -215,7 +220,9 @@ impl ReleaseDesk {
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         if let Some(this) = this.upgrade() {
                             this.update(cx, |this, cx| {
-                                this.message = "Project cache action stopped unexpectedly.".into();
+                                this.set_toast(StatusToast::error(
+                                    "Project cache action stopped unexpectedly.",
+                                ));
                                 if let Some(status) = &mut this.project_cache_status {
                                     status.running = false;
                                     status.failed = true;
@@ -513,8 +520,8 @@ impl ReleaseDesk {
         trigger: crate::modules::scheduler_service::TriggerKind,
         cx: &mut Context<Self>,
     ) {
-        use crate::modules::remote_probe::{ProbeTarget, RemoteProbe as _, TieredRemoteProbe};
-        use crate::modules::repo_cache::{CachedRepoRecord, StoredReleaseAsset, now_unix_secs};
+        use crate::modules::remote_probe::{ProbeTarget, TieredRemoteProbe};
+        use crate::modules::repo_cache::{StoredReleaseAsset, now_unix_secs};
         use crate::modules::scheduler_service::{
             TriggerKind, prioritize_probe_order, sort_slowest_first,
         };
@@ -553,13 +560,19 @@ impl ReleaseDesk {
         let volume_limiter = self.volume_limiter.clone();
         let cache = self.repo_cache.clone();
 
+        let run_remote = matches!(
+            trigger,
+            TriggerKind::Startup | TriggerKind::Interval | TriggerKind::ManualCheck
+        );
+        let initial_activity = if run_remote {
+            GitActivity::Checking
+        } else {
+            GitActivity::Inspecting
+        };
+
         let (existing_records, selected_key) = {
             let rt = self.jobs.project_mut(project_id);
-            rt.activity = Some(if trigger == TriggerKind::Focus {
-                GitActivity::Inspecting
-            } else {
-                GitActivity::Checking
-            });
+            rt.activity = Some(initial_activity);
             rt.check_completed = 0;
             rt.check_total = 0;
             (rt.repo_records_cloned(), rt.selected_repository.clone())
@@ -596,9 +609,20 @@ impl ReleaseDesk {
         }
 
         enum SchedEvent {
-            Batch(Vec<(RepoKey, RepoUpdate)>),
+            ProgressModel {
+                total_steps: usize,
+                local_keys: HashSet<RepoKey>,
+                remote_keys: HashSet<RepoKey>,
+            },
+            LocalRow(Box<crate::modules::repo_cache::CachedRepoRecord>),
+            RemoteRow(Box<crate::modules::repo_cache::CachedRepoRecord>),
+            ProbeBatch(Vec<(RepoKey, RepoUpdate)>),
             Error(String),
-            Finished { ts: u64, offline: bool },
+            Finished {
+                ts: u64,
+                offline: bool,
+                failed_count: usize,
+            },
             Aborted,
         }
         let (tx, rx) = std::sync::mpsc::channel::<SchedEvent>();
@@ -632,6 +656,7 @@ impl ReleaseDesk {
                 let _ = tx.send(SchedEvent::Finished {
                     ts: now_unix_secs(),
                     offline: false,
+                    failed_count: 0,
                 });
                 return;
             }
@@ -645,112 +670,63 @@ impl ReleaseDesk {
             let check_dirty = matches!(trigger, TriggerKind::Focus | TriggerKind::ManualCheck);
             let status_timeout = std::time::Duration::from_secs(10);
 
-            let local_records: Vec<CachedRepoRecord> = volume_limiter.run_on_volume_with_paths(
-                &project.directory,
-                cache.as_deref(),
-                &targets,
-                |t| Some(t.path.as_path()),
-                |target| {
-                    if cancel.load(std::sync::atomic::Ordering::Acquire) {
-                        let fallback =
-                            existing_records
-                                .get(&target.key)
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    crate::repository_git::revalidate_or_inspect_target(
-                                        project_id,
-                                        target,
-                                        None,
-                                        false,
-                                        &icon_map,
-                                        status_timeout,
-                                    )
-                                    .0
-                                });
-                        return (fallback, false);
-                    }
-                    let (rec, timed_out) =
-                        crate::repository_git::revalidate_or_inspect_target_with_policy(
+            let ordered_keys = prioritize_probe_order(
+                &targets.iter().map(|t| t.key.clone()).collect::<Vec<_>>(),
+                selected_key.as_ref(),
+                &visible_keys,
+                &last_probed_map,
+            );
+            let target_map: HashMap<RepoKey, _> =
+                targets.iter().map(|t| (t.key.clone(), t)).collect();
+            let ordered_targets: Vec<_> = ordered_keys
+                .into_iter()
+                .filter_map(|k| target_map.get(&k).copied())
+                .collect();
+
+            let (any_offline, failed_count) = if run_remote && auto_fetch {
+                // Full fetch path already runs `status` + `fetch`; skip redundant Phase 1 scan.
+                let remote_keys: HashSet<RepoKey> =
+                    ordered_targets.iter().map(|t| t.key.clone()).collect();
+                let _ = tx.send(SchedEvent::ProgressModel {
+                    total_steps: ordered_targets.len(),
+                    local_keys: HashSet::new(),
+                    remote_keys,
+                });
+                let fetched = crate::modules::parallel::map_bounded_per_host(
+                    &ordered_targets,
+                    8,
+                    8,
+                    |t| t.key.host.clone(),
+                    |target| {
+                        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                            return None;
+                        }
+                        let st = crate::repository_git::check_for_updates(target);
+                        let key = st.key.clone();
+                        let had_err = st.state.is_err();
+                        let rec = crate::repository_git::record_from_status(
                             project_id,
                             target,
-                            existing_records.get(&target.key),
-                            check_dirty || Some(&target.key) == selected_key.as_ref(),
-                            auto_refresh_stale_index,
+                            &st,
+                            existing_records.get(&key),
                             &icon_map,
-                            status_timeout,
+                            selected_key.as_ref() == Some(&key),
                         );
-                    (rec, timed_out)
-                },
-            );
-
-            let by_key: HashMap<RepoKey, CachedRepoRecord> = local_records
-                .iter()
-                .map(|r| (r.key.clone(), r.clone()))
-                .collect();
-            let local_updates: Vec<(RepoKey, RepoUpdate)> = local_records
-                .into_iter()
-                .map(|rec| {
-                    (
-                        rec.key.clone(),
-                        RepoUpdate::replace(rec, RepoUpdateKind::Revalidate),
-                    )
-                })
-                .collect();
-            let _ = tx.send(SchedEvent::Batch(local_updates));
-
-            let mut any_offline = false;
-            if matches!(
-                trigger,
-                TriggerKind::Startup | TriggerKind::Interval | TriggerKind::ManualCheck
-            ) && !cancel.load(std::sync::atomic::Ordering::Acquire)
-            {
-                let ordered_keys = prioritize_probe_order(
-                    &targets.iter().map(|t| t.key.clone()).collect::<Vec<_>>(),
-                    selected_key.as_ref(),
-                    &visible_keys,
-                    &last_probed_map,
+                        let _ = tx.send(SchedEvent::RemoteRow(Box::new(rec)));
+                        Some(had_err)
+                    },
                 );
-                let target_map: HashMap<RepoKey, _> =
-                    targets.into_iter().map(|t| (t.key.clone(), t)).collect();
-                let ordered_targets: Vec<_> = ordered_keys
-                    .into_iter()
-                    .filter_map(|k| target_map.get(&k).cloned())
-                    .collect();
-
-                if auto_fetch {
-                    let fetched = crate::modules::parallel::map_bounded_per_host(
-                        &ordered_targets,
-                        8,
-                        8,
-                        |t| t.key.host.clone(),
-                        crate::repository_git::check_for_updates,
-                    );
-                    let fetched_icon_map = HashMap::new();
-                    let mut updates = Vec::new();
-                    for st in fetched {
-                        let key = st.key.clone();
-                        if let Some(target) = target_map.get(&key) {
-                            let rec = crate::repository_git::record_from_status(
-                                project_id,
-                                target,
-                                &st,
-                                by_key.get(&key),
-                                &fetched_icon_map,
-                                selected_key.as_ref() == Some(&key),
-                            );
-                            updates.push((key, RepoUpdate::replace(rec, RepoUpdateKind::Fetch)));
-                        }
-                    }
-                    if !updates.is_empty() {
-                        let _ = tx.send(SchedEvent::Batch(updates));
-                    }
-                } else {
-                    let probe_targets: Vec<ProbeTarget> = ordered_targets
+                let failed = fetched.into_iter().flatten().filter(|e| *e).count();
+                (false, failed)
+            } else {
+                let probe_targets: Vec<ProbeTarget> = if run_remote {
+                    ordered_targets
                         .iter()
                         .filter(|t| {
-                            by_key
-                                .get(&t.key)
-                                .is_some_and(|r| r.destination.is_git_repo())
+                            t.path.join(".git").exists()
+                                || existing_records
+                                    .get(&t.key)
+                                    .is_some_and(|r| r.destination.is_git_repo())
                         })
                         .map(|t| ProbeTarget {
                             key: t.key.clone(),
@@ -759,60 +735,171 @@ impl ReleaseDesk {
                             credential_ref: t.credential_ref.clone(),
                             endpoint: t.endpoint.clone(),
                         })
-                        .collect();
-                    let token = crate::app::project_auth_token(&project, &secret_store)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                let local_keys: HashSet<RepoKey> = targets.iter().map(|t| t.key.clone()).collect();
+                let remote_keys: HashSet<RepoKey> =
+                    probe_targets.iter().map(|t| t.key.clone()).collect();
+                let _ = tx.send(SchedEvent::ProgressModel {
+                    total_steps: local_keys.len() + remote_keys.len(),
+                    local_keys,
+                    remote_keys,
+                });
+
+                let token = if !probe_targets.is_empty() {
+                    crate::app::project_auth_token(&project, &secret_store)
                         .ok()
-                        .flatten();
-                    let probe = TieredRemoteProbe::new();
-                    let results = probe.probe_batch(&probe_targets, token.as_deref(), &cancel);
-                    let now = now_unix_secs();
-                    let all_offline = !results.is_empty() && results.iter().all(|r| r.offline);
-                    any_offline = all_offline;
-                    let mut updates = Vec::new();
-                    for res in results {
-                        if res.offline {
-                            updates.push((res.key, RepoUpdate::MarkOffline));
-                            continue;
-                        }
-                        let latest_release = res.latest_release_tag.map(|tag| {
-                            (
-                                tag,
-                                res.latest_release_date,
-                                res.latest_release_assets
-                                    .into_iter()
-                                    .map(|a| StoredReleaseAsset {
-                                        name: a.name,
-                                        download_url: a.download_url,
-                                        size: a.size,
-                                    })
-                                    .collect(),
-                            )
-                        });
-                        updates.push((
-                            res.key,
-                            RepoUpdate::ApplyProbe {
-                                remote_sha: res.remote_sha,
-                                failed_reason: res.error,
-                                issue: res.issue,
-                                latest_release,
-                                probed_at: now,
-                            },
-                        ));
-                    }
-                    if !updates.is_empty() {
-                        let _ = tx.send(SchedEvent::Batch(updates));
-                    }
-                }
-            }
+                        .flatten()
+                } else {
+                    None
+                };
+
+                let (probe_offline, probe_failed) = std::thread::scope(|scope| {
+                    let remote_handle = (!probe_targets.is_empty()).then(|| {
+                        let tx_remote = tx.clone();
+                        let probe_targets_ref = &probe_targets;
+                        let cancel_ref = &cancel;
+                        let token_ref = token.as_deref();
+                        scope.spawn(move || {
+                            let probe = TieredRemoteProbe::new();
+                            let to_probe_update =
+                                |res: crate::modules::remote_probe::ProbeResult, now: u64| {
+                                    if res.offline {
+                                        return (res.key, RepoUpdate::MarkOffline);
+                                    }
+                                    let latest_release = res.latest_release_tag.map(|tag| {
+                                        (
+                                            tag,
+                                            res.latest_release_date,
+                                            res.latest_release_assets
+                                                .into_iter()
+                                                .map(|a| StoredReleaseAsset {
+                                                    name: a.name,
+                                                    download_url: a.download_url,
+                                                    size: a.size,
+                                                })
+                                                .collect(),
+                                        )
+                                    });
+                                    (
+                                        res.key,
+                                        RepoUpdate::ApplyProbe {
+                                            remote_sha: res.remote_sha,
+                                            failed_reason: res.error,
+                                            issue: res.issue,
+                                            latest_release,
+                                            probed_at: now,
+                                        },
+                                    )
+                                };
+                            let results = probe.probe_batch_with_progress(
+                                probe_targets_ref,
+                                token_ref,
+                                cancel_ref,
+                                &|chunk| {
+                                    let now = now_unix_secs();
+                                    let batch: Vec<(RepoKey, RepoUpdate)> = chunk
+                                        .iter()
+                                        .cloned()
+                                        .map(|r| to_probe_update(r, now))
+                                        .collect();
+                                    if !batch.is_empty() {
+                                        let _ = tx_remote.send(SchedEvent::ProbeBatch(batch));
+                                    }
+                                },
+                            );
+                            let offline = !results.is_empty() && results.iter().all(|r| r.offline);
+                            let failed = results
+                                .iter()
+                                .filter(|r| !r.offline && r.error.is_some())
+                                .count();
+                            (offline, failed)
+                        })
+                    });
+
+                    let tx_local = tx.clone();
+                    let _local_records = volume_limiter.run_on_volume_with_paths(
+                        &project.directory,
+                        cache.as_deref(),
+                        &targets,
+                        |t| Some(t.path.as_path()),
+                        |target| {
+                            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                let fallback = existing_records
+                                    .get(&target.key)
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        crate::repository_git::revalidate_or_inspect_target(
+                                            project_id,
+                                            target,
+                                            None,
+                                            false,
+                                            &icon_map,
+                                            status_timeout,
+                                        )
+                                        .0
+                                    });
+                                let _ =
+                                    tx_local.send(SchedEvent::LocalRow(Box::new(fallback.clone())));
+                                return (fallback, false);
+                            }
+                            let (rec, timed_out) =
+                                crate::repository_git::revalidate_or_inspect_target_with_policy(
+                                    project_id,
+                                    target,
+                                    existing_records.get(&target.key),
+                                    check_dirty || Some(&target.key) == selected_key.as_ref(),
+                                    auto_refresh_stale_index,
+                                    &icon_map,
+                                    status_timeout,
+                                );
+                            let _ = tx_local.send(SchedEvent::LocalRow(Box::new(rec.clone())));
+                            (rec, timed_out)
+                        },
+                    );
+
+                    remote_handle
+                        .and_then(|h| h.join().ok())
+                        .unwrap_or((false, 0))
+                });
+
+                (probe_offline, probe_failed)
+            };
 
             guard.disarm();
             let _ = tx.send(SchedEvent::Finished {
                 ts: now_unix_secs(),
                 offline: any_offline,
+                failed_count,
             });
         });
 
         cx.spawn(async move |this, cx| {
+            let mut total_steps = 0usize;
+            let mut local_remaining: HashSet<RepoKey> = HashSet::new();
+            let mut remote_remaining: HashSet<RepoKey> = HashSet::new();
+            let advance_progress =
+                |runtime: &mut crate::controllers::job_registry::ProjectRuntimeState,
+                 local_rem: &HashSet<RepoKey>,
+                                    remote_rem: &HashSet<RepoKey>,
+                                    steps: usize| {
+                let total = runtime.check_total;
+                if total == 0 {
+                    return;
+                }
+                let next = if local_rem.is_empty() && remote_rem.is_empty() {
+                    total
+                } else if steps == 0 {
+                    total.saturating_sub(runtime.pending.len())
+                } else {
+                    let done_steps = steps.saturating_sub(local_rem.len() + remote_rem.len());
+                    ((done_steps * total) / steps).min(total.saturating_sub(1))
+                };
+                runtime.check_completed = runtime.check_completed.max(next).min(total);
+            };
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(100))
@@ -837,23 +924,96 @@ impl ReleaseDesk {
                             .find(|p| p.id == project_id)
                             .map(crate::workspace::WorkspaceProject::selected_repo_keys)
                             .unwrap_or_default();
+                        let mut batched_updates: Vec<(RepoKey, RepoUpdate)> = Vec::new();
                         for ev in events {
                             match ev {
-                                SchedEvent::Batch(updates) => {
+                                SchedEvent::ProgressModel {
+                                    total_steps: steps,
+                                    local_keys,
+                                    remote_keys,
+                                } => {
+                                    local_remaining = local_keys
+                                        .into_iter()
+                                        .filter(|k| valid_keys.contains(k))
+                                        .collect();
+                                    remote_remaining = remote_keys
+                                        .into_iter()
+                                        .filter(|k| valid_keys.contains(k))
+                                        .collect();
+                                    total_steps = local_remaining.len() + remote_remaining.len();
+                                    let _ = steps;
+                                }
+                                SchedEvent::LocalRow(rec) => {
+                                    let rec = *rec;
+                                    {
+                                        let runtime = this.jobs.project_mut(project_id);
+                                        local_remaining.remove(&rec.key);
+                                        if valid_keys.contains(&rec.key)
+                                            && !remote_remaining.contains(&rec.key)
+                                        {
+                                            runtime.pending.remove(&rec.key);
+                                        }
+                                        advance_progress(
+                                            runtime,
+                                            &local_remaining,
+                                            &remote_remaining,
+                                            total_steps,
+                                        );
+                                    }
+                                    batched_updates.push((
+                                        rec.key.clone(),
+                                        RepoUpdate::replace(rec, RepoUpdateKind::Revalidate),
+                                    ));
+                                }
+                                SchedEvent::RemoteRow(rec) => {
+                                    let rec = *rec;
+                                    {
+                                        let runtime = this.jobs.project_mut(project_id);
+                                        remote_remaining.remove(&rec.key);
+                                        if valid_keys.contains(&rec.key)
+                                            && !local_remaining.contains(&rec.key)
+                                        {
+                                            runtime.pending.remove(&rec.key);
+                                        }
+                                        advance_progress(
+                                            runtime,
+                                            &local_remaining,
+                                            &remote_remaining,
+                                            total_steps,
+                                        );
+                                    }
+                                    batched_updates.push((
+                                        rec.key.clone(),
+                                        RepoUpdate::replace(rec, RepoUpdateKind::Fetch),
+                                    ));
+                                }
+                                SchedEvent::ProbeBatch(updates) => {
                                     {
                                         let runtime = this.jobs.project_mut(project_id);
                                         for (key, _) in &updates {
-                                            if valid_keys.contains(key) {
+                                            remote_remaining.remove(key);
+                                            if valid_keys.contains(key)
+                                                && !local_remaining.contains(key)
+                                            {
                                                 runtime.pending.remove(key);
                                             }
                                         }
-                                        runtime.check_completed = runtime
-                                            .check_total
-                                            .saturating_sub(runtime.pending.len());
+                                        advance_progress(
+                                            runtime,
+                                            &local_remaining,
+                                            &remote_remaining,
+                                            total_steps,
+                                        );
                                     }
-                                    this.apply_repo_updates_batch(project_id, updates);
+                                    batched_updates.extend(updates);
                                 }
                                 SchedEvent::Error(err) => {
+                                    if !batched_updates.is_empty() {
+                                        this.apply_repo_updates_batch(
+                                            project_id,
+                                            std::mem::take(&mut batched_updates),
+                                        );
+                                    }
                                     this.jobs.finish_job(project_id, job_id, job_kind);
                                     this.trigger_coalescer.complete(project_id, trigger);
                                     if this.selected_project_id == Some(project_id) {
@@ -861,7 +1021,17 @@ impl ReleaseDesk {
                                     }
                                     should_exit = true;
                                 }
-                                SchedEvent::Finished { ts, offline } => {
+                                SchedEvent::Finished {
+                                    ts,
+                                    offline,
+                                    failed_count,
+                                } => {
+                                    if !batched_updates.is_empty() {
+                                        this.apply_repo_updates_batch(
+                                            project_id,
+                                            std::mem::take(&mut batched_updates),
+                                        );
+                                    }
                                     this.jobs.finish_job(project_id, job_id, job_kind);
                                     {
                                         let rt = this.jobs.project_mut(project_id);
@@ -872,21 +1042,39 @@ impl ReleaseDesk {
                                     }
                                     this.trigger_coalescer.complete(project_id, trigger);
                                     if this.selected_project_id == Some(project_id) {
-                                        this.message = if offline {
-                                            "Offline — showing cached state."
+                                        if offline {
+                                            this.set_toast(StatusToast::warning(
+                                                "Offline — showing cached state.",
+                                            ));
+                                        } else if failed_count > 0 {
+                                            this.set_toast(StatusToast::warning(format!(
+                                                "Repository check finished with {failed_count} failed check(s)."
+                                            )));
+                                        } else if trigger == TriggerKind::ManualCheck {
+                                            this.set_toast(StatusToast::success(
+                                                "Repository check finished.",
+                                            ));
                                         } else {
-                                            "Repository check finished."
+                                            this.set_quiet_message("Repository check finished.");
                                         }
-                                        .into();
                                     }
                                     should_exit = true;
                                 }
                                 SchedEvent::Aborted => {
+                                    if !batched_updates.is_empty() {
+                                        this.apply_repo_updates_batch(
+                                            project_id,
+                                            std::mem::take(&mut batched_updates),
+                                        );
+                                    }
                                     this.jobs.finish_job(project_id, job_id, job_kind);
                                     this.trigger_coalescer.complete(project_id, trigger);
                                     should_exit = true;
                                 }
                             }
+                        }
+                        if !batched_updates.is_empty() {
+                            this.apply_repo_updates_batch(project_id, batched_updates);
                         }
                         if disconnected && !should_exit {
                             this.jobs.finish_job(project_id, job_id, job_kind);
@@ -999,14 +1187,14 @@ impl ReleaseDesk {
             runtime.check_total = 0;
         }
         let revision = self.workspace_revision;
-        self.message = "Preparing repositories…".into();
+        self.set_quiet_message("Preparing repositories…");
         cx.notify();
 
         enum OpEvent {
             Icon(RepoKey, Option<std::path::PathBuf>),
             Row(Box<crate::modules::repo_cache::CachedRepoRecord>),
             TargetsError(String),
-            Finished(Option<String>),
+            Finished(Option<StatusToast>),
             Aborted,
         }
 
@@ -1046,12 +1234,11 @@ impl ReleaseDesk {
             let runtime = self.jobs.project_mut(project_id);
             runtime.check_total = matching.len();
             runtime.pending = matching.into_iter().collect();
-            self.message = match activity {
+            self.set_quiet_message(match activity {
                 GitActivity::Inspecting => "Inspecting local repositories…",
                 GitActivity::Checking => "Checking repositories for updates…",
                 GitActivity::Pulling => "Pulling repository updates…",
-            }
-            .into();
+            });
             cx.notify();
         }
 
@@ -1079,12 +1266,12 @@ impl ReleaseDesk {
 
             if targets.is_empty() {
                 guard.disarm();
-                let msg = if activity == GitActivity::Pulling {
-                    Some("No repositories have confirmed updates. Check for updates first.".into())
-                } else {
-                    None
-                };
-                let _ = tx.send(OpEvent::Finished(msg));
+                let toast = (activity == GitActivity::Pulling).then(|| {
+                    StatusToast::info(
+                        "No repositories have confirmed updates. Check for updates first.",
+                    )
+                });
+                let _ = tx.send(OpEvent::Finished(toast));
                 return;
             }
 
@@ -1202,17 +1389,30 @@ impl ReleaseDesk {
             );
 
             let results: Vec<_> = messages.into_iter().flatten().collect();
-            let message = if activity == GitActivity::Pulling && results.len() > 1 {
+            let toast = if activity == GitActivity::Pulling && results.len() > 1 {
                 let succeeded = results.iter().filter(|(success, _)| *success).count();
-                Some(format!(
-                    "Pulled {succeeded} repositories; {} need attention.",
-                    results.len() - succeeded
-                ))
+                let unupdated = results.len() - succeeded;
+                let text = format!("Pulled {succeeded} repositories; {unupdated} need attention.");
+                Some(if succeeded == 0 {
+                    StatusToast::error(text)
+                } else if unupdated > 0 {
+                    StatusToast::warning(text)
+                } else {
+                    StatusToast::success(text)
+                })
             } else {
-                results.into_iter().next().map(|(_, message)| message)
+                results.into_iter().next().map(|(succeeded, message)| {
+                    if succeeded {
+                        StatusToast::success(message)
+                    } else if message.contains("not updated") {
+                        StatusToast::warning(message)
+                    } else {
+                        StatusToast::error(message)
+                    }
+                })
             };
             guard.disarm();
-            let _ = tx.send(OpEvent::Finished(message));
+            let _ = tx.send(OpEvent::Finished(toast));
         });
 
         cx.spawn(async move |this, cx| {
@@ -1278,7 +1478,7 @@ impl ReleaseDesk {
                                     }
                                     should_exit = true;
                                 }
-                                OpEvent::Finished(message) => {
+                                OpEvent::Finished(toast) => {
                                     this.jobs.finish_job(project_id, job_id, kind);
                                     if matches!(
                                         activity,
@@ -1289,21 +1489,26 @@ impl ReleaseDesk {
                                             Some(crate::modules::repo_cache::now_unix_secs());
                                     }
                                     if this.selected_project_id == Some(project_id) {
-                                        if let Some(msg) = message {
-                                            this.message = msg;
+                                        if let Some(toast) = toast {
+                                            this.set_toast(toast);
                                         } else {
-                                            this.message = match activity {
+                                            match activity {
                                                 GitActivity::Inspecting => {
-                                                    "Local repository inspection finished."
+                                                    this.set_quiet_message(
+                                                        "Local repository inspection finished.",
+                                                    );
                                                 }
                                                 GitActivity::Checking => {
-                                                    "Repository check finished. See each repository for its status."
+                                                    this.set_toast(StatusToast::success(
+                                                        "Repository check finished. See each repository for its status.",
+                                                    ));
                                                 }
                                                 GitActivity::Pulling => {
-                                                    "Repository pulls finished. See each repository for its status."
+                                                    this.set_toast(StatusToast::success(
+                                                        "Repository pulls finished. See each repository for its status.",
+                                                    ));
                                                 }
                                             }
-                                            .into();
                                         }
                                     }
                                     if auto_check_after && !stale_revision {
@@ -1478,7 +1683,7 @@ impl ReleaseDesk {
                     .insert(target.key.clone(), RepoClonePhase::Queued);
             }
         }
-        self.message = format!("Cloning {} repositories…", targets.len());
+        self.set_quiet_message(format!("Cloning {} repositories…", targets.len()));
         cx.notify();
 
         enum CloneEvent {
@@ -4019,7 +4224,8 @@ mod step_f_layout_and_scroll_tests {
         cx.update(gpui_kit::init);
         let temp = tempfile::tempdir().unwrap();
         let project = synthetic_project(temp.path(), 20);
-        let keys: Vec<RepoKey> = project.selected_repo_keys().into_iter().collect();
+        let mut keys: Vec<RepoKey> = project.selected_repo_keys().into_iter().collect();
+        keys.sort_by(|a, b| a.name.cmp(&b.name));
         let commits: Vec<StoredCommit> = (0..22)
             .map(|c| StoredCommit {
                 hash: format!("{c:040x}"),
@@ -4076,7 +4282,11 @@ mod step_f_layout_and_scroll_tests {
             cx.notify();
         });
 
-        for (w, h) in [(700.0f32, 500.0f32), (1280.0f32, 800.0f32)] {
+        for (w, h) in [
+            (700.0f32, 500.0f32),
+            (960.0f32, 720.0f32),
+            (1280.0f32, 800.0f32),
+        ] {
             vcx.simulate_resize(size(px(w), px(h)));
             vcx.run_until_parked();
             let rail = vcx.debug_bounds("repo-rail").expect("repo-rail bounds");
@@ -4092,7 +4302,54 @@ mod step_f_layout_and_scroll_tests {
                 detail.right() <= px(w + 0.5) && detail.bottom() <= px(h + 0.5),
                 "detail {detail:?} overflows window {w}x{h}"
             );
+            // Active row card inside the rail must span the full rail width whenever rows fit.
+            if h >= 700.0 {
+                let active_row = vcx
+                    .debug_bounds("repo-row-active")
+                    .expect("active repo row bounds");
+                assert!(
+                    active_row.size.width >= rail.size.width - px(2.0),
+                    "active row shrank to {:?} inside rail {:?}",
+                    active_row.size.width,
+                    rail.size.width
+                );
+            }
         }
+
+        // Scroll the repository rail, select a scrolled row with a short description, and verify full width.
+        let rail_after = vcx.debug_bounds("repo-rail").expect("repo-rail bounds");
+        vcx.simulate_event(ScrollWheelEvent {
+            position: point(
+                rail_after.origin.x + rail_after.size.width / 2.0,
+                rail_after.origin.y + rail_after.size.height / 2.0,
+            ),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-900.))),
+            ..Default::default()
+        });
+        vcx.run_until_parked();
+        view.update(cx, |this, cx| {
+            this.select_repository(keys[12].clone(), cx);
+            this.repo_list_scroll
+                .scroll_to_item(12, gpui_kit::ScrollStrategy::Center);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let scrolled_active = vcx
+            .debug_bounds("repo-row-active")
+            .expect("scrolled active repo row bounds");
+        assert!(
+            scrolled_active.size.width >= rail_after.size.width - px(2.0),
+            "scrolled active row shrank to {:?} inside rail {:?}",
+            scrolled_active.size.width,
+            rail_after.size.width
+        );
+        view.update(cx, |this, cx| {
+            this.select_repository(keys[0].clone(), cx);
+            this.repo_list_scroll
+                .scroll_to_item(0, gpui_kit::ScrollStrategy::Top);
+            cx.notify();
+        });
+        vcx.run_until_parked();
 
         // Scroll detail pane down on repo 0, then switch to repo 1 -> offset resets to 0.
         let detail = vcx
@@ -4125,6 +4382,154 @@ mod step_f_layout_and_scroll_tests {
                 px(0.),
                 "selecting a different repository must reset detail scroll offset to top"
             );
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn manual_check_streams_live_progress_and_emits_structured_toast(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_kit::init);
+        let temp = tempfile::tempdir().unwrap();
+        let proj_dir = temp.path().join("project");
+        use crate::controllers::job_registry::ToastSeverity;
+        use crate::workspace::{ProviderChoice, WorkspaceProject};
+        use crate::workspace_sources::{RepositoryListMode, SourceRepository, WorkspaceSource};
+        use release_desk_core::project::DiskLayout;
+        use std::time::Duration;
+
+        std::fs::create_dir_all(&proj_dir).unwrap();
+
+        let git_in = |dir: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        let mut repos = Vec::new();
+        for i in 0..12usize {
+            let name = format!("stream-{i:02}");
+            let remote = temp.path().join(format!("remote-{i:02}.git"));
+            let seed = temp.path().join(format!("seed-{i:02}"));
+            let clone_dir = crate::repository_git::resolve_target_path(
+                &proj_dir,
+                DiskLayout::Grouped,
+                "owner",
+                &name,
+            );
+            std::fs::create_dir_all(&remote).unwrap();
+            std::fs::create_dir_all(&seed).unwrap();
+            git_in(&remote, &["init", "--bare"]);
+            git_in(&seed, &["init", "-b", "main"]);
+            git_in(&seed, &["config", "user.name", "Test"]);
+            git_in(&seed, &["config", "user.email", "test@example.invalid"]);
+            std::fs::write(seed.join("README.md"), format!("repo {i}\n")).unwrap();
+            git_in(&seed, &["add", "README.md"]);
+            git_in(&seed, &["commit", "-m", "initial"]);
+            let remote_str = remote.to_string_lossy().into_owned();
+            git_in(&seed, &["remote", "add", "origin", &remote_str]);
+            git_in(&seed, &["push", "-u", "origin", "main"]);
+            git_in(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+            release_desk_git::GitClient::new()
+                .sync(&remote_str, &clone_dir, "main")
+                .unwrap();
+            repos.push(SourceRepository {
+                name: name.clone(),
+                full_name: format!("owner/{name}"),
+                description: None,
+                stars: 0,
+                forks: 0,
+                primary_language: None,
+                is_private: false,
+                is_fork: false,
+                clone_url: remote_str,
+                default_branch: "main".into(),
+                selected: true,
+            });
+        }
+
+        let project = WorkspaceProject {
+            id: 4242,
+            name: "StreamCheck".into(),
+            provider: ProviderChoice::GitHub,
+            directory: proj_dir,
+            disk_layout: DiskLayout::Grouped,
+            account: "owner".into(),
+            custom_host: None,
+            credential_ref: None,
+            repository_list_mode: RepositoryListMode::Grouped,
+            sources: vec![WorkspaceSource {
+                provider: "github".into(),
+                handle: "owner".into(),
+                display_name: None,
+                avatar_url: None,
+                bio: None,
+                repositories: repos,
+            }],
+        };
+
+        let config = crate::app::SchedulerConfig {
+            auto_start: false,
+            ..Default::default()
+        };
+        let (window, view) = cx.update(|cx| {
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, |window, cx| {
+                cx.new(|cx| ReleaseDesk::new_with_config(config, window, cx))
+            })
+            .unwrap()
+        });
+        let vcx = VisualTestContext::from_window(window, cx);
+
+        view.update(cx, |this, cx| {
+            this.projects = vec![project.clone()];
+            this.selected_project_id = Some(project.id);
+            this.project_section = ProjectSection::Repositories;
+            this.check_repository_updates(false, cx);
+        });
+
+        let mut saw_partial_progress = false;
+        let mut prev_done = 0usize;
+        for _ in 0..160 {
+            std::thread::sleep(Duration::from_millis(5));
+            vcx.background_executor
+                .advance_clock(Duration::from_millis(100));
+            vcx.run_until_parked();
+            let (busy, done, total) = view.read_with(cx, |this, _| {
+                let st = this.jobs.project(project.id).unwrap();
+                (st.is_any_busy(), st.check_completed, st.check_total)
+            });
+            if busy {
+                assert!(
+                    done >= prev_done,
+                    "check_completed regressed from {prev_done} to {done}"
+                );
+                prev_done = done;
+            }
+            if busy && done > 0 && done < total {
+                saw_partial_progress = true;
+            }
+            if !busy {
+                break;
+            }
+        }
+
+        assert!(
+            saw_partial_progress,
+            "manual check should stream intermediate progress (0 < check_completed < check_total) before finishing"
+        );
+        view.read_with(cx, |this, _| {
+            let st = this.jobs.project(project.id).unwrap();
+            assert!(!st.is_any_busy());
+            let toast = this.last_toast.as_ref().expect("check completion toast");
+            assert_eq!(toast.severity, ToastSeverity::Success);
         });
     }
 }

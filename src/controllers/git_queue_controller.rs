@@ -156,7 +156,7 @@ impl ReleaseDesk {
             runtime.check_completed = 0;
             runtime.check_total = work.len();
         }
-        self.message = format!("Queued {} repository pulls.", work.len());
+        self.set_quiet_message(format!("Queued {} repository pulls.", work.len()));
         cx.notify();
 
         self.git_update_project_id = Some(project_id);
@@ -378,14 +378,9 @@ impl ReleaseDesk {
                                 })
                                 .count();
                             let updated = total.saturating_sub(failed + cancelled + skipped);
-                            let summary = format!(
-                                "Repository queue finished: {updated} updated, {skipped} skipped, {failed} failed, {cancelled} cancelled."
-                            );
-                            this.set_toast(if failed > 0 {
-                                StatusToast::warning(summary)
-                            } else {
-                                StatusToast::success(summary)
-                            });
+                            this.set_toast(classify_queue_toast(
+                                updated, skipped, failed, cancelled,
+                            ));
                             done = true;
                         }
                         cx.notify();
@@ -399,5 +394,23 @@ impl ReleaseDesk {
             }
         })
         .detach();
+    }
+}
+
+pub(crate) fn classify_queue_toast(
+    updated: usize,
+    skipped: usize,
+    failed: usize,
+    cancelled: usize,
+) -> StatusToast {
+    let summary = format!(
+        "Repository queue finished: {updated} updated, {skipped} skipped, {failed} failed, {cancelled} cancelled."
+    );
+    if failed > 0 && updated == 0 {
+        StatusToast::error(summary)
+    } else if failed > 0 || skipped > 0 || cancelled > 0 {
+        StatusToast::warning(summary)
+    } else {
+        StatusToast::success(summary)
     }
 }

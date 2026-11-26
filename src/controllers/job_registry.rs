@@ -247,7 +247,7 @@ impl RepoStateEntry {
     }
 
     pub fn can_pull(&self) -> bool {
-        crate::repository_git::can_pull(&self.status)
+        crate::repository_git::can_pull(&self.status) && self.record.stale_locks.is_empty()
     }
 
     pub fn row_summary(&self) -> RepoRowSummary {
@@ -645,6 +645,15 @@ impl ProjectRuntimeState {
                     if record.has_untracked.is_none() && record.destination.is_git_repo() {
                         record.has_untracked = prev.has_untracked;
                         record.has_untracked_at = prev.has_untracked_at;
+                    }
+                    if matches!(kind, RepoUpdateKind::Inspect | RepoUpdateKind::Revalidate)
+                        && prev.last_probed_at.is_some()
+                        && prev.last_probed_at >= record.last_probed_at
+                    {
+                        record.probed_remote_sha = prev.probed_remote_sha.clone();
+                        record.last_probed_at = prev.last_probed_at;
+                        record.probe_failed_reason = prev.probe_failed_reason.clone();
+                        record.probe_issue = prev.probe_issue.clone();
                     }
                 }
                 let record = *record;

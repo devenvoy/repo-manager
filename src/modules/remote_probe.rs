@@ -304,15 +304,16 @@ impl GitHubGraphQlProbe {
     }
 }
 
-impl RemoteProbe for GitHubGraphQlProbe {
-    fn probe_batch(
+impl GitHubGraphQlProbe {
+    pub fn probe_batch_with_progress(
         &self,
         targets: &[ProbeTarget],
         token: Option<&str>,
         cancel: &AtomicBool,
+        on_chunk: &(dyn Fn(&[ProbeResult]) + Send + Sync),
     ) -> Vec<ProbeResult> {
         let Some(tok) = token.filter(|t| !t.trim().is_empty()) else {
-            return targets
+            let out: Vec<ProbeResult> = targets
                 .iter()
                 .map(|t| ProbeResult {
                     key: t.key.clone(),
@@ -320,6 +321,10 @@ impl RemoteProbe for GitHubGraphQlProbe {
                     ..Default::default()
                 })
                 .collect();
+            if !out.is_empty() {
+                on_chunk(&out);
+            }
+            return out;
         };
         if targets.is_empty() {
             return Vec::new();
@@ -333,9 +338,26 @@ impl RemoteProbe for GitHubGraphQlProbe {
             workers,
             opt_workers,
             |_| self.expected_host.clone(),
-            |chunk| self.probe_chunk(chunk, tok, cancel),
+            |chunk| {
+                let res = self.probe_chunk(chunk, tok, cancel);
+                if !res.is_empty() {
+                    on_chunk(&res);
+                }
+                res
+            },
         );
         nested.into_iter().flatten().collect()
+    }
+}
+
+impl RemoteProbe for GitHubGraphQlProbe {
+    fn probe_batch(
+        &self,
+        targets: &[ProbeTarget],
+        token: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Vec<ProbeResult> {
+        self.probe_batch_with_progress(targets, token, cancel, &|_| {})
     }
 }
 
@@ -356,12 +378,13 @@ impl Default for GitLsRemoteProbe {
     }
 }
 
-impl RemoteProbe for GitLsRemoteProbe {
-    fn probe_batch(
+impl GitLsRemoteProbe {
+    pub fn probe_batch_with_progress(
         &self,
         targets: &[ProbeTarget],
         token: Option<&str>,
         cancel: &AtomicBool,
+        on_item: &(dyn Fn(&ProbeResult) + Send + Sync),
     ) -> Vec<ProbeResult> {
         map_bounded_per_host(
             targets,
@@ -369,44 +392,59 @@ impl RemoteProbe for GitLsRemoteProbe {
             self.per_host_cap,
             |t| t.key.host.clone(),
             |target| {
-                if cancel.load(Ordering::Acquire) {
-                    return ProbeResult {
+                let res = if cancel.load(Ordering::Acquire) {
+                    ProbeResult {
                         key: target.key.clone(),
                         error: Some("Cancelled".into()),
                         ..Default::default()
-                    };
-                }
-                let mut client = GitClient::new().with_timeout(self.timeout);
-                if let Some(tok) = token
-                    && target.key.host == "github.com"
-                    && target.clone_url.starts_with("https://github.com/")
-                {
-                    client = client.with_token(tok);
-                }
-                match client.probe_remote_branch_sha(&target.clone_url, &target.default_branch) {
-                    Ok(sha) => ProbeResult {
-                        key: target.key.clone(),
-                        remote_sha: sha,
-                        ..Default::default()
-                    },
-                    Err(err) => {
-                        let msg = redact_secret(&err.to_string(), token);
-                        let low = msg.to_ascii_lowercase();
-                        let offline = low.contains("could not resolve host")
-                            || low.contains("failed to connect")
-                            || low.contains("network is unreachable")
-                            || low.contains("connection timed out");
-                        ProbeResult {
+                    }
+                } else {
+                    let mut client = GitClient::new().with_timeout(self.timeout);
+                    if let Some(tok) = token
+                        && target.key.host == "github.com"
+                        && target.clone_url.starts_with("https://github.com/")
+                    {
+                        client = client.with_token(tok);
+                    }
+                    match client.probe_remote_branch_sha(&target.clone_url, &target.default_branch)
+                    {
+                        Ok(sha) => ProbeResult {
                             key: target.key.clone(),
-                            issue: offline.then_some(ProbeRepoIssue::Offline),
-                            offline,
-                            error: (!offline).then_some(msg),
+                            remote_sha: sha,
                             ..Default::default()
+                        },
+                        Err(err) => {
+                            let msg = redact_secret(&err.to_string(), token);
+                            let low = msg.to_ascii_lowercase();
+                            let offline = low.contains("could not resolve host")
+                                || low.contains("failed to connect")
+                                || low.contains("network is unreachable")
+                                || low.contains("connection timed out");
+                            ProbeResult {
+                                key: target.key.clone(),
+                                issue: offline.then_some(ProbeRepoIssue::Offline),
+                                offline,
+                                error: (!offline).then_some(msg),
+                                ..Default::default()
+                            }
                         }
                     }
-                }
+                };
+                on_item(&res);
+                res
             },
         )
+    }
+}
+
+impl RemoteProbe for GitLsRemoteProbe {
+    fn probe_batch(
+        &self,
+        targets: &[ProbeTarget],
+        token: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Vec<ProbeResult> {
+        self.probe_batch_with_progress(targets, token, cancel, &|_| {})
     }
 }
 
@@ -424,20 +462,13 @@ impl TieredRemoteProbe {
             ls_remote: GitLsRemoteProbe::default(),
         }
     }
-}
 
-impl Default for TieredRemoteProbe {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RemoteProbe for TieredRemoteProbe {
-    fn probe_batch(
+    pub fn probe_batch_with_progress(
         &self,
         targets: &[ProbeTarget],
         token: Option<&str>,
         cancel: &AtomicBool,
+        on_chunk: &(dyn Fn(&[ProbeResult]) + Send + Sync),
     ) -> Vec<ProbeResult> {
         let mut by_key: HashMap<RepoKey, ProbeResult> = HashMap::with_capacity(targets.len());
         let has_token = token.is_some_and(|t| !t.trim().is_empty());
@@ -453,24 +484,42 @@ impl RemoteProbe for TieredRemoteProbe {
         if !gh_targets.is_empty()
             && let Some(ref gql) = self.graphql
         {
-            for res in gql.probe_batch(&gh_targets, token, cancel) {
-                let needs_fallback = res.remote_sha.is_none()
+            let needs_fallback_for = |res: &ProbeResult| {
+                res.remote_sha.is_none()
                     && !res.rate_limited
                     && !res.offline
                     && res.issue.is_none()
-                    && res.error.as_deref() != Some("Cancelled");
-                if needs_fallback {
-                    if let Some(orig) = gh_targets.iter().find(|t| t.key == res.key) {
-                        fallback_targets.push(orig.clone());
-                        continue;
-                    }
+                    && res.error.as_deref() != Some("Cancelled")
+            };
+            let results = gql.probe_batch_with_progress(&gh_targets, token, cancel, &|chunk| {
+                let immediate: Vec<ProbeResult> = chunk
+                    .iter()
+                    .filter(|res| !needs_fallback_for(res))
+                    .cloned()
+                    .collect();
+                if !immediate.is_empty() {
+                    on_chunk(&immediate);
+                }
+            });
+            for res in results {
+                if needs_fallback_for(&res)
+                    && let Some(orig) = gh_targets.iter().find(|t| t.key == res.key)
+                {
+                    fallback_targets.push(orig.clone());
+                    continue;
                 }
                 by_key.insert(res.key.clone(), res);
             }
         }
 
         if !fallback_targets.is_empty() {
-            for res in self.ls_remote.probe_batch(&fallback_targets, token, cancel) {
+            let results = self.ls_remote.probe_batch_with_progress(
+                &fallback_targets,
+                token,
+                cancel,
+                &|item| on_chunk(std::slice::from_ref(item)),
+            );
+            for res in results {
                 by_key.insert(res.key.clone(), res);
             }
         }
@@ -485,6 +534,23 @@ impl RemoteProbe for TieredRemoteProbe {
                 })
             })
             .collect()
+    }
+}
+
+impl Default for TieredRemoteProbe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RemoteProbe for TieredRemoteProbe {
+    fn probe_batch(
+        &self,
+        targets: &[ProbeTarget],
+        token: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> Vec<ProbeResult> {
+        self.probe_batch_with_progress(targets, token, cancel, &|_| {})
     }
 }
 

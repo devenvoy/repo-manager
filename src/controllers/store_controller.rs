@@ -1,6 +1,7 @@
 //! Store synchronization and install actions.
 
 use crate::app::{ReleaseDesk, project_auth_token};
+use crate::controllers::job_registry::StatusToast;
 use crate::store_catalog::{StoreApp, apps_for_project, catalog_path, merge_project, save};
 use crate::workspace::expand_directory;
 use crate::workspace_releases::RepositoryReleases;
@@ -179,7 +180,9 @@ impl ReleaseDesk {
                                 }
                                 if !errors.is_empty() {
                                     eprintln!("Store refresh errors: {}", errors.join("; "));
-                                    this.message = "Some apps couldn't be refreshed. Your saved apps are still here.".into();
+                                    this.set_toast(StatusToast::warning(
+                                        "Some apps couldn't be refreshed. Your saved apps are still here.",
+                                    ));
                                 }
                                 cx.notify();
                             });
@@ -190,7 +193,9 @@ impl ReleaseDesk {
                         if let Some(this) = this.upgrade() {
                             this.update(cx, |this, cx| {
                                 this.store_busy = false;
-                                this.message = "Store refresh stopped unexpectedly.".into();
+                                this.set_toast(StatusToast::error(
+                                    "Store refresh stopped unexpectedly.",
+                                ));
                                 cx.notify();
                             });
                         }
@@ -208,18 +213,23 @@ impl ReleaseDesk {
             return;
         };
         if !app.is_app_listing() {
-            self.message = "This app isn't available for your computer yet.".into();
+            self.set_toast(StatusToast::warning(
+                "This app isn't available for your computer yet.",
+            ));
             cx.notify();
             return;
         }
         if !crate::store_catalog::safe_bundle_name(&app.bundle_name) {
-            self.message = format!("Couldn't install {}. Please try again.", app.display_name());
+            self.set_toast(StatusToast::error(format!(
+                "Couldn't install {}. Please try again.",
+                app.display_name()
+            )));
             cx.notify();
             return;
         }
         let applications_dir = expand_directory(&self.settings.applications_dir);
         let Some(state) = self.store_install_states.get(&key).cloned() else {
-            self.message = "Checking installed app status…".into();
+            self.set_quiet_message("Checking installed app status…");
             self.refresh_store_install_states(cx);
             cx.notify();
             return;
@@ -227,7 +237,7 @@ impl ReleaseDesk {
         if matches!(state, AppActionState::UpToDate { .. }) {
             let path = applications_dir.join(&app.bundle_name);
             let app_name = app.display_name();
-            self.message = format!("Opening {app_name}…");
+            self.set_quiet_message(format!("Opening {app_name}…"));
             cx.notify();
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
@@ -245,8 +255,9 @@ impl ReleaseDesk {
                                 this.update(cx, |this, cx| {
                                     if let Err(error) = result {
                                         eprintln!("Store open failed for {app_name}: {error}");
-                                        this.message =
-                                            format!("Couldn't open {app_name}. Please try again.");
+                                        this.set_toast(StatusToast::error(format!(
+                                            "Couldn't open {app_name}. Please try again."
+                                        )));
                                         cx.notify();
                                     }
                                 });
@@ -262,10 +273,10 @@ impl ReleaseDesk {
             return;
         }
         let Some(asset) = app.platform_asset().cloned() else {
-            self.message = format!(
+            self.set_toast(StatusToast::warning(format!(
                 "{} isn't available for your computer yet.",
                 app.display_name()
-            );
+            )));
             cx.notify();
             return;
         };
@@ -435,18 +446,28 @@ impl ReleaseDesk {
                             this.update(cx, |this, cx| {
                                 this.store_activities.remove(&key);
                                 this.refresh_store_install_states(cx);
-                                this.message = match result {
-                                    Ok(StoreOutcome::Installed) if was_installed =>
-                                        format!("{app_name} is up to date."),
-                                    Ok(StoreOutcome::Installed) =>
-                                        format!("{app_name} is ready to open."),
-                                    Ok(StoreOutcome::Downloaded) =>
-                                        format!("{app_name} is downloaded. Open the file to finish installing."),
+                                let toast = match result {
+                                    Ok(StoreOutcome::Installed) if was_installed => {
+                                        StatusToast::success(format!("{app_name} is up to date."))
+                                    }
+                                    Ok(StoreOutcome::Installed) => {
+                                        StatusToast::success(format!("{app_name} is ready to open."))
+                                    }
+                                    Ok(StoreOutcome::Downloaded) => StatusToast::success(format!(
+                                        "{app_name} is downloaded. Open the file to finish installing."
+                                    )),
                                     Err(error) => {
                                         eprintln!("Store install failed for {app_name}: {error}");
-                                        if error.starts_with("Connect the provider account") { error } else { format!("Couldn't install {app_name}. Please try again.") }
+                                        let text = if error.starts_with("Connect the provider account")
+                                        {
+                                            error
+                                        } else {
+                                            format!("Couldn't install {app_name}. Please try again.")
+                                        };
+                                        StatusToast::error(text)
                                     }
                                 };
+                                this.set_toast(toast);
                                 cx.notify();
                             });
                         }
@@ -456,7 +477,9 @@ impl ReleaseDesk {
                         if let Some(this) = this.upgrade() {
                             this.update(cx, |this, cx| {
                                 this.store_activities.remove(&key);
-                                this.message = format!("Couldn't install {app_name}. Please try again.");
+                                this.set_toast(StatusToast::error(format!(
+                                    "Couldn't install {app_name}. Please try again."
+                                )));
                                 cx.notify();
                             });
                         }

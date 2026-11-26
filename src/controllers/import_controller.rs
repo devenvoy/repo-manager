@@ -1,6 +1,7 @@
 //! Interactive repository and metadata import controller.
 
 use crate::app::ReleaseDesk;
+use crate::controllers::job_registry::StatusToast;
 use crate::views;
 use gpui_kit::{Context, Window};
 
@@ -19,7 +20,7 @@ impl ReleaseDesk {
         let revision = self.workspace_revision;
         let worker_directory = directory.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        self.message = "Searching project metadata…".into();
+        self.set_quiet_message("Searching project metadata…");
         cx.notify();
         std::thread::spawn(move || {
             let _ = tx.send(crate::modules::importer::discover_workspace(
@@ -34,7 +35,7 @@ impl ReleaseDesk {
                         let _ = this.update_in(cx, |this, window, cx| {
                             if this.workspace_revision != revision || this.selected_project_id != Some(project_id) { return; }
                             let Some(discovered) = discovered.filter(|value| !value.repositories.is_empty()) else {
-                                this.message = format!("No metadata (.release-desk/data.json) or Git repositories found in project folder ({}).", directory.display());
+                                this.set_toast(StatusToast::warning(format!("No metadata (.release-desk/data.json) or Git repositories found in project folder ({}).", directory.display())));
                                 cx.notify();
                                 return;
                             };
@@ -49,7 +50,7 @@ impl ReleaseDesk {
                         return;
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        let _ = this.update_in(cx, |this, _, cx| { if this.workspace_revision == revision { this.message = "Project search stopped unexpectedly.".into(); cx.notify(); } });
+                        let _ = this.update_in(cx, |this, _, cx| { if this.workspace_revision == revision { this.set_toast(StatusToast::error("Project search stopped unexpectedly.")); cx.notify(); } });
                         return;
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -107,7 +108,9 @@ impl ReleaseDesk {
         let discovered_repos_count = new_source.repositories.len();
 
         if discovered_repos_count == 0 {
-            self.message = "No repositories were selected for import.".into();
+            self.set_toast(StatusToast::warning(
+                "No repositories were selected for import.",
+            ));
             cx.notify();
             return;
         }
@@ -146,8 +149,9 @@ impl ReleaseDesk {
             });
         }
 
-        self.message =
-            format!("Imported {discovered_repos_count} repositories from @{source_handle_clean}.");
+        self.set_toast(StatusToast::success(format!(
+            "Imported {discovered_repos_count} repositories from @{source_handle_clean}."
+        )));
         self.check_repository_updates(true, cx);
         self.refresh_releases(cx);
         cx.notify();

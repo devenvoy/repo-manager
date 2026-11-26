@@ -23,6 +23,7 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, ElementId, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, Window, deferred, div, px, uniform_list,
@@ -951,6 +952,9 @@ pub fn render_project_repository_status<
                         .id(ElementId::Name(
                             format!("repo-row-{row_idx}-{}", item.name).into(),
                         ))
+                        .when(item.is_active, |el| {
+                            el.debug_selector(|| "repo-row-active".into())
+                        })
                         .w_full()
                         .min_w_0()
                         .h(px(124.))
@@ -978,6 +982,7 @@ pub fn render_project_repository_status<
                                 .min_w_0()
                                 .flex_1()
                                 .p_3p5()
+                                .pr_4()
                                 .flex()
                                 .flex_col()
                                 .gap_1p5()
@@ -1832,24 +1837,37 @@ pub fn render_project_repository_status<
                     },
                 },
             };
-            let (status_title, status_desc, is_error) =
-                if let Some(ref fail) = cache_rec.and_then(|r| r.probe_failed_reason.as_ref()) {
-                    (
-                        "Check failed - retry".to_string(),
-                        format!("Remote check failed: {fail}"),
-                        true,
-                    )
-                } else if status.is_some_and(|s| s.state.is_err()) {
-                    ("Check failed - retry".to_string(), status_desc, true)
-                } else if let Some(issue) = cache_rec.and_then(|r| r.probe_issue.as_ref()) {
-                    (
-                        issue.badge_label().to_string(),
-                        issue.detail_message(),
-                        false,
-                    )
-                } else {
-                    (status_title, status_desc, is_error)
-                };
+            let stale_locks_present = cache_rec.is_some_and(|r| !r.stale_locks.is_empty());
+            let lock_names_display = cache_rec
+                .filter(|r| !r.stale_locks.is_empty())
+                .map(|r| r.stale_locks.join(", "));
+            let (status_title, status_desc, is_error) = if let Some(ref lock_names) =
+                lock_names_display
+            {
+                (
+                    "Git lock file blocking updates".to_string(),
+                    format!(
+                        "Found lock file(s) in .git ({lock_names}). Make sure no external Git command is running, then click Remove stale lock… before pulling or inspecting."
+                    ),
+                    true,
+                )
+            } else if let Some(ref fail) = cache_rec.and_then(|r| r.probe_failed_reason.as_ref()) {
+                (
+                    "Check failed - retry".to_string(),
+                    format!("Remote check failed: {fail}"),
+                    true,
+                )
+            } else if status.is_some_and(|s| s.state.is_err()) {
+                ("Check failed - retry".to_string(), status_desc, true)
+            } else if let Some(issue) = cache_rec.and_then(|r| r.probe_issue.as_ref()) {
+                (
+                    issue.badge_label().to_string(),
+                    issue.detail_message(),
+                    false,
+                )
+            } else {
+                (status_title, status_desc, is_error)
+            };
 
             let card_bg = if is_error {
                 cx.theme().danger.opacity(0.06)
@@ -1904,7 +1922,7 @@ pub fn render_project_repository_status<
                     state.local_revision.is_none() && state.remote_revision.is_some()
                 })
             });
-            let action_btn = if is_behind {
+            let action_btn = if is_behind && !stale_locks_present {
                 let update_key = repo_key.clone();
                 Button::new("git-update-selected")
                     .icon(download_icon())

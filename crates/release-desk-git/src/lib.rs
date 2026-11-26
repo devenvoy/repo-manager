@@ -866,8 +866,8 @@ impl GitClient {
         }
         let summary = PorcelainV2Summary::parse(&String::from_utf8_lossy(&status_out.stdout));
         let mut state = CloneState::new(CloneStatus::Error);
-        state.local_revision = summary.head_sha;
-        state.branch = summary.branch;
+        state.local_revision = summary.head_sha.clone();
+        state.branch = summary.branch.clone();
         let is_dirty = if include_untracked {
             summary.dirty_any
         } else {
@@ -1449,25 +1449,25 @@ impl GitClient {
         Ok(outcome)
     }
 
-    fn effective_limits(&self, operation: &str) -> (Duration, Option<Duration>) {
+    fn effective_limits(&self, operation: &str) -> (Option<Duration>, Option<Duration>) {
         let is_network = matches!(
             operation,
             "clone" | "fetch" | "fetch origin" | "verify remote origin" | "query remote branch"
         );
         if let Some(custom) = self.timeout {
-            return (custom, self.stall_timeout);
+            return (Some(custom), self.stall_timeout);
         }
         if is_network {
             (
-                DEFAULT_NETWORK_MAX_TIMEOUT,
+                Some(DEFAULT_NETWORK_MAX_TIMEOUT),
                 Some(self.stall_timeout.unwrap_or(DEFAULT_NETWORK_STALL_TIMEOUT)),
             )
         } else if matches!(operation, "fast-forward" | "set up local branch") {
-            // Updating large monorepo worktrees on external HDDs can take several minutes;
-            // never kill `merge --ff-only` at 30s and leave a half-written tree with `ORIG_HEAD`.
-            (Duration::from_secs(600), None)
+            // Local working-tree writes must never be killed mid-checkout by a fixed timer,
+            // regardless of repository size or disk speed.
+            (None, None)
         } else {
-            (DEFAULT_LOCAL_GIT_TIMEOUT, None)
+            (Some(DEFAULT_LOCAL_GIT_TIMEOUT), None)
         }
     }
 
@@ -1541,7 +1541,8 @@ impl GitClient {
                 last_activity_ms.load(Ordering::Acquire),
             ));
             let stalled = stall_timeout.is_some_and(|st| idle >= st);
-            if elapsed >= hard_timeout || stalled {
+            let timed_out = hard_timeout.is_some_and(|ht| elapsed >= ht);
+            if timed_out || stalled {
                 kill_process_group(&mut child, self.termination_grace);
                 if let Some(h) = reader_handle {
                     let _ = h.join();
@@ -1549,9 +1550,9 @@ impl GitClient {
                 return Err(GitError::TimedOut {
                     operation: "clone",
                     timeout: if stalled {
-                        stall_timeout.unwrap_or(hard_timeout)
+                        stall_timeout.or(hard_timeout).unwrap_or(Duration::ZERO)
                     } else {
-                        hard_timeout
+                        hard_timeout.unwrap_or(Duration::ZERO)
                     },
                 });
             }
@@ -1918,7 +1919,7 @@ impl GitClient {
         operation: &'static str,
         args: I,
         cancelled: Option<&AtomicBool>,
-        hard_timeout: Duration,
+        hard_timeout: Option<Duration>,
         stall_timeout: Option<Duration>,
     ) -> Result<Output, GitError>
     where
@@ -1998,16 +1999,17 @@ impl GitClient {
                 last_activity_ms.load(Ordering::Acquire),
             ));
             let stalled = stall_timeout.is_some_and(|st| idle >= st);
-            if elapsed >= hard_timeout || stalled {
+            let timed_out = hard_timeout.is_some_and(|ht| elapsed >= ht);
+            if timed_out || stalled {
                 kill_process_group(&mut child, self.termination_grace);
                 let _ = out_handle.map(|h| h.join());
                 let _ = err_handle.map(|h| h.join());
                 return Err(GitError::TimedOut {
                     operation,
                     timeout: if stalled {
-                        stall_timeout.unwrap_or(hard_timeout)
+                        stall_timeout.or(hard_timeout).unwrap_or(Duration::ZERO)
                     } else {
-                        hard_timeout
+                        hard_timeout.unwrap_or(Duration::ZERO)
                     },
                 });
             }
@@ -2262,7 +2264,7 @@ fn command_error(operation: &'static str, output: &Output) -> GitError {
     let detail = if raw_line.is_empty() {
         None
     } else {
-        let mut sanitized = redact_embedded_url_credentials(raw_line);
+        let mut sanitized = redact_url_credentials(raw_line);
         if sanitized.len() > 220 {
             sanitized.truncate(220);
             sanitized.push('…');
@@ -3541,5 +3543,66 @@ mod tests {
         assert!(st_emp2.local_revision.is_some());
         assert!(st_emp2.remote_revision.is_none());
         assert_eq!((a_emp2, b_emp2), (None, None));
+    }
+
+    #[test]
+    fn fast_forward_lock_preflight_redacted_stderr_and_dirty_detail_summary() {
+        let fixture = Fixture::new();
+        fixture.clone();
+        fixture.push_new_commit();
+        let remote_str = fixture.remote.to_str().unwrap();
+
+        let client = GitClient::new();
+        // 1. fast-forward and branch setup must never be killed by a fixed local timer.
+        assert_eq!(client.effective_limits("fast-forward"), (None, None));
+        assert_eq!(client.effective_limits("set up local branch"), (None, None));
+
+        // 2. Stale `.git/index.lock` preflights cleanly with lock details before merge --ff-only.
+        let lock = fixture.clone.join(".git").join("index.lock");
+        fs::write(&lock, "").unwrap();
+        let err = client
+            .sync_existing_cancellable(
+                remote_str,
+                &fixture.clone,
+                "main",
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("index.lock"),
+            "expected lock error detail: {err}"
+        );
+        fs::remove_file(&lock).unwrap();
+
+        // 3. Failed git stderr detail is captured and URL credentials are redacted.
+        let fake_output = Output {
+            status: Command::new("/usr/bin/false").status().unwrap(),
+            stdout: Vec::new(),
+            stderr: b"fatal: cannot access 'https://x-access-token:ghp_SECRET123@github.com/org/repo.git': failed\n".to_vec(),
+        };
+        let cmd_err = command_error("fetch", &fake_output).to_string();
+        assert!(
+            !cmd_err.contains("ghp_SECRET123"),
+            "secret leaked: {cmd_err}"
+        );
+        assert!(
+            cmd_err.contains("<redacted>@github.com"),
+            "missing redaction: {cmd_err}"
+        );
+
+        // 4. PorcelainV2Summary surfaces modified file count + ORIG_HEAD note.
+        let mut porcelain = String::from("# branch.oid abcdef1\n# branch.head main\n");
+        for i in 0..12 {
+            porcelain.push_str(&format!(
+                "1 .M N... 100644 100644 100644 0000000 0000000 file_{i}.rs\n"
+            ));
+        }
+        let parsed = PorcelainV2Summary::parse(&porcelain);
+        let msg = parsed.dirty_detail_message(true);
+        assert!(msg.contains("12 modified/deleted tracked files"), "{msg}");
+        assert!(msg.contains("file_0.rs"), "{msg}");
+        assert!(msg.contains("ORIG_HEAD"), "{msg}");
     }
 }

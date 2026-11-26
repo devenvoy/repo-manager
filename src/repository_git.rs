@@ -629,6 +629,13 @@ pub fn revalidate_or_inspect_target(
     )
 }
 
+fn detect_stale_lock_names(path: &Path) -> Vec<String> {
+    release_desk_git::detect_stale_locks(path)
+        .into_iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect()
+}
+
 /// Revalidate one repository with explicit opt-in `auto_refresh_stale_index` policy.
 pub fn revalidate_or_inspect_target_with_policy(
     project_id: u128,
@@ -1028,6 +1035,7 @@ pub(crate) fn record_from_status(
             destination: status.destination.clone(),
             status: CloneStatus::Error,
             error_message: Some(err.clone()),
+            stale_locks: detect_stale_lock_names(&target.path),
             probe_failed_reason: if status.fetched {
                 Some(err.clone())
             } else {
@@ -1474,5 +1482,76 @@ mod tests {
         ));
         assert!(!rec.stale_index_suspected);
         assert_eq!(rec.last_index_refresh_at, Some(30_000));
+    }
+
+    #[test]
+    fn revalidate_and_record_from_status_populate_stale_locks_when_ok() {
+        use super::{record_from_status, revalidate_or_inspect_target_with_policy};
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("owner").join("locked-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git_cmd = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{:?} failed", args);
+        };
+        git_cmd(&["init", "-b", "main"]);
+        git_cmd(&["config", "user.name", "Test"]);
+        git_cmd(&["config", "user.email", "test@example.invalid"]);
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        git_cmd(&["add", "README.md"]);
+        git_cmd(&["commit", "-m", "init"]);
+
+        let target = crate::repository_git::RepositoryTarget {
+            provider: "github".into(),
+            account: "owner".into(),
+            source_index: 0,
+            repo_index: 0,
+            key: RepoKey::new("github", "github.com", "owner", "locked-repo"),
+            name: "locked-repo".into(),
+            url: "https://github.com/owner/locked-repo.git".into(),
+            branch: "main".into(),
+            credential_ref: None,
+            endpoint: None,
+            project_root: temp.path().to_path_buf(),
+            path: repo.clone(),
+        };
+
+        std::fs::write(repo.join(".git").join("index.lock"), "").unwrap();
+        let icons = std::collections::HashMap::new();
+
+        // 1. Fingerprint miss (`check_dirty=true`) populates `stale_locks` even though status succeeds.
+        let (miss_rec, _) = revalidate_or_inspect_target_with_policy(
+            1,
+            &target,
+            None,
+            true,
+            false,
+            &icons,
+            Duration::from_secs(5),
+        );
+        assert_eq!(miss_rec.stale_locks, vec!["index.lock".to_string()]);
+
+        // 2. Fingerprint hit also surfaces `stale_locks`.
+        let (hit_rec, _) = revalidate_or_inspect_target_with_policy(
+            1,
+            &target,
+            Some(&miss_rec),
+            false,
+            false,
+            &icons,
+            Duration::from_secs(5),
+        );
+        assert_eq!(hit_rec.stale_locks, vec!["index.lock".to_string()]);
+
+        // 3. `record_from_status` populates `stale_locks` on both Ok and Err outcomes.
+        let st_ok = crate::repository_git::inspect(&target);
+        let from_ok = record_from_status(1, &target, &st_ok, None, &icons, false);
+        assert_eq!(from_ok.stale_locks, vec!["index.lock".to_string()]);
     }
 }

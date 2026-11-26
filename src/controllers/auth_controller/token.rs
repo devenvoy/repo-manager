@@ -6,7 +6,9 @@ impl ReleaseDesk {
     pub(crate) fn save_token_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let token = self.token_input.read(cx).value().trim().to_string();
         if token.is_empty() {
-            self.message = "Please enter a valid personal access token.".into();
+            self.set_toast(StatusToast::warning(
+                "Please enter a valid personal access token.",
+            ));
             cx.notify();
             return;
         }
