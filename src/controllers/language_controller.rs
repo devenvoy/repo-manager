@@ -2,41 +2,40 @@
 
 use crate::app::{ReleaseDesk, project_auth_token};
 use crate::views::project_repository_status::LanguageBreakdownState;
+use crate::workspace_sources::RepoKey;
 use gpui_kit::{Context, Window};
 use std::time::Duration;
 
 impl ReleaseDesk {
     pub(crate) fn toggle_repository_languages(
         &mut self,
-        source_index: usize,
-        repo_index: usize,
+        key: RepoKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let key = (source_index, repo_index);
-        if !self.languages_expanded.insert(key) {
-            self.languages_expanded.remove(&key);
+        let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|project| project.id == id))
+            .cloned()
+        else {
+            return;
+        };
+        let project_id = project.id;
+        let runtime = self.jobs.project_mut(project_id);
+        if !runtime.languages_expanded.insert(key.clone()) {
+            runtime.languages_expanded.remove(&key);
             cx.notify();
             return;
         }
         if matches!(
-            self.language_breakdowns.get(&key),
+            runtime.language_breakdowns.get(&key),
             Some(LanguageBreakdownState::Loading | LanguageBreakdownState::Loaded(_))
         ) {
             cx.notify();
             return;
         }
 
-        let Some(project) = self
-            .selected_project_id
-            .and_then(|id| self.projects.iter().find(|project| project.id == id))
-        else {
-            return;
-        };
-        let Some(source) = project.sources.get(source_index) else {
-            return;
-        };
-        let Some(repo) = source.repositories.get(repo_index) else {
+        let Some((_, _, source, repo)) = project.find_repo_by_key(&key) else {
             return;
         };
         let provider = source.provider.clone();
@@ -49,11 +48,11 @@ impl ReleaseDesk {
         let auth_project = project.clone();
         let secret_store = self.secret_store.clone();
 
-        self.language_breakdowns
-            .insert(key, LanguageBreakdownState::Loading);
+        self.jobs
+            .project_mut(project_id)
+            .language_breakdowns
+            .insert(key.clone(), LanguageBreakdownState::Loading);
         cx.notify();
-        let revision = self.workspace_revision;
-        let project_id = project.id;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = (|| {
@@ -79,14 +78,15 @@ impl ReleaseDesk {
                 match rx.try_recv() {
                     Ok(result) => {
                         let _ = this.update_in(cx, |this, _, cx| {
-                            if this.workspace_revision == revision
-                                && this.selected_project_id == Some(project_id)
-                            {
+                            if this.projects.iter().any(|p| p.id == project_id) {
                                 let state = match result {
                                     Ok(languages) => LanguageBreakdownState::Loaded(languages),
                                     Err(error) => LanguageBreakdownState::Error(error.to_string()),
                                 };
-                                this.language_breakdowns.insert(key, state);
+                                this.jobs
+                                    .project_mut(project_id)
+                                    .language_breakdowns
+                                    .insert(key, state);
                                 cx.notify();
                             }
                         });
@@ -94,13 +94,16 @@ impl ReleaseDesk {
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         let _ = this.update_in(cx, |this, _, cx| {
-                            if this.workspace_revision == revision {
-                                this.language_breakdowns.insert(
-                                    key,
-                                    LanguageBreakdownState::Error(
-                                        "Language request stopped unexpectedly".into(),
-                                    ),
-                                );
+                            if this.projects.iter().any(|p| p.id == project_id) {
+                                this.jobs
+                                    .project_mut(project_id)
+                                    .language_breakdowns
+                                    .insert(
+                                        key,
+                                        LanguageBreakdownState::Error(
+                                            "Language request stopped unexpectedly".into(),
+                                        ),
+                                    );
                                 cx.notify();
                             }
                         });

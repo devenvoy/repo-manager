@@ -4,17 +4,477 @@
 //! Project credentials are supplied by a narrowly scoped, per-command helper.
 
 pub mod adapter;
+pub mod fingerprint;
+pub mod perf;
 pub use adapter::SystemGitPort;
+pub use fingerprint::{FileStamp, RepoFingerprint};
 
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
-use std::io;
-use std::path::Path;
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::io::{self, Read as _};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+static PARTIAL_MARKER: &str = ".release-desk-partial";
+static NEXT_PARTIAL_ID: AtomicU64 = AtomicU64::new(1);
+pub const DEFAULT_LOCAL_GIT_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_NETWORK_GIT_TIMEOUT: Duration = Duration::from_secs(180);
+pub const DEFAULT_NETWORK_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DEFAULT_NETWORK_MAX_TIMEOUT: Duration = Duration::from_secs(1800);
+pub const DEFAULT_TERMINATION_GRACE: Duration = Duration::from_millis(3500);
+pub const DEFAULT_STALE_PARTIAL_MIN_AGE: Duration = Duration::from_secs(300);
+
+/// Detect `.git/index.lock`, `FETCH_HEAD.lock`, `shallow.lock`, and `refs/**/*.lock` without removing them.
+pub fn detect_stale_locks(repo_path: &Path) -> Vec<PathBuf> {
+    let Some((gitdir, commondir)) = fingerprint::resolve_git_dirs(repo_path) else {
+        return Vec::new();
+    };
+    let mut locks = Vec::new();
+    for candidate in [
+        gitdir.join("index.lock"),
+        gitdir.join("FETCH_HEAD.lock"),
+        gitdir.join("shallow.lock"),
+        commondir.join("FETCH_HEAD.lock"),
+        commondir.join("shallow.lock"),
+    ] {
+        if candidate.exists() && !locks.contains(&candidate) {
+            locks.push(candidate);
+        }
+    }
+    fn collect_ref_locks(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                collect_ref_locks(&path, out);
+            } else if path.extension().is_some_and(|e| e == "lock") && !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    collect_ref_locks(&commondir.join("refs"), &mut locks);
+    if commondir != gitdir {
+        collect_ref_locks(&gitdir.join("refs"), &mut locks);
+    }
+    locks.sort();
+    locks
+}
+
+/// Remove detected `.git` lock files ONLY after explicit user confirmation.
+pub fn remove_stale_locks_explicit(repo_path: &Path) -> Result<usize, GitError> {
+    let locks = detect_stale_locks(repo_path);
+    let mut removed = 0usize;
+    for lock in locks {
+        fs::remove_file(&lock).map_err(|source| GitError::Io {
+            operation: "remove stale lock",
+            source,
+        })?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+/// Symlink classification for destination checks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SymlinkState {
+    Valid,
+    Broken,
+}
+
+/// Single source of truth classification for a repository destination path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DestinationKind {
+    Missing,
+    EmptyDir,
+    NonGitDir,
+    GitRepo,
+    WrongRoot { toplevel: PathBuf },
+    Symlink(SymlinkState),
+    Unreadable(String),
+}
+
+impl DestinationKind {
+    /// Whether this destination can be cloned into directly without deleting user data.
+    pub fn is_clonable(&self) -> bool {
+        matches!(self, Self::Missing | Self::EmptyDir)
+    }
+
+    /// Whether this destination looks like an incomplete or mismatched local state.
+    pub fn is_incomplete(&self) -> bool {
+        matches!(
+            self,
+            Self::EmptyDir | Self::NonGitDir | Self::WrongRoot { .. }
+        )
+    }
+
+    /// Whether this destination is a valid Git repository rooted at the expected path.
+    pub fn is_git_repo(&self) -> bool {
+        matches!(self, Self::GitRepo)
+    }
+}
+
+/// Live progress parsed from `git clone --progress`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CloneProgress {
+    pub percent: Option<u8>,
+    pub detail: String,
+}
+
+/// Parse a single progress line/CR chunk emitted by `git clone --progress`.
+pub fn parse_git_progress(chunk: &str) -> Option<CloneProgress> {
+    let trimmed = chunk.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let pct_pos = trimmed.find('%')?;
+    let prefix = &trimmed[..pct_pos];
+    let digits_start = prefix
+        .rfind(|c: char| !c.is_ascii_digit())
+        .map_or(0, |idx| idx + 1);
+    let pct: u8 = prefix[digits_start..].parse().ok()?;
+    Some(CloneProgress {
+        percent: Some(pct.min(100)),
+        detail: trimmed.to_string(),
+    })
+}
+
+/// Pure-stat fast precheck verifying `path` is under `project_root`, has no symlink traversal,
+/// is a real directory, and owns a direct `.git` directory or `.git` file (worktree/submodule).
+pub fn path_looks_like_direct_git_repo(project_root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(project_root) else {
+        return false;
+    };
+    let mut current = project_root.to_path_buf();
+    for part in relative.components() {
+        let Component::Normal(seg) = part else {
+            return false;
+        };
+        current.push(seg);
+        let Ok(meta) = fs::symlink_metadata(&current) else {
+            return false;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return false;
+        }
+    }
+    fs::symlink_metadata(path.join(".git")).is_ok()
+}
+
+/// Classify a repository path relative to `project_root` (checking traversal & ancestor symlinks).
+pub fn classify_destination(project_root: &Path, path: &Path) -> DestinationKind {
+    let Ok(relative) = path.strip_prefix(project_root) else {
+        return DestinationKind::Unreadable("Repository path is outside the project folder".into());
+    };
+    let mut current = project_root.to_path_buf();
+    let components: Vec<_> = relative.components().collect();
+    for (idx, part) in components.iter().enumerate() {
+        let Component::Normal(seg) = part else {
+            return DestinationKind::Unreadable("Invalid repository path".into());
+        };
+        current.push(seg);
+        let is_last = idx + 1 == components.len();
+        if !is_last {
+            match fs::symlink_metadata(&current) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return DestinationKind::Unreadable(format!(
+                        "Repository path contains a symbolic link: {}",
+                        current.display()
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return DestinationKind::Unreadable(format!(
+                        "Cannot inspect repository path {}: {error}",
+                        current.display()
+                    ));
+                }
+            }
+        }
+    }
+    classify_path(path)
+}
+
+/// Classify a destination path without a project root prefix check.
+pub fn classify_path(path: &Path) -> DestinationKind {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return DestinationKind::Missing,
+        Err(error) => return DestinationKind::Unreadable(error.to_string()),
+    };
+    if meta.file_type().is_symlink() {
+        return if path.exists() {
+            DestinationKind::Symlink(SymlinkState::Valid)
+        } else {
+            DestinationKind::Symlink(SymlinkState::Broken)
+        };
+    }
+    if !meta.is_dir() {
+        return DestinationKind::NonGitDir;
+    }
+    match fs::read_dir(path) {
+        Ok(mut entries) => {
+            if entries.next().is_none() {
+                return DestinationKind::EmptyDir;
+            }
+        }
+        Err(error) => return DestinationKind::Unreadable(error.to_string()),
+    }
+
+    if let Some((gitdir, commondir)) = fingerprint::resolve_git_dirs(path)
+        && gitdir.join("HEAD").is_file()
+        && (gitdir.join("objects").is_dir()
+            || gitdir.join("reftable").is_dir()
+            || commondir.join("objects").is_dir()
+            || commondir.join("reftable").is_dir())
+    {
+        return DestinationKind::GitRepo;
+    }
+
+    let client = GitClient::new();
+    let Ok(out) = client.run(
+        Some(path),
+        "inspect repository root",
+        ["rev-parse", "--is-inside-work-tree", "--show-toplevel"],
+    ) else {
+        return DestinationKind::NonGitDir;
+    };
+    if !out.status.success() {
+        return DestinationKind::NonGitDir;
+    }
+    let text = stdout(&out);
+    let mut lines = text.lines();
+    let Some(inside) = lines.next().map(str::trim) else {
+        return DestinationKind::NonGitDir;
+    };
+    let Some(toplevel_str) = lines.next().map(str::trim) else {
+        return DestinationKind::NonGitDir;
+    };
+    if inside != "true" {
+        return DestinationKind::NonGitDir;
+    }
+    if paths_match(toplevel_str, path) {
+        DestinationKind::GitRepo
+    } else {
+        DestinationKind::WrongRoot {
+            toplevel: PathBuf::from(toplevel_str),
+        }
+    }
+}
+
+/// True when `path` is a directory whose only direct child entry is `.git`.
+pub fn is_dot_git_only_dir(path: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    let mut saw_dot_git = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == ".git" && entry.file_type().is_ok_and(|t| t.is_dir()) {
+            saw_dot_git = true;
+        } else {
+            return false;
+        }
+    }
+    saw_dot_git
+}
+
+/// True when `path` carries our partial-clone marker file.
+pub fn has_partial_marker(path: &Path) -> bool {
+    path.join(PARTIAL_MARKER).is_file()
+}
+
+/// Return up to `limit` human-readable entry labels for confirmation dialogs, plus total count.
+pub fn list_directory_preview(path: &Path, limit: usize) -> (Vec<String>, usize) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return (Vec::new(), 0);
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| {
+            let mut label = entry.file_name().to_string_lossy().into_owned();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                label.push('/');
+            }
+            label
+        })
+        .collect();
+    names.sort();
+    let total = names.len();
+    names.truncate(limit);
+    (names, total)
+}
+
+/// Redact any `scheme://user:pass@host` credentials from a URL string for safe logs/traces.
+pub fn redact_url_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(scheme_pos) = rest.find("://") {
+        let split = scheme_pos + 3;
+        out.push_str(&rest[..split]);
+        rest = &rest[split..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | ')' | '>'))
+            .unwrap_or(rest.len());
+        let candidate = &rest[..end];
+        if let Some(at_pos) = candidate.find('@') {
+            let authority_prefix = &candidate[..at_pos];
+            if !authority_prefix.contains('/') {
+                out.push_str("<redacted>@");
+                out.push_str(&candidate[at_pos + 1..]);
+                rest = &rest[end..];
+                continue;
+            }
+        }
+        out.push_str(candidate);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+pub fn format_partial_marker(pid: u32, created_secs: u64) -> String {
+    format!("pid={pid}\ncreated_secs={created_secs}\n")
+}
+
+fn parse_partial_marker(content: &str) -> Option<(u32, u64)> {
+    let mut pid = None;
+    let mut created_secs = None;
+    for line in content.lines() {
+        if let Some(v) = line.strip_prefix("pid=") {
+            pid = v.trim().parse::<u32>().ok();
+        } else if let Some(v) = line.strip_prefix("created_secs=") {
+            created_secs = v.trim().parse::<u64>().ok();
+        }
+    }
+    Some((pid?, created_secs?))
+}
+
+/// Check whether `pid` is still alive on Unix (`kill -0`).
+#[cfg(unix)]
+pub fn is_pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let Ok(out) = Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+    else {
+        return true;
+    };
+    if out.status.success() {
+        return true;
+    }
+    // If another user's process returned EPERM, treat it as alive rather than deleting.
+    let err = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
+    err.contains("operation not permitted") || err.contains("not permitted")
+}
+
+#[cfg(not(unix))]
+pub fn is_pid_alive(_pid: u32) -> bool {
+    false
+}
+
+/// Remove stale `*.partial*` directories created by interrupted atomic clones on startup.
+/// Requires ALL of: our `.release-desk-partial` marker, a dead PID, and `DEFAULT_STALE_PARTIAL_MIN_AGE`.
+pub fn cleanup_stale_partial_clones(project_dirs: &[PathBuf]) -> usize {
+    cleanup_stale_partial_clones_with_policy(
+        project_dirs,
+        DEFAULT_STALE_PARTIAL_MIN_AGE,
+        is_pid_alive,
+    )
+}
+
+/// Policy-parameterized stale `.partial` cleanup used for deterministic testing.
+pub fn cleanup_stale_partial_clones_with_policy<F>(
+    project_dirs: &[PathBuf],
+    min_age: Duration,
+    pid_alive: F,
+) -> usize
+where
+    F: Fn(u32) -> bool,
+{
+    fn scan_dir<F: Fn(u32) -> bool>(
+        dir: &Path,
+        depth: usize,
+        min_age: Duration,
+        pid_alive: &F,
+        removed: &mut usize,
+    ) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        let now = SystemTime::now();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let marker = path.join(PARTIAL_MARKER);
+            if name.contains(".partial") && marker.is_file() {
+                let Ok(content) = fs::read_to_string(&marker) else {
+                    continue;
+                };
+                let Some((pid, created_secs)) = parse_partial_marker(&content) else {
+                    continue;
+                };
+                if pid_alive(pid) {
+                    continue;
+                }
+                let created_time = UNIX_EPOCH + Duration::from_secs(created_secs);
+                let age = now.duration_since(created_time).unwrap_or(Duration::ZERO);
+                if age >= min_age && fs::remove_dir_all(&path).is_ok() {
+                    *removed += 1;
+                }
+            } else if depth > 0 {
+                scan_dir(&path, depth - 1, min_age, pid_alive, removed);
+            }
+        }
+    }
+
+    let mut removed = 0;
+    for dir in project_dirs {
+        scan_dir(dir, 1, min_age, &pid_alive, &mut removed);
+    }
+    removed
+}
+
+struct PartialCloneGuard {
+    dir: PathBuf,
+    armed: bool,
+}
+
+impl PartialCloneGuard {
+    fn new(dir: PathBuf) -> Self {
+        Self { dir, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PartialCloneGuard {
+    fn drop(&mut self) {
+        if self.armed && self.dir.join(PARTIAL_MARKER).is_file() {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+}
 
 /// The observed state of a managed clone relative to its tracked default branch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +538,10 @@ pub enum SyncOutcome {
 #[derive(Debug)]
 pub enum GitError {
     Cancelled,
+    TimedOut {
+        operation: &'static str,
+        timeout: Duration,
+    },
     InvalidInput(&'static str),
     Io {
         operation: &'static str,
@@ -86,6 +550,7 @@ pub enum GitError {
     Command {
         operation: &'static str,
         code: Option<i32>,
+        detail: Option<String>,
     },
 }
 
@@ -93,10 +558,25 @@ impl fmt::Display for GitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cancelled => f.write_str("Git operation cancelled"),
+            Self::TimedOut { operation, timeout } => {
+                write!(
+                    f,
+                    "Git {operation} timed out after {:.1}s",
+                    timeout.as_secs_f64()
+                )
+            }
             Self::InvalidInput(message) => write!(f, "invalid Git input: {message}"),
             Self::Io { operation, source } => write!(f, "Git {operation} failed: {source}"),
-            Self::Command { operation, code } => {
-                write!(f, "Git {operation} exited unsuccessfully ({code:?})")
+            Self::Command {
+                operation,
+                code,
+                detail,
+            } => {
+                if let Some(detail) = detail.as_deref().filter(|d| !d.is_empty()) {
+                    write!(f, "Git {operation} failed: {detail}")
+                } else {
+                    write!(f, "Git {operation} exited unsuccessfully ({code:?})")
+                }
             }
         }
     }
@@ -231,6 +711,10 @@ pub struct GitClient {
     token: Option<String>,
     codecommit_credentials: bool,
     credential_manager: bool,
+    timeout: Option<Duration>,
+    stall_timeout: Option<Duration>,
+    termination_grace: Duration,
+    low_io_priority: bool,
 }
 
 impl Default for GitClient {
@@ -247,7 +731,40 @@ impl GitClient {
             token: None,
             codecommit_credentials: false,
             credential_manager: false,
+            timeout: None,
+            stall_timeout: None,
+            termination_grace: DEFAULT_TERMINATION_GRACE,
+            low_io_priority: false,
         }
+    }
+
+    /// Override the per-subprocess execution timeout (falls back to operation defaults when unset).
+    pub fn with_executable(mut self, executable: impl Into<std::ffi::OsString>) -> Self {
+        self.executable = executable.into();
+        self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Override the network inactivity stall timeout (when no stdout/stderr bytes arrive).
+    pub fn with_stall_timeout(mut self, timeout: Duration) -> Self {
+        self.stall_timeout = Some(timeout);
+        self
+    }
+
+    /// Override the SIGTERM-to-SIGKILL grace period used on cancellation or timeout.
+    pub fn with_termination_grace(mut self, grace: Duration) -> Self {
+        self.termination_grace = grace;
+        self
+    }
+
+    /// Run spawned git subprocesses at background/throttled I/O priority when supported by the OS.
+    pub fn with_low_io_priority(mut self, enabled: bool) -> Self {
+        self.low_io_priority = enabled;
+        self
     }
 
     /// Use a selected credential for this exact remote; no token is stored here.
@@ -289,28 +806,193 @@ impl GitClient {
 
     /// Inspect a clone without fetching or changing its working tree.
     pub fn inspect(&self, path: &Path, default_branch: &str) -> Result<CloneState, GitError> {
+        let total_t = perf::start();
+        let sub_before = perf::reset_subprocess_counter();
+        let mut timings = perf::InspectTimings::default();
+        let outcome = self.inspect_porcelain_v2_inner(path, default_branch, true, true);
+        if total_t.is_some() {
+            timings.total_ns = perf::elapsed_ns(total_t);
+            let (subs, sub_ns) = perf::subprocess_delta(sub_before);
+            timings.subprocesses = subs;
+            timings.subprocess_ns = sub_ns;
+            perf::store_inspect(timings);
+        }
+        outcome.map(|(state, _, _, _)| state)
+    }
+
+    /// Inspect ref status (`HEAD`, branch, `origin/<default_branch>`, ahead/behind) AND tracked
+    /// dirty state in a SINGLE `git --no-optional-locks status --porcelain=v2 --branch -uno`
+    /// subprocess whenever `branch.upstream` matches `origin/<default_branch>` and commits match.
+    /// Falls back cleanly to `rev-parse` + `rev-list` when upstream differs or is unset.
+    pub fn inspect_refs_and_dirty_uno(
+        &self,
+        path: &Path,
+        default_branch: &str,
+    ) -> Result<(CloneState, Option<u32>, Option<u32>, bool), GitError> {
+        self.inspect_porcelain_v2_inner(path, default_branch, false, false)
+    }
+
+    fn inspect_porcelain_v2_inner(
+        &self,
+        path: &Path,
+        default_branch: &str,
+        include_untracked: bool,
+        dirty_sets_status: bool,
+    ) -> Result<(CloneState, Option<u32>, Option<u32>, bool), GitError> {
         validate_branch(default_branch)?;
-        if !path.exists() {
-            return Ok(CloneState::new(CloneStatus::NotCloned));
+        let kind = classify_path(path);
+        if let Some(early) = destination_error_state(kind) {
+            return Ok((early, None, None, false));
         }
+
+        let untracked_flag = if include_untracked {
+            "--untracked-files=normal"
+        } else {
+            "-uno"
+        };
+        let status_out = self.run(
+            Some(path),
+            "inspect changes",
+            [
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                untracked_flag,
+            ],
+        )?;
+        if !status_out.status.success() {
+            return Err(command_error("inspect changes", &status_out));
+        }
+        let summary = PorcelainV2Summary::parse(&String::from_utf8_lossy(&status_out.stdout));
         let mut state = CloneState::new(CloneStatus::Error);
-        let inside = self.run(
-            Some(path),
-            "inspect repository",
-            ["rev-parse", "--is-inside-work-tree"],
-        )?;
-        if !inside.status.success() || stdout(&inside) != "true" {
-            state.message = Some("Path is not a Git working tree".into());
-            return Ok(state);
+        state.local_revision = summary.head_sha;
+        state.branch = summary.branch;
+        let is_dirty = if include_untracked {
+            summary.dirty_any
+        } else {
+            summary.dirty_tracked
+        };
+
+        let expected_upstream = format!("origin/{default_branch}");
+        if !summary.detached
+            && (!dirty_sets_status || !is_dirty)
+            && state.branch.as_deref() == Some(default_branch)
+            && summary.upstream.as_deref() == Some(expected_upstream.as_str())
+            && let Some((ahead, behind)) = summary.ab
+            && ahead == 0
+            && behind == 0
+            && state.local_revision.is_some()
+        {
+            // Fast path: 1 subprocess total (local == origin/<default_branch>).
+            state.remote_revision = state.local_revision.clone();
+            state.status = CloneStatus::Current;
+            return Ok((state, Some(0), Some(0), is_dirty));
         }
-        let root = self.run(
+
+        let remote_ref = format!("refs/remotes/origin/{default_branch}");
+        let remote = self.run(
             Some(path),
-            "inspect repository root",
-            ["rev-parse", "--show-toplevel"],
+            "read remote revision",
+            ["rev-parse", "--verify", remote_ref.as_str()],
         )?;
-        if !root.status.success() || !paths_match(&stdout(&root), path) {
-            state.message = Some("Path is inside another Git working tree".into());
-            return Ok(state);
+        if remote.status.success() {
+            state.remote_revision = Some(stdout(&remote));
+        }
+
+        let counts = match (&state.local_revision, &state.remote_revision) {
+            (Some(local), Some(remote_sha)) => {
+                if !summary.detached
+                    && state.branch.as_deref() == Some(default_branch)
+                    && summary.upstream.as_deref() == Some(expected_upstream.as_str())
+                    && let Some(ab) = summary.ab
+                {
+                    Some(ab)
+                } else if local == remote_sha {
+                    Some((0, 0))
+                } else {
+                    Some(self.ahead_behind_counts(path, local, remote_sha)?)
+                }
+            }
+            _ => None,
+        };
+        let ahead_opt = counts.map(|(a, _)| a);
+        let behind_opt = counts.map(|(_, b)| b);
+
+        if summary.detached {
+            state.status = CloneStatus::Detached;
+            return Ok((state, ahead_opt, behind_opt, is_dirty));
+        }
+        if dirty_sets_status && is_dirty {
+            state.status = CloneStatus::Dirty;
+            let orig_head_present = fingerprint::resolve_git_dirs(path)
+                .is_some_and(|(gitdir, _)| gitdir.join("ORIG_HEAD").exists());
+            state.message = Some(summary.dirty_detail_message(orig_head_present));
+            return Ok((state, ahead_opt, behind_opt, true));
+        }
+        if state.branch.as_deref() != Some(default_branch) {
+            state.status = CloneStatus::OtherBranch;
+            return Ok((state, ahead_opt, behind_opt, is_dirty));
+        }
+
+        let Some((ahead, behind)) = counts else {
+            if state.local_revision.is_none() && state.remote_revision.is_none() {
+                state.status = CloneStatus::Current;
+                state.message = Some("This local copy has no commits. Check for updates to see whether the online repository has a first commit.".into());
+            } else if state.local_revision.is_none() {
+                state.message = Some("The local copy has no commits, but the online repository does. Use Fix local copy to restore it.".into());
+            } else {
+                state.message = Some(format!(
+                    "The online branch {default_branch} is unavailable. Refresh this source or check its default branch."
+                ));
+            }
+            return Ok((state, None, None, is_dirty));
+        };
+
+        state.status = match (ahead > 0, behind > 0) {
+            (false, false) => CloneStatus::Current,
+            (false, true) => CloneStatus::Behind,
+            (true, false) => CloneStatus::Ahead,
+            (true, true) => CloneStatus::Diverged,
+        };
+        Ok((state, Some(ahead), Some(behind), is_dirty))
+    }
+
+    /// Inspect only ref state (`HEAD`, default branch, `origin/<branch>`, and `ahead`/`behind`
+    /// commit counts via 1 `rev-list --left-right --count`) without running `git status`.
+    pub fn inspect_refs_only(
+        &self,
+        path: &Path,
+        default_branch: &str,
+    ) -> Result<(CloneState, Option<u32>, Option<u32>), GitError> {
+        validate_branch(default_branch)?;
+        let kind = classify_path(path);
+        let mut state = CloneState::new(CloneStatus::Error);
+        match kind {
+            DestinationKind::Missing => {
+                return Ok((CloneState::new(CloneStatus::NotCloned), None, None));
+            }
+            DestinationKind::EmptyDir => {
+                state.message = Some("Empty directory at repository destination".into());
+                return Ok((state, None, None));
+            }
+            DestinationKind::NonGitDir => {
+                state.message = Some("Path is not a Git working tree".into());
+                return Ok((state, None, None));
+            }
+            DestinationKind::WrongRoot { .. } => {
+                state.message = Some("Path is inside another Git working tree".into());
+                return Ok((state, None, None));
+            }
+            DestinationKind::Symlink(_) => {
+                state.message = Some("Repository path is a symbolic link".into());
+                return Ok((state, None, None));
+            }
+            DestinationKind::Unreadable(error) => {
+                state.message = Some(error);
+                return Ok((state, None, None));
+            }
+            DestinationKind::GitRepo => {}
         }
 
         let head = self.run(Some(path), "read HEAD", ["rev-parse", "--verify", "HEAD"])?;
@@ -333,48 +1015,120 @@ impl GitClient {
         )?;
         if !branch.status.success() {
             state.status = CloneStatus::Detached;
-            return Ok(state);
+            return Ok((state, None, None));
         }
         state.branch = Some(stdout(&branch));
-        let dirty = self.run(
-            Some(path),
-            "inspect changes",
-            ["status", "--porcelain=v1", "--untracked-files=normal"],
-        )?;
-        if !dirty.status.success() {
-            return Err(command_error("inspect changes", &dirty));
-        }
-        if !dirty.stdout.is_empty() {
-            state.status = CloneStatus::Dirty;
-            return Ok(state);
-        }
         if state.branch.as_deref() != Some(default_branch) {
             state.status = CloneStatus::OtherBranch;
-            return Ok(state);
+            return Ok((state, None, None));
         }
-        let (Some(local), Some(remote)) = (&state.local_revision, &state.remote_revision) else {
+        let (Some(local), Some(remote_sha)) = (&state.local_revision, &state.remote_revision)
+        else {
             if state.local_revision.is_none() && state.remote_revision.is_none() {
                 state.status = CloneStatus::Current;
-                state.message = Some("This local copy has no commits. Check for updates to see whether the online repository has a first commit.".into());
-            } else if state.local_revision.is_none() {
-                state.message = Some("The local copy has no commits, but the online repository does. Use Fix local copy to restore it.".into());
+                state.message = Some("This local copy has no commits.".into());
             } else {
                 state.message = Some(format!(
-                    "The online branch {default_branch} is unavailable. Refresh this source or check its default branch."
+                    "The online branch {default_branch} is unavailable locally."
                 ));
             }
-            return Ok(state);
+            return Ok((state, None, None));
         };
-        if local == remote {
+        if local == remote_sha {
             state.status = CloneStatus::Current;
-        } else if self.is_ancestor(path, local, remote)? {
-            state.status = CloneStatus::Behind;
-        } else if self.is_ancestor(path, remote, local)? {
-            state.status = CloneStatus::Ahead;
-        } else {
-            state.status = CloneStatus::Diverged;
+            return Ok((state, Some(0), Some(0)));
         }
-        Ok(state)
+        let (ahead, behind) = self.ahead_behind_counts(path, local, remote_sha)?;
+        state.status = match (ahead > 0, behind > 0) {
+            (false, false) => CloneStatus::Current,
+            (false, true) => CloneStatus::Behind,
+            (true, false) => CloneStatus::Ahead,
+            (true, true) => CloneStatus::Diverged,
+        };
+        Ok((state, Some(ahead), Some(behind)))
+    }
+
+    /// Compute `(ahead, behind)` commit counts between `local` and `remote` in ONE subprocess.
+    pub fn ahead_behind_counts(
+        &self,
+        path: &Path,
+        local: &str,
+        remote: &str,
+    ) -> Result<(u32, u32), GitError> {
+        let range = format!("{local}...{remote}");
+        let out = self.run(
+            Some(path),
+            "compare revisions",
+            ["rev-list", "--left-right", "--count", range.as_str()],
+        )?;
+        if !out.status.success() {
+            return Err(command_error("compare revisions", &out));
+        }
+        let text = stdout(&out);
+        let mut parts = text.split_whitespace();
+        let ahead = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let behind = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        Ok((ahead, behind))
+    }
+
+    /// Cheap lock-free tracked dirty check (`git --no-optional-locks status --porcelain=v1 -uno`).
+    pub fn inspect_tracked_dirty(&self, path: &Path) -> Result<bool, GitError> {
+        let out = self.run(
+            Some(path),
+            "inspect changes",
+            ["--no-optional-locks", "status", "--porcelain=v1", "-uno"],
+        )?;
+        if !out.status.success() {
+            return Err(command_error("inspect changes", &out));
+        }
+        Ok(!out.stdout.is_empty())
+    }
+
+    /// Full untracked-file check using `--no-optional-locks` (for selected repo / on demand).
+    pub fn inspect_untracked_present(&self, path: &Path) -> Result<bool, GitError> {
+        let out = self.run(
+            Some(path),
+            "inspect changes",
+            [
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=normal",
+            ],
+        )?;
+        if !out.status.success() {
+            return Err(command_error("inspect changes", &out));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|l| l.starts_with("??")))
+    }
+
+    /// Lightweight network probe (`git ls-remote`) returning the remote branch head SHA
+    /// without downloading any objects or touching the local repo.
+    pub fn probe_remote_branch_sha(
+        &self,
+        remote_url: &str,
+        default_branch: &str,
+    ) -> Result<Option<String>, GitError> {
+        validate_branch(default_branch)?;
+        self.validate_credential_remote(remote_url)?;
+        let ref_spec = format!("refs/heads/{default_branch}");
+        let out = self.run(
+            None,
+            "query remote branch",
+            ["ls-remote", remote_url, ref_spec.as_str()],
+        )?;
+        if !out.status.success() {
+            return Err(command_error("query remote branch", &out));
+        }
+        let sha = stdout(&out)
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().next())
+            .filter(|s| s.len() >= 7 && s.chars().all(|c| c.is_ascii_hexdigit()))
+            .map(ToString::to_string);
+        Ok(sha)
     }
 
     /// Fetch `origin` while leaving the working tree unchanged.
@@ -388,31 +1142,92 @@ impl GitClient {
     }
 
     fn fetch_origin(&self, path: &Path) -> Result<(), GitError> {
-        let output = self.run(Some(path), "fetch", ["fetch", "--prune", "origin"])?;
+        let output = self.run(
+            Some(path),
+            "fetch",
+            ["fetch", "--prune", "--progress", "origin"],
+        )?;
         success("fetch", output).map(|_| ())
     }
 
+    /// Refresh cached stat info in `.git/index` at low I/O priority ONLY if no `index.lock` exists.
+    /// Returns `Ok(true)` if refreshed, `Ok(false)` if locked by another process.
+    pub fn refresh_index_if_unlocked(&self, path: &Path) -> Result<bool, GitError> {
+        let Some((gitdir, _)) = fingerprint::resolve_git_dirs(path) else {
+            return Ok(false);
+        };
+        if gitdir.join("index.lock").exists() {
+            return Ok(false);
+        }
+        let client = self.clone().with_low_io_priority(true);
+        let output = client.run(
+            Some(path),
+            "refresh index",
+            ["update-index", "-q", "--refresh"],
+        )?;
+        // exit code 1 means files differ (modified), which still refreshes stat metadata cleanly.
+        if output.status.success() || output.status.code() == Some(1) {
+            Ok(true)
+        } else {
+            Err(command_error("refresh index", &output))
+        }
+    }
+
     /// Fetch only after verifying that this directory is the expected checkout.
+    /// Runs zero pre-fetch `inspect()` subprocesses and 1 post-fetch porcelain-v2 status check
+    /// (plus `remote get-url origin` + `fetch`), avoiding redundant untracked worktree scans.
     pub fn fetch_verified(
         &self,
         remote_url: &str,
         path: &Path,
         default_branch: &str,
     ) -> Result<CloneState, GitError> {
+        let total_t = perf::start();
+        let sub_before = perf::reset_subprocess_counter();
+        let mut timings = perf::FetchTimings::default();
+        validate_branch(default_branch)?;
         self.validate_credential_remote(remote_url)?;
-        let state = self.inspect(path, default_branch)?;
-        if matches!(state.status, CloneStatus::NotCloned | CloneStatus::Error) {
-            return Ok(state);
+        if let Some(early) = destination_error_state(classify_path(path)) {
+            if total_t.is_some() {
+                timings.total_ns = perf::elapsed_ns(total_t);
+                let (subs, sub_ns) = perf::subprocess_delta(sub_before);
+                timings.subprocesses = subs;
+                timings.subprocess_ns = sub_ns;
+                perf::store_fetch(timings);
+            }
+            return Ok(early);
         }
+        let t = perf::start();
         let origin = self.run(Some(path), "read origin", ["remote", "get-url", "origin"])?;
+        timings.origin_verify_ns = perf::elapsed_ns(t);
         if !origin.status.success() || stdout(&origin) != remote_url {
-            let mut rejected = state;
-            rejected.status = CloneStatus::Error;
+            let mut rejected = CloneState::new(CloneStatus::Error);
             rejected.message = Some("Clone origin does not match the expected remote".into());
+            if total_t.is_some() {
+                timings.total_ns = perf::elapsed_ns(total_t);
+                let (subs, sub_ns) = perf::subprocess_delta(sub_before);
+                timings.subprocesses = subs;
+                timings.subprocess_ns = sub_ns;
+                perf::store_fetch(timings);
+            }
             return Ok(rejected);
         }
+        let t = perf::start();
         self.fetch_origin(path)?;
-        self.inspect(path, default_branch)
+        timings.fetch_origin_ns = perf::elapsed_ns(t);
+        let t = perf::start();
+        let result = self
+            .inspect_porcelain_v2_inner(path, default_branch, false, true)
+            .map(|(state, _, _, _)| state);
+        timings.post_inspect_ns = perf::elapsed_ns(t);
+        if total_t.is_some() {
+            timings.total_ns = perf::elapsed_ns(total_t);
+            let (subs, sub_ns) = perf::subprocess_delta(sub_before);
+            timings.subprocesses = subs;
+            timings.subprocess_ns = sub_ns;
+            perf::store_fetch(timings);
+        }
+        result
     }
 
     /// Clone when absent, or fetch and fast-forward a clean default-branch checkout.
@@ -428,12 +1243,42 @@ impl GitClient {
         self.sync_inner(remote_url, path, default_branch, true)
     }
 
-    /// Clone into a newly reserved directory, never fetching or updating an existing path.
+    /// Clone into a newly reserved sibling `.partial` directory, verify, and atomically rename.
+    ///
+    /// Missing and empty directories are clonable; valid existing checkouts, symlinks, and
+    /// non-git directories are refused.
     pub fn clone_only(
         &self,
         remote_url: &str,
         path: &Path,
         default_branch: &str,
+    ) -> Result<SyncOutcome, GitError> {
+        let project_root = path
+            .parent()
+            .ok_or(GitError::InvalidInput("clone path has no parent"))?;
+        self.clone_atomic_cancellable(
+            project_root,
+            remote_url,
+            path,
+            default_branch,
+            false,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+    }
+
+    /// Atomically clone into `<name>.partial-<id>/checkout`, stream `--progress`, verify,
+    /// and rename into `path`. Always cleans up `.partial` on failure, cancel, or panic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn clone_atomic_cancellable(
+        &self,
+        project_root: &Path,
+        remote_url: &str,
+        path: &Path,
+        default_branch: &str,
+        replace_empty_git_repo: bool,
+        cancelled: &AtomicBool,
+        mut on_progress: impl FnMut(CloneProgress),
     ) -> Result<SyncOutcome, GitError> {
         validate_branch(default_branch)?;
         self.validate_credential_remote(remote_url)?;
@@ -444,6 +1289,37 @@ impl GitClient {
         {
             return Err(GitError::InvalidInput("remote URL is empty or unsafe"));
         }
+        if cancelled.load(Ordering::Acquire) {
+            return Err(GitError::Cancelled);
+        }
+
+        let initial_kind = classify_destination(project_root, path);
+        let allow_replace_git_only = replace_empty_git_repo
+            && initial_kind == DestinationKind::GitRepo
+            && self
+                .inspect(path, default_branch)
+                .is_ok_and(|s| s.local_revision.is_none() && s.remote_revision.is_none());
+        if !initial_kind.is_clonable() && !allow_replace_git_only {
+            return Err(match initial_kind {
+                DestinationKind::GitRepo => {
+                    GitError::InvalidInput("repository destination already exists")
+                }
+                DestinationKind::NonGitDir => {
+                    GitError::InvalidInput("non-git folder exists at destination")
+                }
+                DestinationKind::WrongRoot { .. } => {
+                    GitError::InvalidInput("destination is inside another git repository")
+                }
+                DestinationKind::Symlink(_) => {
+                    GitError::InvalidInput("destination is a symbolic link")
+                }
+                DestinationKind::Unreadable(_) => {
+                    GitError::InvalidInput("destination path is unreadable or unsafe")
+                }
+                DestinationKind::Missing | DestinationKind::EmptyDir => unreachable!(),
+            });
+        }
+
         let parent = path
             .parent()
             .ok_or(GitError::InvalidInput("clone path has no parent"))?;
@@ -451,68 +1327,257 @@ impl GitClient {
             operation: "create clone parent",
             source,
         })?;
-        // create_dir is atomic and fails for every existing path, including an empty directory.
-        fs::create_dir(path).map_err(|source| GitError::Io {
-            operation: "reserve clone destination",
+        let repo_file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or(GitError::InvalidInput("invalid repository directory name"))?;
+        let partial_id = NEXT_PARTIAL_ID.fetch_add(1, Ordering::Relaxed);
+        let partial_dir = parent.join(format!(
+            "{repo_file_name}.partial-{}-{partial_id}",
+            std::process::id()
+        ));
+        fs::create_dir(&partial_dir).map_err(|source| GitError::Io {
+            operation: "create partial clone directory",
             source,
         })?;
-        let mut output = self.run(
-            None,
-            "clone",
+        let mut guard = PartialCloneGuard::new(partial_dir.clone());
+        let created_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let marker_body = format_partial_marker(std::process::id(), created_secs);
+        fs::write(partial_dir.join(PARTIAL_MARKER), marker_body).map_err(|source| {
+            GitError::Io {
+                operation: "write partial clone marker",
+                source,
+            }
+        })?;
+        let checkout_dir = partial_dir.join("checkout");
+
+        let mut result = self.run_clone_with_progress(
             [
                 OsStr::new("clone"),
+                OsStr::new("--progress"),
                 OsStr::new("--branch"),
                 OsStr::new(default_branch),
                 OsStr::new("--"),
                 OsStr::new(remote_url),
-                path.as_os_str(),
+                checkout_dir.as_os_str(),
             ],
+            cancelled,
+            &mut on_progress,
         );
-        if output.as_ref().is_err_and(|_| true)
-            || output.as_ref().is_ok_and(|o| !o.status.success())
-        {
-            // If clone with specific --branch failed, retry without --branch to let git resolve remote HEAD
-            let _ = fs::remove_dir(path);
-            let _ = fs::create_dir(path);
-            output = self.run(
-                None,
-                "clone",
+        if matches!(&result, Err(GitError::Command { .. })) && !cancelled.load(Ordering::Acquire) {
+            let _ = fs::remove_dir_all(&checkout_dir);
+            result = self.run_clone_with_progress(
                 [
                     OsStr::new("clone"),
+                    OsStr::new("--progress"),
                     OsStr::new("--"),
                     OsStr::new(remote_url),
-                    path.as_os_str(),
+                    checkout_dir.as_os_str(),
                 ],
+                cancelled,
+                &mut on_progress,
             );
         }
-        match output.and_then(|output| success("clone", output)) {
-            Ok(_) => {}
-            Err(error) => {
-                // Remove only an empty reservation. Never delete files left by Git or another process.
-                let _ = fs::remove_dir(path);
-                return Err(error);
-            }
+        result?;
+
+        if cancelled.load(Ordering::Acquire) {
+            return Err(GitError::Cancelled);
         }
+
         let detected_branch = self
             .run(
-                Some(path),
+                Some(&checkout_dir),
                 "read branch",
                 ["symbolic-ref", "--quiet", "--short", "HEAD"],
             )
             .ok()
             .and_then(|out| out.status.success().then(|| stdout(&out)))
             .unwrap_or_else(|| default_branch.to_string());
-        let state = self.inspect(path, &detected_branch)?;
-        match state.local_revision.clone() {
+        let state = self.inspect(&checkout_dir, &detected_branch)?;
+        let outcome = match state.local_revision.clone() {
             Some(revision)
                 if matches!(
                     state.status,
                     CloneStatus::Current | CloneStatus::OtherBranch
                 ) =>
             {
-                Ok(SyncOutcome::Cloned { revision })
+                SyncOutcome::Cloned { revision }
             }
-            _ => Ok(SyncOutcome::Skipped(state)),
+            None if state.status == CloneStatus::Current => SyncOutcome::Cloned {
+                revision: String::new(),
+            },
+            _ => return Ok(SyncOutcome::Skipped(state)),
+        };
+
+        // Re-check destination right before atomic swap.
+        let final_kind = classify_destination(project_root, path);
+        if final_kind == DestinationKind::EmptyDir {
+            fs::remove_dir(path).map_err(|source| GitError::Io {
+                operation: "remove empty destination directory",
+                source,
+            })?;
+        } else if allow_replace_git_only
+            && final_kind == DestinationKind::GitRepo
+            && is_dot_git_only_dir(path)
+        {
+            let still_empty = self
+                .inspect(path, default_branch)
+                .is_ok_and(|s| s.local_revision.is_none() && s.remote_revision.is_none());
+            if !still_empty {
+                return Err(GitError::InvalidInput(
+                    "repository destination changed during clone",
+                ));
+            }
+            fs::remove_dir_all(path).map_err(|source| GitError::Io {
+                operation: "remove incomplete git directory",
+                source,
+            })?;
+        } else if final_kind != DestinationKind::Missing {
+            return Err(GitError::InvalidInput(
+                "repository destination became occupied during clone",
+            ));
+        }
+
+        fs::rename(&checkout_dir, path).map_err(|source| GitError::Io {
+            operation: "finalize cloned repository",
+            source,
+        })?;
+        let _ = fs::remove_dir_all(&partial_dir);
+        guard.disarm();
+        Ok(outcome)
+    }
+
+    fn effective_limits(&self, operation: &str) -> (Duration, Option<Duration>) {
+        let is_network = matches!(
+            operation,
+            "clone" | "fetch" | "fetch origin" | "verify remote origin" | "query remote branch"
+        );
+        if let Some(custom) = self.timeout {
+            return (custom, self.stall_timeout);
+        }
+        if is_network {
+            (
+                DEFAULT_NETWORK_MAX_TIMEOUT,
+                Some(self.stall_timeout.unwrap_or(DEFAULT_NETWORK_STALL_TIMEOUT)),
+            )
+        } else if matches!(operation, "fast-forward" | "set up local branch") {
+            // Updating large monorepo worktrees on external HDDs can take several minutes;
+            // never kill `merge --ff-only` at 30s and leave a half-written tree with `ORIG_HEAD`.
+            (Duration::from_secs(600), None)
+        } else {
+            (DEFAULT_LOCAL_GIT_TIMEOUT, None)
+        }
+    }
+
+    fn run_clone_with_progress<I, S>(
+        &self,
+        args: I,
+        cancelled: &AtomicBool,
+        on_progress: &mut impl FnMut(CloneProgress),
+    ) -> Result<(), GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(GitError::Cancelled);
+        }
+        let (hard_timeout, stall_timeout) = self.effective_limits("clone");
+        let start = Instant::now();
+        let last_activity_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        perf::record_spawn();
+        let mut child = self
+            .command(None, args)?
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|source| GitError::Io {
+                operation: "clone",
+                source,
+            })?;
+        let stderr = child.stderr.take();
+        let (tx, rx) = std::sync::mpsc::channel::<CloneProgress>();
+        let activity_err = last_activity_ms.clone();
+        let reader_handle = stderr.map(|mut pipe| {
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 512];
+                let mut pending = String::new();
+                while let Ok(n) = pipe.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    activity_err.store(start.elapsed().as_millis() as u64, Ordering::Release);
+                    let chunk = String::from_utf8_lossy(&buf[..n]);
+                    pending.push_str(&chunk);
+                    while let Some(pos) = pending.find(['\r', '\n']) {
+                        let line = pending[..pos].to_string();
+                        pending.drain(..=pos);
+                        if let Some(progress) = parse_git_progress(&line) {
+                            let _ = tx.send(progress);
+                        }
+                    }
+                }
+                if let Some(progress) = parse_git_progress(&pending) {
+                    let _ = tx.send(progress);
+                }
+            })
+        });
+
+        loop {
+            while let Ok(p) = rx.try_recv() {
+                on_progress(p);
+            }
+            if cancelled.load(Ordering::Acquire) {
+                kill_process_group(&mut child, self.termination_grace);
+                if let Some(h) = reader_handle {
+                    let _ = h.join();
+                }
+                return Err(GitError::Cancelled);
+            }
+            let elapsed = start.elapsed();
+            let idle = elapsed.saturating_sub(Duration::from_millis(
+                last_activity_ms.load(Ordering::Acquire),
+            ));
+            let stalled = stall_timeout.is_some_and(|st| idle >= st);
+            if elapsed >= hard_timeout || stalled {
+                kill_process_group(&mut child, self.termination_grace);
+                if let Some(h) = reader_handle {
+                    let _ = h.join();
+                }
+                return Err(GitError::TimedOut {
+                    operation: "clone",
+                    timeout: if stalled {
+                        stall_timeout.unwrap_or(hard_timeout)
+                    } else {
+                        hard_timeout
+                    },
+                });
+            }
+            if let Some(status) = child.try_wait().map_err(|source| GitError::Io {
+                operation: "clone",
+                source,
+            })? {
+                if let Some(h) = reader_handle {
+                    let _ = h.join();
+                }
+                while let Ok(p) = rx.try_recv() {
+                    on_progress(p);
+                }
+                if cancelled.load(Ordering::Acquire) {
+                    return Err(GitError::Cancelled);
+                }
+                if status.success() {
+                    return Ok(());
+                }
+                return Err(GitError::Command {
+                    operation: "clone",
+                    code: status.code(),
+                    detail: None,
+                });
+            }
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 
@@ -621,6 +1686,21 @@ impl GitClient {
                 let before_merge = self.inspect(path, default_branch)?;
                 if before_merge.status != CloneStatus::Behind {
                     return Ok(SyncOutcome::Skipped(before_merge));
+                }
+                let locks = detect_stale_locks(path);
+                if !locks.is_empty() {
+                    let names: Vec<String> = locks
+                        .iter()
+                        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                        .collect();
+                    return Err(GitError::Command {
+                        operation: "fast-forward",
+                        code: Some(1),
+                        detail: Some(format!(
+                            "blocked by Git lock file ({}); remove stale lock or wait for the active Git process to finish",
+                            names.join(", ")
+                        )),
+                    });
                 }
                 progress("Applying fast-forward");
                 let remote_ref = format!("refs/remotes/origin/{default_branch}");
@@ -789,19 +1869,6 @@ impl GitClient {
         Ok(commits)
     }
 
-    fn is_ancestor(&self, path: &Path, older: &str, newer: &str) -> Result<bool, GitError> {
-        let output = self.run(
-            Some(path),
-            "compare revisions",
-            ["merge-base", "--is-ancestor", older, newer],
-        )?;
-        match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => Err(command_error("compare revisions", &output)),
-        }
-    }
-
     fn run<I, S>(
         &self,
         path: Option<&Path>,
@@ -812,9 +1879,15 @@ impl GitClient {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        self.command(path, args)?
-            .output()
-            .map_err(|source| GitError::Io { operation, source })
+        let t = perf::start();
+        let (hard_timeout, stall_timeout) = self.effective_limits(operation);
+        let output = self.run_with_limits(path, operation, args, None, hard_timeout, stall_timeout);
+        perf::record_subprocess(
+            operation,
+            t,
+            output.as_ref().ok().and_then(|o| o.status.code()),
+        );
+        output
     }
 
     fn run_cancellable<I, S>(
@@ -828,35 +1901,118 @@ impl GitClient {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        if cancelled.load(Ordering::Acquire) {
+        let (hard_timeout, stall_timeout) = self.effective_limits(operation);
+        self.run_with_limits(
+            path,
+            operation,
+            args,
+            Some(cancelled),
+            hard_timeout,
+            stall_timeout,
+        )
+    }
+
+    fn run_with_limits<I, S>(
+        &self,
+        path: Option<&Path>,
+        operation: &'static str,
+        args: I,
+        cancelled: Option<&AtomicBool>,
+        hard_timeout: Duration,
+        stall_timeout: Option<Duration>,
+    ) -> Result<Output, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        if cancelled.is_some_and(|c| c.load(Ordering::Acquire)) {
             return Err(GitError::Cancelled);
         }
+        let start = Instant::now();
+        let last_activity_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        perf::record_spawn();
         let mut child = self
             .command(path, args)?
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|source| GitError::Io { operation, source })?;
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let act_out = last_activity_ms.clone();
+        let out_handle = stdout_pipe.map(|mut p| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = p.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    act_out.store(start.elapsed().as_millis() as u64, Ordering::Release);
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                buf
+            })
+        });
+        let act_err = last_activity_ms.clone();
+        let err_handle = stderr_pipe.map(|mut p| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = p.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    act_err.store(start.elapsed().as_millis() as u64, Ordering::Release);
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                buf
+            })
+        });
+
+        let mut poll_ms = 1u64;
         loop {
-            if cancelled.load(Ordering::Acquire) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(GitError::Cancelled);
-            }
             if let Some(status) = child
                 .try_wait()
                 .map_err(|source| GitError::Io { operation, source })?
             {
-                if cancelled.load(Ordering::Acquire) {
+                let stdout = out_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+                let stderr = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+                if cancelled.is_some_and(|c| c.load(Ordering::Acquire)) {
                     return Err(GitError::Cancelled);
                 }
                 return Ok(Output {
                     status,
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
+                    stdout,
+                    stderr,
                 });
             }
-            std::thread::sleep(Duration::from_millis(50));
+            if cancelled.is_some_and(|c| c.load(Ordering::Acquire)) {
+                kill_process_group(&mut child, self.termination_grace);
+                let _ = out_handle.map(|h| h.join());
+                let _ = err_handle.map(|h| h.join());
+                return Err(GitError::Cancelled);
+            }
+            let elapsed = start.elapsed();
+            let idle = elapsed.saturating_sub(Duration::from_millis(
+                last_activity_ms.load(Ordering::Acquire),
+            ));
+            let stalled = stall_timeout.is_some_and(|st| idle >= st);
+            if elapsed >= hard_timeout || stalled {
+                kill_process_group(&mut child, self.termination_grace);
+                let _ = out_handle.map(|h| h.join());
+                let _ = err_handle.map(|h| h.join());
+                return Err(GitError::TimedOut {
+                    operation,
+                    timeout: if stalled {
+                        stall_timeout.unwrap_or(hard_timeout)
+                    } else {
+                        hard_timeout
+                    },
+                });
+            }
+            std::thread::sleep(Duration::from_millis(poll_ms));
+            poll_ms = (poll_ms * 2).min(20);
         }
     }
 
@@ -865,7 +2021,16 @@ impl GitClient {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = Command::new(&self.executable);
+        let mut command = if self.low_io_priority {
+            background_io_command(&self.executable)
+        } else {
+            Command::new(&self.executable)
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
         if let Some(credential) = &self.credential {
             let helper = format!(
                 "!{} --git-credential-helper",
@@ -964,6 +2129,53 @@ impl GitClient {
     }
 }
 
+/// Platform abstraction to run background git subprocesses at throttled I/O priority.
+fn background_io_command(executable: &OsStr) -> Command {
+    #[cfg(target_os = "macos")]
+    {
+        let mut cmd = Command::new("/usr/sbin/taskpolicy");
+        cmd.arg("-b").arg(executable);
+        cmd
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut cmd = Command::new("ionice");
+        cmd.args(["-c", "3"]).arg(executable);
+        cmd
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        Command::new(executable)
+    }
+}
+
+/// Gracefully send SIGTERM to the entire process group, wait up to `grace`, then escalate to SIGKILL.
+fn kill_process_group(child: &mut Child, grace: Duration) {
+    #[cfg(unix)]
+    {
+        let pgid = child.id();
+        let _ = Command::new("/bin/kill")
+            .args(["-TERM", &format!("-{pgid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let deadline = Instant::now() + grace;
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &format!("-{pgid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn to_base64(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len() * 4 / 3 + 4);
@@ -1035,9 +2247,32 @@ fn paths_match(root: &str, requested: &Path) -> bool {
 }
 
 fn command_error(operation: &'static str, output: &Output) -> GitError {
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    let raw_line = stderr_text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("hint:"))
+        .map(|line| {
+            line.strip_prefix("fatal:")
+                .or_else(|| line.strip_prefix("error:"))
+                .map(str::trim)
+                .unwrap_or(line)
+        })
+        .unwrap_or("");
+    let detail = if raw_line.is_empty() {
+        None
+    } else {
+        let mut sanitized = redact_embedded_url_credentials(raw_line);
+        if sanitized.len() > 220 {
+            sanitized.truncate(220);
+            sanitized.push('…');
+        }
+        Some(sanitized)
+    };
     GitError::Command {
         operation,
         code: output.status.code(),
+        detail,
     }
 }
 
@@ -1046,6 +2281,176 @@ fn success(operation: &'static str, output: Output) -> Result<Output, GitError> 
         Ok(output)
     } else {
         Err(command_error(operation, &output))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn tests_fixture_temp_dir(tag: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("release-desk-git-{tag}-{}-{n}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dir
+}
+
+struct PorcelainV2Summary {
+    head_sha: Option<String>,
+    branch: Option<String>,
+    detached: bool,
+    upstream: Option<String>,
+    ab: Option<(u32, u32)>,
+    dirty_tracked: bool,
+    dirty_any: bool,
+    dirty_tracked_count: usize,
+    dirty_untracked_count: usize,
+    sample_dirty_paths: Vec<String>,
+}
+
+impl PorcelainV2Summary {
+    fn parse(text: &str) -> Self {
+        let mut out = Self {
+            head_sha: None,
+            branch: None,
+            detached: false,
+            upstream: None,
+            ab: None,
+            dirty_tracked: false,
+            dirty_any: false,
+            dirty_tracked_count: 0,
+            dirty_untracked_count: 0,
+            sample_dirty_paths: Vec::new(),
+        };
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("# branch.oid ") {
+                let sha = rest.trim();
+                if sha != "(initial)" && !sha.is_empty() {
+                    out.head_sha = Some(sha.to_string());
+                }
+            } else if let Some(rest) = line.strip_prefix("# branch.head ") {
+                let head = rest.trim();
+                if head == "(detached)" {
+                    out.detached = true;
+                } else if !head.is_empty() {
+                    out.branch = Some(head.to_string());
+                }
+            } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
+                let up = rest.trim();
+                if !up.is_empty() {
+                    out.upstream = Some(up.to_string());
+                }
+            } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
+                let mut parts = rest.split_whitespace();
+                let ahead = parts
+                    .next()
+                    .and_then(|s| s.strip_prefix('+'))
+                    .and_then(|s| s.parse::<u32>().ok());
+                let behind = parts
+                    .next()
+                    .and_then(|s| s.strip_prefix('-'))
+                    .and_then(|s| s.parse::<u32>().ok());
+                if let (Some(a), Some(b)) = (ahead, behind) {
+                    out.ab = Some((a, b));
+                }
+            } else if !line.is_empty() && !line.starts_with('#') {
+                if !line.starts_with("! ") {
+                    out.dirty_any = true;
+                }
+                if line.starts_with("1 ") || line.starts_with("2 ") || line.starts_with("u ") {
+                    out.dirty_tracked = true;
+                    out.dirty_tracked_count += 1;
+                    if out.sample_dirty_paths.len() < 3
+                        && let Some(path) = line.split('\t').next().and_then(|head| {
+                            if line.starts_with("2 ") {
+                                head.splitn(10, ' ').nth(9)
+                            } else if line.starts_with("u ") {
+                                head.splitn(11, ' ').nth(10)
+                            } else {
+                                head.splitn(9, ' ').nth(8)
+                            }
+                        })
+                        && !path.is_empty()
+                    {
+                        out.sample_dirty_paths.push(path.to_string());
+                    }
+                } else if let Some(path) = line.strip_prefix("? ") {
+                    out.dirty_untracked_count += 1;
+                    if out.sample_dirty_paths.len() < 3 && !path.is_empty() {
+                        out.sample_dirty_paths.push(path.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn dirty_detail_message(&self, orig_head_present: bool) -> String {
+        let mut parts = Vec::new();
+        if self.dirty_tracked_count > 0 {
+            let noun = if self.dirty_tracked_count == 1 {
+                "tracked file"
+            } else {
+                "tracked files"
+            };
+            parts.push(format!(
+                "{} modified/deleted {noun}",
+                self.dirty_tracked_count
+            ));
+        }
+        if self.dirty_untracked_count > 0 {
+            let noun = if self.dirty_untracked_count == 1 {
+                "untracked file"
+            } else {
+                "untracked files"
+            };
+            parts.push(format!("{} {noun}", self.dirty_untracked_count));
+        }
+        let mut msg = if parts.is_empty() {
+            "Commit or stash local modifications before pulling updates.".to_string()
+        } else if self.sample_dirty_paths.is_empty() {
+            format!("{} in working tree.", parts.join(", "))
+        } else {
+            format!(
+                "{} (e.g. {}).",
+                parts.join(", "),
+                self.sample_dirty_paths.join(", ")
+            )
+        };
+        if orig_head_present && self.dirty_tracked_count >= 10 {
+            msg.push_str(
+                " Interrupted merge/checkout detected (ORIG_HEAD present; working tree differs from HEAD).",
+            );
+        }
+        msg
+    }
+}
+
+fn destination_error_state(kind: DestinationKind) -> Option<CloneState> {
+    let mut state = CloneState::new(CloneStatus::Error);
+    match kind {
+        DestinationKind::Missing => Some(CloneState::new(CloneStatus::NotCloned)),
+        DestinationKind::EmptyDir => {
+            state.message = Some("Empty directory at repository destination".into());
+            Some(state)
+        }
+        DestinationKind::NonGitDir => {
+            state.message = Some("Path is not a Git working tree".into());
+            Some(state)
+        }
+        DestinationKind::WrongRoot { .. } => {
+            state.message = Some("Path is inside another Git working tree".into());
+            Some(state)
+        }
+        DestinationKind::Symlink(_) => {
+            state.message = Some("Repository path is a symbolic link".into());
+            Some(state)
+        }
+        DestinationKind::Unreadable(error) => {
+            state.message = Some(error);
+            Some(state)
+        }
+        DestinationKind::GitRepo => None,
     }
 }
 
@@ -1449,7 +2854,7 @@ mod tests {
     }
 
     #[test]
-    fn clone_only_refuses_existing_checkout_and_empty_directory() {
+    fn clone_only_refuses_existing_checkout_and_clones_into_empty_directory() {
         let fixture = Fixture::new();
         fixture.clone();
         fixture.push_new_commit();
@@ -1466,12 +2871,286 @@ mod tests {
         assert!(!fixture.clone.join("remote.txt").exists());
         let empty = fixture.root.join("empty");
         fs::create_dir(&empty).expect("empty directory");
+        let outcome = client
+            .clone_only(fixture.remote.to_str().expect("path"), &empty, "main")
+            .expect("empty dir should be clonable");
+        assert!(matches!(outcome, SyncOutcome::Cloned { .. }));
+        assert!(empty.join(".git").is_dir());
+        assert!(empty.join("README.md").is_file());
+    }
+
+    #[test]
+    fn destination_classifier_covers_every_path_state() {
+        let fixture = Fixture::new();
+        let missing = fixture.root.join("missing");
+        assert_eq!(
+            classify_destination(&fixture.root, &missing),
+            DestinationKind::Missing
+        );
+
+        let empty = fixture.root.join("empty");
+        fs::create_dir(&empty).unwrap();
+        assert_eq!(
+            classify_destination(&fixture.root, &empty),
+            DestinationKind::EmptyDir
+        );
+
+        let non_git = fixture.root.join("nongit");
+        fs::create_dir(&non_git).unwrap();
+        fs::write(non_git.join("notes.txt"), "keep").unwrap();
+        assert_eq!(
+            classify_destination(&fixture.root, &non_git),
+            DestinationKind::NonGitDir
+        );
+
+        fixture.clone();
+        assert_eq!(
+            classify_destination(&fixture.root, &fixture.clone),
+            DestinationKind::GitRepo
+        );
+
+        let nested = fixture.clone.join("sub");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("file.txt"), "inside parent").unwrap();
+        assert!(matches!(
+            classify_destination(&fixture.root, &nested),
+            DestinationKind::WrongRoot { .. }
+        ));
+
+        let outside = fixture.root.parent().unwrap().join("outside");
+        assert!(matches!(
+            classify_destination(&fixture.root, &outside),
+            DestinationKind::Unreadable(_)
+        ));
+
+        #[cfg(unix)]
+        {
+            let broken = fixture.root.join("broken-link");
+            std::os::unix::fs::symlink(fixture.root.join("nowhere"), &broken).unwrap();
+            assert_eq!(
+                classify_destination(&fixture.root, &broken),
+                DestinationKind::Symlink(SymlinkState::Broken)
+            );
+
+            let valid = fixture.root.join("valid-link");
+            std::os::unix::fs::symlink(&fixture.clone, &valid).unwrap();
+            assert_eq!(
+                classify_destination(&fixture.root, &valid),
+                DestinationKind::Symlink(SymlinkState::Valid)
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_clone_cleans_partial_on_failure_cancel_panic_and_handles_empty_remote() {
+        let fixture = Fixture::new();
+        let client = GitClient::new();
+        let target = fixture.root.join("owner").join("demo");
+
+        // Failure leaves no target dir and no .partial dir
         assert!(
             client
-                .clone_only(fixture.remote.to_str().expect("path"), &empty, "main")
+                .clone_atomic_cancellable(
+                    &fixture.root,
+                    "/nonexistent/remote.git",
+                    &target,
+                    "main",
+                    false,
+                    &AtomicBool::new(false),
+                    |_| {}
+                )
                 .is_err()
         );
-        assert!(empty.is_dir());
+        assert!(!target.exists());
+        let parent = target.parent().unwrap();
+        assert!(fs::read_dir(parent).unwrap().all(|e| {
+            !e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".partial")
+        }));
+
+        // Pre-cancelled clone leaves no .partial dir
+        assert!(matches!(
+            client.clone_atomic_cancellable(
+                &fixture.root,
+                fixture.remote.to_str().unwrap(),
+                &target,
+                "main",
+                false,
+                &AtomicBool::new(true),
+                |_| {}
+            ),
+            Err(GitError::Cancelled)
+        ));
+        assert!(!target.exists());
+
+        // Panic while PartialCloneGuard is armed cleans only marked dir
+        let partial = parent.join("demo.partial-panic");
+        fs::create_dir_all(&partial).unwrap();
+        fs::write(partial.join(PARTIAL_MARKER), b"marker").unwrap();
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = PartialCloneGuard::new(partial.clone());
+            panic!("simulated panic");
+        });
+        assert!(!partial.exists());
+
+        // Empty remote returns SyncOutcome::Cloned instead of Skipped
+        let empty_remote = fixture.root.join("empty-remote.git");
+        git(
+            &fixture.root,
+            &[
+                "init",
+                "--bare",
+                "-b",
+                "main",
+                empty_remote.to_str().unwrap(),
+            ],
+        );
+        let outcome = client
+            .clone_atomic_cancellable(
+                &fixture.root,
+                empty_remote.to_str().unwrap(),
+                &target,
+                "main",
+                false,
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .expect("empty remote should clone cleanly");
+        assert_eq!(
+            outcome,
+            SyncOutcome::Cloned {
+                revision: String::new()
+            }
+        );
+        assert!(target.join(".git").is_dir());
+
+        // Stale partial cleanup requires marker + dead PID + minimum age
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let stale_old_dead = parent.join("x.partial-dead-old");
+        fs::create_dir_all(&stale_old_dead).unwrap();
+        fs::write(
+            stale_old_dead.join(PARTIAL_MARKER),
+            format_partial_marker(999_999, now_secs.saturating_sub(600)),
+        )
+        .unwrap();
+
+        let young_dead = parent.join("x.partial-dead-young");
+        fs::create_dir_all(&young_dead).unwrap();
+        fs::write(
+            young_dead.join(PARTIAL_MARKER),
+            format_partial_marker(999_999, now_secs),
+        )
+        .unwrap();
+
+        let live_old = parent.join("x.partial-live-old");
+        fs::create_dir_all(&live_old).unwrap();
+        fs::write(
+            live_old.join(PARTIAL_MARKER),
+            format_partial_marker(std::process::id(), now_secs.saturating_sub(600)),
+        )
+        .unwrap();
+
+        let user_dir = parent.join("user.partial-keep");
+        fs::create_dir_all(&user_dir).unwrap();
+
+        assert_eq!(
+            cleanup_stale_partial_clones(std::slice::from_ref(&fixture.root)),
+            1
+        );
+        assert!(!stale_old_dead.exists());
+        assert!(young_dead.exists(), "young partial dir must not be deleted");
+        assert!(
+            live_old.exists(),
+            "live-PID partial dir must not be deleted"
+        );
+        assert!(user_dir.exists(), "unmarked dir must not be deleted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_and_cancel_kill_entire_git_process_group() {
+        let fixture = Fixture::new();
+        let pid_file = fixture.root.join("child_sleep.pid");
+        let alias = format!(
+            "alias.hang=!sh -c 'sleep 30 & echo $! > {}; wait'",
+            shell_quote(pid_file.to_str().unwrap())
+        );
+
+        // 1. Timeout kills parent AND spawned `sleep 30` grandchild.
+        let timed = GitClient::new().with_timeout(Duration::from_millis(250));
+        let err = timed
+            .run(Some(&fixture.root), "test timeout", ["-c", &alias, "hang"])
+            .unwrap_err();
+        assert!(
+            matches!(err, GitError::TimedOut { .. }),
+            "expected TimedOut, got {err:?}"
+        );
+        std::thread::sleep(Duration::from_millis(80));
+        let grandchild_pid: u32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !is_pid_alive(grandchild_pid),
+            "grandchild sleep process {grandchild_pid} survived timeout kill!"
+        );
+
+        // 2. Cancellation kills parent AND spawned `sleep 30` grandchild.
+        let _ = fs::remove_file(&pid_file);
+        let cancel = AtomicBool::new(false);
+        let pid_file_wait = pid_file.clone();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for _ in 0..50 {
+                    if pid_file_wait.exists() {
+                        std::thread::sleep(Duration::from_millis(50));
+                        cancel.store(true, Ordering::Release);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            });
+            let client = GitClient::new().with_timeout(Duration::from_secs(10));
+            let res = client.run_cancellable(
+                Some(&fixture.root),
+                "test cancel",
+                ["-c", &alias, "hang"],
+                &cancel,
+            );
+            assert!(matches!(res, Err(GitError::Cancelled)), "got {res:?}");
+        });
+        std::thread::sleep(Duration::from_millis(80));
+        let cancelled_pid: u32 = fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !is_pid_alive(cancelled_pid),
+            "grandchild sleep process {cancelled_pid} survived cancel kill!"
+        );
+    }
+
+    #[test]
+    fn redacts_url_credentials_in_logs() {
+        let raw = "fatal: could not access 'https://alice:ghp_secret123@github.com/org/repo.git/'";
+        let clean = redact_url_credentials(raw);
+        assert!(!clean.contains("alice"));
+        assert!(!clean.contains("ghp_secret123"));
+        assert!(clean.contains("https://<redacted>@github.com/org/repo.git/"));
+    }
+
+    #[test]
+    fn parses_git_clone_progress_percent() {
+        let p = parse_git_progress("Receiving objects:  45% (10/22), 1.2 MiB | 3.0 MiB/s").unwrap();
+        assert_eq!(p.percent, Some(45));
+        assert!(parse_git_progress("   ").is_none());
     }
 
     #[test]
@@ -1578,5 +3257,289 @@ mod tests {
         assert_eq!(commits[0].message, "initial");
         assert!(!commits[0].short_hash.is_empty());
         assert!(!commits[0].hash.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn c5_sigterm_grace_progressing_transfer_and_fetch_kill_leave_no_locks() {
+        let fixture = Fixture::new();
+        fixture.clone();
+        fixture.push_new_commit();
+
+        // 1. Slow progressing transfer (emits stderr bytes every 80ms for ~800ms, exceeding 400ms stall)
+        // MUST NOT be killed when progress bytes keep arriving before each 400ms silence window!
+        let slow_script = fixture.root.join("git-slow-progress");
+        let trace_log = fixture.root.join("slow_trace.log");
+        let real_git = [
+            "/opt/homebrew/bin/git",
+            "/usr/local/bin/git",
+            "/usr/bin/git",
+        ]
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+        .unwrap_or("git");
+        let trace_s = trace_log.display();
+        fs::write(
+            &slow_script,
+            format!(
+                "#!/usr/bin/perl\nuse strict;\nexit 0 if $ENV{{WARM}};\nopen(my $log, '>>', \"{trace_s}\");\nselect((select($log), $|=1)[0]);\nselect(STDERR);\n$| = 1;\nprint $log \"started\\n\";\nfor my $i (1..10) {{\n  print STDERR \"remote: Compressing objects: $i\\n\";\n  print $log \"wrote $i\\n\";\n  select(undef, undef, undef, 0.08);\n}}\nprint $log \"exec git\\n\";\nexec(\"{real_git}\", @ARGV) or die $!;\n"
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut perms = fs::metadata(&slow_script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&slow_script, perms).unwrap();
+        }
+        // Warm macOS first-exec verification on newly created script before timed run.
+        let _ = Command::new(&slow_script).env("WARM", "1").output();
+        let progressing_client = GitClient {
+            executable: slow_script.into_os_string(),
+            stall_timeout: Some(Duration::from_millis(400)),
+            ..GitClient::new()
+        };
+        let res = progressing_client.fetch(&fixture.clone);
+        let trace_contents = fs::read_to_string(&trace_log).unwrap_or_default();
+        assert!(
+            res.is_ok(),
+            "progressing transfer must not be killed by stall timeout, got: {res:?}; trace:\n{trace_contents}"
+        );
+
+        // 2. Stalled transfer against a local remote killed cleanly via SIGTERM -> grace -> SIGKILL leaves no lock files.
+        fs::write(fixture.source.join("remote2.txt"), "remote change 2\n").unwrap();
+        git(&fixture.source, &["add", "remote2.txt"]);
+        git(&fixture.source, &["commit", "-m", "remote change 2"]);
+        git(&fixture.source, &["push", "origin", "main"]);
+        let stalled_script = fixture.root.join("git-stalled-fetch");
+        fs::write(
+            &stalled_script,
+            format!(
+                "#!/bin/sh\nif [ \"$WARM\" = \"1\" ]; then exit 0; fi\nif [ \"$1\" = \"fetch\" ]; then\n  sleep 30 & wait\n  exit 0\nfi\nexec \"{real_git}\" \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut perms = fs::metadata(&stalled_script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&stalled_script, perms).unwrap();
+        }
+        let _ = Command::new(&stalled_script).env("WARM", "1").output();
+        let stalled_client = GitClient {
+            executable: stalled_script.into_os_string(),
+            stall_timeout: Some(Duration::from_millis(120)),
+            termination_grace: Duration::from_millis(120),
+            ..GitClient::new()
+        };
+        let err = stalled_client.fetch(&fixture.clone).unwrap_err();
+        assert!(matches!(err, GitError::TimedOut { .. }));
+        assert!(
+            detect_stale_locks(&fixture.clone).is_empty(),
+            "killing a stalled fetch must leave no stale .lock files behind"
+        );
+
+        // 3. Stale lock detection finds locks without removing them until explicit confirmation.
+        let lock = fixture.clone.join(".git/index.lock");
+        fs::write(&lock, "").unwrap();
+        let ref_lock = fixture.clone.join(".git/refs/heads/main.lock");
+        fs::write(&ref_lock, "").unwrap();
+        let found = detect_stale_locks(&fixture.clone);
+        assert_eq!(found.len(), 2);
+        assert!(lock.exists() && ref_lock.exists());
+        assert_eq!(remove_stale_locks_explicit(&fixture.clone).unwrap(), 2);
+        assert!(detect_stale_locks(&fixture.clone).is_empty());
+    }
+
+    #[test]
+    fn phase5_porcelain_v2_collapses_subprocesses_and_falls_back_on_custom_upstream() {
+        perf::set_enabled(true);
+        let fixture = Fixture::new();
+        fixture.clone();
+        let client = GitClient::new();
+
+        // 1. Clean default branch tracking origin/main -> 1 subprocess total!
+        let sub_before = perf::reset_subprocess_counter();
+        let (state, ahead, behind, dirty) = client
+            .inspect_refs_and_dirty_uno(&fixture.clone, "main")
+            .unwrap();
+        let (subs, _) = perf::subprocess_delta(sub_before);
+        assert_eq!(state.status, CloneStatus::Current);
+        assert_eq!((ahead, behind, dirty), (Some(0), Some(0), false));
+        assert_eq!(subs, 1, "clean matching upstream must take 1 subprocess");
+
+        // 2. Tracked change + untracked file -> dirty_tracked = true with -uno in 1 subprocess.
+        fs::write(fixture.clone.join("untracked.tmp"), "ignore me\n").unwrap();
+        let (s2, _, _, d2) = client
+            .inspect_refs_and_dirty_uno(&fixture.clone, "main")
+            .unwrap();
+        assert!(
+            !d2,
+            "-uno must treat untracked-only file as clean tracked state"
+        );
+        assert_eq!(s2.status, CloneStatus::Current);
+        fs::write(fixture.clone.join("README.md"), "modified\n").unwrap();
+        let sub_before_d = perf::reset_subprocess_counter();
+        let (s3, _, _, d3) = client
+            .inspect_refs_and_dirty_uno(&fixture.clone, "main")
+            .unwrap();
+        assert!(d3);
+        assert_eq!(s3.status, CloneStatus::Current);
+        assert_eq!(perf::subprocess_delta(sub_before_d).0, 1);
+
+        // 3. Unset/custom upstream falls back cleanly to rev-parse + rev-list against origin/main!
+        git(&fixture.clone, &["checkout", "--", "README.md"]);
+        git(&fixture.clone, &["branch", "--unset-upstream", "main"]);
+        fixture.push_new_commit();
+        git(&fixture.clone, &["fetch", "origin"]);
+        let (s4, a4, b4, d4) = client
+            .inspect_refs_and_dirty_uno(&fixture.clone, "main")
+            .unwrap();
+        assert_eq!(s4.status, CloneStatus::Behind);
+        assert_eq!((a4, b4, d4), (Some(0), Some(1), false));
+
+        // 4. fetch_verified on clean matching upstream uses <= 3 subprocesses (down from 12-15).
+        git(&fixture.clone, &["merge", "--ff-only", "origin/main"]);
+        git(
+            &fixture.clone,
+            &["branch", "--set-upstream-to=origin/main", "main"],
+        );
+        let sub_before_f = perf::reset_subprocess_counter();
+        let fstate = client
+            .fetch_verified(fixture.remote.to_str().unwrap(), &fixture.clone, "main")
+            .unwrap();
+        let (fsubs, _) = perf::subprocess_delta(sub_before_f);
+        assert_eq!(fstate.status, CloneStatus::Current);
+        assert!(
+            fsubs <= 3,
+            "fetch_verified should run <= 3 subprocesses, got {fsubs}"
+        );
+    }
+
+    #[test]
+    fn d5_porcelain_v2_dirty_detached_other_no_upstream_unborn_empty_remote() {
+        let fixture = Fixture::new();
+        fixture.clone();
+        let client = GitClient::new();
+        let remote_str = fixture.remote.to_str().unwrap();
+
+        // 1. dirty+behind: tracked edit + upstream commit -> both inspect() and inspect_refs_and_dirty_uno()
+        // MUST report remote_revision and ahead=Some(0), behind=Some(1) against origin/main.
+        fixture.push_new_commit();
+        git(&fixture.clone, &["fetch", "origin"]);
+        fs::write(fixture.clone.join("README.md"), "dirty edit\n").unwrap();
+        let (st_uno, a_uno, b_uno, dirty_uno) = client
+            .inspect_refs_and_dirty_uno(&fixture.clone, "main")
+            .unwrap();
+        assert_eq!(st_uno.status, CloneStatus::Behind);
+        assert_eq!((a_uno, b_uno, dirty_uno), (Some(0), Some(1), true));
+        let (st_full, a_full, b_full, dirty_full) = client
+            .inspect_porcelain_v2_inner(&fixture.clone, "main", true, true)
+            .unwrap();
+        assert_eq!(st_full.status, CloneStatus::Dirty);
+        assert_eq!((a_full, b_full, dirty_full), (Some(0), Some(1), true));
+        assert!(st_full.remote_revision.is_some());
+
+        // 2. dirty+ahead: clean ff, make 1 local ahead commit + tracked edit.
+        git(&fixture.clone, &["checkout", "--", "README.md"]);
+        git(&fixture.clone, &["merge", "--ff-only", "origin/main"]);
+        fs::write(fixture.clone.join("local.txt"), "local ahead\n").unwrap();
+        git(&fixture.clone, &["add", "local.txt"]);
+        git(&fixture.clone, &["commit", "-m", "local ahead"]);
+        fs::write(fixture.clone.join("README.md"), "dirty ahead\n").unwrap();
+        let (st_ua, a_ua, b_ua, dirty_ua) = client
+            .inspect_refs_and_dirty_uno(&fixture.clone, "main")
+            .unwrap();
+        assert_eq!(st_ua.status, CloneStatus::Ahead);
+        assert_eq!((a_ua, b_ua, dirty_ua), (Some(1), Some(0), true));
+        let (st_fa, a_fa, b_fa, dirty_fa) = client
+            .inspect_porcelain_v2_inner(&fixture.clone, "main", true, true)
+            .unwrap();
+        assert_eq!(st_fa.status, CloneStatus::Dirty);
+        assert_eq!((a_fa, b_fa, dirty_fa), (Some(1), Some(0), true));
+
+        // 3. detached HEAD (at HEAD~1 while origin/main is 1 behind HEAD -> 0 ahead, 0 behind origin/main)
+        git(&fixture.clone, &["checkout", "--", "README.md"]);
+        git(&fixture.clone, &["checkout", "--detach", "origin/main"]);
+        let (st_det, a_det, b_det, _) = client
+            .inspect_refs_and_dirty_uno(&fixture.clone, "main")
+            .unwrap();
+        assert_eq!(st_det.status, CloneStatus::Detached);
+        assert!(st_det.branch.is_none());
+        assert_eq!((a_det, b_det), (Some(0), Some(0)));
+
+        // 4. non-default branch WITH its own tracked upstream `origin/feature` at +0 -0,
+        // while `origin/main` moved ahead by 1 -> MUST measure against origin/main (behind=1), NOT origin/feature!
+        git(&fixture.clone, &["switch", "-c", "feature"]);
+        git(&fixture.clone, &["push", "-u", "origin", "feature"]);
+        fs::write(fixture.source.join("remote2.txt"), "remote change 2\n").unwrap();
+        git(&fixture.source, &["add", "remote2.txt"]);
+        git(&fixture.source, &["commit", "-m", "remote change 2"]);
+        git(&fixture.source, &["push", "origin", "main"]);
+        git(&fixture.clone, &["fetch", "origin"]);
+        let (st_oth, a_oth, b_oth, _) = client
+            .inspect_refs_and_dirty_uno(&fixture.clone, "main")
+            .unwrap();
+        assert_eq!(st_oth.status, CloneStatus::OtherBranch);
+        assert_eq!(st_oth.branch.as_deref(), Some("feature"));
+        assert_eq!((a_oth, b_oth), (Some(0), Some(1)));
+
+        // 5. no upstream on default branch `main` (reset main back to origin/main~1 and unset upstream)
+        git(&fixture.clone, &["switch", "main"]);
+        git(&fixture.clone, &["reset", "--hard", "origin/main~1"]);
+        git(&fixture.clone, &["branch", "--unset-upstream", "main"]);
+        let (st_nou, a_nou, b_nou, _) = client
+            .inspect_refs_and_dirty_uno(&fixture.clone, "main")
+            .unwrap();
+        assert_eq!(st_nou.status, CloneStatus::Behind);
+        assert_eq!((a_nou, b_nou), (Some(0), Some(1)));
+
+        // 6. unborn branch with non-empty remote
+        let unborn = fixture.root.join("unborn");
+        git(
+            &fixture.root,
+            &["init", "-b", "main", unborn.to_str().unwrap()],
+        );
+        git(&unborn, &["remote", "add", "origin", remote_str]);
+        git(&unborn, &["fetch", "origin"]);
+        let (st_unb, a_unb, b_unb, _) = client.inspect_refs_and_dirty_uno(&unborn, "main").unwrap();
+        assert_eq!(st_unb.status, CloneStatus::Error);
+        assert!(st_unb.local_revision.is_none());
+        assert!(st_unb.remote_revision.is_some());
+        assert_eq!((a_unb, b_unb), (None, None));
+
+        // 7a. empty remote + unborn local checkout
+        let empty_local = fixture.root.join("empty-local");
+        let empty_remote = fixture.root.join("empty-remote");
+        git(
+            &fixture.root,
+            &["init", "--bare", empty_remote.to_str().unwrap()],
+        );
+        git(
+            &fixture.root,
+            &["init", "-b", "main", empty_local.to_str().unwrap()],
+        );
+        git(
+            &empty_local,
+            &["remote", "add", "origin", empty_remote.to_str().unwrap()],
+        );
+        let _ = client.fetch(&empty_local);
+        let (st_emp, a_emp, b_emp, _) = client
+            .inspect_refs_and_dirty_uno(&empty_local, "main")
+            .unwrap();
+        assert_eq!(st_emp.status, CloneStatus::Current);
+        assert_eq!((a_emp, b_emp), (None, None));
+
+        // 7b. committed local + empty remote -> Error ("online branch main is unavailable"), (None, None)
+        fs::write(empty_local.join("first.txt"), "one\n").unwrap();
+        git(&empty_local, &["add", "first.txt"]);
+        git(&empty_local, &["commit", "-m", "first"]);
+        let (st_emp2, a_emp2, b_emp2, _) = client
+            .inspect_refs_and_dirty_uno(&empty_local, "main")
+            .unwrap();
+        assert_eq!(st_emp2.status, CloneStatus::Error);
+        assert!(st_emp2.local_revision.is_some());
+        assert!(st_emp2.remote_revision.is_none());
+        assert_eq!((a_emp2, b_emp2), (None, None));
     }
 }

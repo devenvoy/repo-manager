@@ -23,10 +23,12 @@ pub fn render_project_workspace<
     FImport: Fn(&mut T, &mut Window, &mut Context<T>) + Copy + 'static,
     FClearCache: Fn(&mut T, &mut Context<T>) + Copy + 'static,
     FRecreateIcons: Fn(&mut T, &mut Context<T>) + Copy + 'static,
+    FToggleStaleRefresh: Fn(&mut T, &mut Context<T>) + Copy + 'static,
 >(
     project: &WorkspaceProject,
     section: ProjectSection,
     delete_confirm: bool,
+    auto_refresh_stale_index: bool,
     cache_status: Option<&crate::controllers::git_controller::ProjectCacheStatus>,
     section_content: Option<AnyElement>,
     cx: &Context<T>,
@@ -37,6 +39,7 @@ pub fn render_project_workspace<
     on_import: FImport,
     on_clear_cache: FClearCache,
     on_recreate_icons: FRecreateIcons,
+    on_toggle_stale_refresh: FToggleStaleRefresh,
 ) -> impl IntoElement {
     let cache_status = cache_status.filter(|status| status.project_id == project.id);
     let cache_running = cache_status.is_some_and(|status| status.running);
@@ -159,6 +162,28 @@ pub fn render_project_workspace<
                         ))
                         .child(div().text_size(px(12.)).child(status.detail.clone())))
                 }))
+            .child(div()
+                .pt_4()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(div().text_size(px(16.)).font_bold().child("Background index refresh"))
+                .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground)
+                    .child("Off by default. When enabled, Release Desk runs low-priority 'git update-index --refresh' at most once every 6 hours on repositories with suspected stale stat caches (never modifies repo git config)."))
+                .child(
+                    Button::new("toggle-auto-refresh-stale-index")
+                        .label(if auto_refresh_stale_index {
+                            "Auto-refresh slow stale indexes: On"
+                        } else {
+                            "Auto-refresh slow stale indexes: Off"
+                        })
+                        .outline()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            on_toggle_stale_refresh(this, cx)
+                        })),
+                ))
             .child(div().pt_4().border_t_1().border_color(cx.theme().border).text_size(px(16.)).font_bold().child("Delete project"))
             .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground).child("Remove this project from Release Desk. The directory and its files stay on disk."))
             .child(Button::new("delete-project").label(if delete_confirm { "Confirm: remove project" } else { "Delete project" }).on_click(cx.listener(move |this, _, _, cx| on_delete(this, cx))))
@@ -231,7 +256,17 @@ pub fn render_project_workspace<
             .p_6()
             .child(top_header)
             .child(tabs)
-            .child(div().flex().flex_col().flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .size_full()
+                    .overflow_hidden()
+                    .child(body),
+            )
             .into_any_element()
     }
 }

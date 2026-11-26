@@ -15,8 +15,8 @@ use gpui_kit::component::input::InputState;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _, Window,
-    div,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, Styled as _, Window, div,
 };
 use release_desk_application::event::EventBroadcaster;
 use release_desk_application::use_case::auth::AuthenticateProviderUseCase;
@@ -33,6 +33,27 @@ pub(crate) enum NavLocation {
     AppStore,
     AppDetail(String),
     Settings,
+}
+
+#[derive(Clone)]
+pub struct SchedulerConfig {
+    pub clock: Arc<dyn crate::modules::scheduler_service::Clock>,
+    pub focus_cooldown: std::time::Duration,
+    pub check_interval: std::time::Duration,
+    pub startup_delay: std::time::Duration,
+    pub auto_start: bool,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            clock: Arc::new(crate::modules::scheduler_service::SystemClock),
+            focus_cooldown: crate::modules::scheduler_service::DEFAULT_FOCUS_COOLDOWN,
+            check_interval: crate::modules::scheduler_service::DEFAULT_CHECK_INTERVAL,
+            startup_delay: std::time::Duration::from_millis(25),
+            auto_start: !cfg!(test),
+        }
+    }
 }
 
 pub struct ReleaseDesk {
@@ -57,13 +78,15 @@ pub struct ReleaseDesk {
     pub(crate) repo_search: Entity<InputState>,
     pub(crate) repository_action_confirmation: Entity<InputState>,
     pub(crate) repository_action_dialog: Option<(
-        usize,
-        usize,
+        crate::workspace_sources::RepoKey,
         views::project_repository_status::RepositoryAction,
     )>,
     pub(crate) source_dialog: views::project_sources::SourceDialog,
     pub(crate) source_busy: bool,
-    pub(crate) source_destinations: std::collections::HashMap<(usize, usize), bool>,
+    pub(crate) source_destinations: std::collections::HashMap<
+        crate::workspace_sources::RepoKey,
+        release_desk_git::DestinationKind,
+    >,
     pub(crate) source_destination_pending: bool,
     pub(crate) source_destination_revision: u64,
     pub(crate) store_items: Vec<crate::store_catalog::StoreApp>,
@@ -81,30 +104,27 @@ pub struct ReleaseDesk {
     pub(crate) store_probe_revision: u64,
     pub(crate) store_activities:
         std::collections::HashMap<String, crate::controllers::store_controller::StoreActivity>,
-    pub(crate) git_statuses: Vec<crate::repository_git::RepositoryStatus>,
-    pub(crate) git_check_completed: usize,
-    pub(crate) git_check_total: usize,
-    pub(crate) git_activity: Option<crate::controllers::git_controller::GitActivity>,
-    pub(crate) git_pending: std::collections::HashSet<(usize, usize)>,
-    pub(crate) repository_presentations: std::collections::HashMap<
-        (usize, usize),
-        views::project_repository_status::RepositoryPresentation,
-    >,
-    pub(crate) selected_repository: Option<(usize, usize)>,
-    pub(crate) languages_expanded: std::collections::HashSet<(usize, usize)>,
-    pub(crate) language_breakdowns: std::collections::HashMap<
-        (usize, usize),
-        views::project_repository_status::LanguageBreakdownState,
-    >,
+    pub(crate) jobs: crate::controllers::job_registry::JobRegistry,
+    pub(crate) repo_cache: Option<Arc<crate::modules::repo_cache::RepoCache>>,
+    pub(crate) volume_limiter: Arc<crate::modules::scheduler_service::VolumeConcurrencyLimiter>,
+    pub(crate) trigger_coalescer: crate::modules::scheduler_service::TriggerCoalescer,
+    pub(crate) scheduler_config: SchedulerConfig,
+    pub(crate) visible_repo_keys:
+        Arc<std::sync::Mutex<std::collections::HashSet<crate::workspace_sources::RepoKey>>>,
+    pub(crate) scheduler_batches_started: usize,
+    pub(crate) focus_handle: gpui_kit::FocusHandle,
+    pub(crate) repo_list_scroll: gpui_kit::UniformListScrollHandle,
+    pub(crate) repo_detail_scroll: gpui_kit::ScrollHandle,
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) menu_bar: gpui_kit::Entity<gpui_kit::component::menu::AppMenuBar>,
     pub(crate) commits_collapsed: bool,
     pub(crate) selected_editor_id: String,
     pub(crate) available_editors: Vec<views::project_repository_status::ExternalEditor>,
     pub(crate) editor_menu_open: bool,
-    pub(crate) git_busy: bool,
-    pub(crate) git_queue_busy: bool,
     pub(crate) git_update_queue: Vec<crate::git_update_queue::GitUpdateJob>,
     pub(crate) git_update_queue_open: bool,
     pub(crate) git_update_project_id: Option<u128>,
+    pub(crate) git_update_queue_scroll: gpui_kit::ScrollHandle,
     pub(crate) project_cache_status: Option<crate::controllers::git_controller::ProjectCacheStatus>,
     pub(crate) workspace_revision: u64,
     pub(crate) workspace_cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -114,11 +134,15 @@ pub struct ReleaseDesk {
     pub(crate) release_downloading: std::collections::HashSet<String>,
     pub(crate) release_queue: Vec<crate::release_queue::DownloadJob>,
     pub(crate) release_queue_open: bool,
+    pub(crate) release_queue_scroll: gpui_kit::ScrollHandle,
     pub(crate) release_type_busy: bool,
     pub(crate) release_type_menu_open: bool,
     pub(crate) release_scroll_handle: gpui_kit::ScrollHandle,
     pub(crate) release_scroll_generation: std::rc::Rc<std::cell::Cell<u64>>,
     pub(crate) message: String,
+    pub(crate) pending_toast: Option<crate::controllers::job_registry::StatusToast>,
+    #[allow(dead_code)]
+    pub(crate) last_toast: Option<crate::controllers::job_registry::StatusToast>,
     last_notified_message: String,
     pub(crate) nav_history: Vec<NavLocation>,
     pub(crate) nav_index: usize,
@@ -216,21 +240,21 @@ pub(crate) fn find_webview_binary() -> Option<std::path::PathBuf> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ProjectLoadAction {
+pub(crate) enum ProjectLoadAction {
     None,
-    Inspect,
     Releases,
 }
 
-fn project_load_action(
+pub(crate) fn project_load_action(
     section: ProjectSection,
-    git_busy: bool,
-    no_status: bool,
+    _git_busy: bool,
+    _no_status: bool,
     release_busy: bool,
     releases_not_loaded: bool,
 ) -> ProjectLoadAction {
+    // Repositories paints cached state immediately (<100ms) and NEVER auto-runs inspect/fetch on tab visit;
+    // revalidation runs from the project-scoped scheduler (startup, focus, 15m interval, or manual Check now).
     match section {
-        ProjectSection::Repositories if !git_busy && no_status => ProjectLoadAction::Inspect,
         ProjectSection::Releases if !release_busy && releases_not_loaded => {
             ProjectLoadAction::Releases
         }
@@ -240,6 +264,14 @@ fn project_load_action(
 
 impl ReleaseDesk {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_config(SchedulerConfig::default(), window, cx)
+    }
+
+    pub fn new_with_config(
+        scheduler_config: SchedulerConfig,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (settings, mut message) = match settings::load() {
             Ok(settings) => (settings, String::new()),
             Err(error) => (Settings::default(), error),
@@ -352,7 +384,7 @@ impl ReleaseDesk {
             }
         })
         .detach();
-        let app = Self {
+        let mut app = Self {
             settings,
             projects,
             tab,
@@ -392,24 +424,43 @@ impl ReleaseDesk {
             store_install_states: Default::default(),
             store_probe_revision: 0,
             store_activities: Default::default(),
-            git_statuses: Vec::new(),
-            git_check_completed: 0,
-            git_check_total: 0,
-            git_activity: None,
-            git_pending: Default::default(),
-            repository_presentations: Default::default(),
-            selected_repository: None,
-            languages_expanded: Default::default(),
-            language_breakdowns: Default::default(),
+            jobs: Default::default(),
+            repo_cache: {
+                #[cfg(test)]
+                {
+                    None
+                }
+                #[cfg(not(test))]
+                {
+                    crate::modules::repo_cache::RepoCache::open_default()
+                        .ok()
+                        .map(Arc::new)
+                }
+            },
+            volume_limiter: Arc::new(
+                crate::modules::scheduler_service::VolumeConcurrencyLimiter::with_clock(
+                    scheduler_config.clock.clone(),
+                ),
+            ),
+            trigger_coalescer: crate::modules::scheduler_service::TriggerCoalescer::new(
+                scheduler_config.clock.clone(),
+            ),
+            scheduler_config,
+            visible_repo_keys: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            scheduler_batches_started: 0,
+            focus_handle: cx.focus_handle(),
+            repo_list_scroll: gpui_kit::UniformListScrollHandle::new(),
+            repo_detail_scroll: gpui_kit::ScrollHandle::new(),
+            #[cfg(not(target_os = "macos"))]
+            menu_bar: gpui_kit::component::menu::AppMenuBar::new(cx),
             commits_collapsed: false,
             selected_editor_id,
             available_editors: Vec::new(),
             editor_menu_open: false,
-            git_busy: false,
-            git_queue_busy: false,
             git_update_queue: Vec::new(),
             git_update_queue_open: false,
             git_update_project_id: None,
+            git_update_queue_scroll: gpui_kit::ScrollHandle::new(),
             project_cache_status: None,
             workspace_revision: 0,
             workspace_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -419,11 +470,14 @@ impl ReleaseDesk {
             release_downloading: Default::default(),
             release_queue: Vec::new(),
             release_queue_open: false,
+            release_queue_scroll: gpui_kit::ScrollHandle::new(),
             release_type_busy: false,
             release_type_menu_open: false,
             release_scroll_handle: gpui_kit::ScrollHandle::new(),
             release_scroll_generation: std::rc::Rc::new(std::cell::Cell::new(0)),
             message,
+            pending_toast: None,
+            last_toast: None,
             last_notified_message: String::new(),
             nav_history: vec![initial_loc],
             nav_index: 0,
@@ -442,11 +496,29 @@ impl ReleaseDesk {
             last_browser_open: None,
             import_dialog: None,
         };
+        app.hydrate_all_projects_from_cache();
         app.apply_appearance(window, cx);
+        app.focus_handle.focus(window, cx);
+        cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.on_window_focus(cx);
+            }
+        })
+        .detach();
+        if app.scheduler_config.auto_start {
+            app.start_scheduler_loop(window, cx);
+        }
         cx.spawn_in(window, async move |this, cx| {
             let _ = this.update_in(cx, |this, _, cx| this.refresh_store_install_states(cx));
         })
         .detach();
+        let cleanup_dirs: Vec<std::path::PathBuf> =
+            app.projects.iter().map(|p| p.directory.clone()).collect();
+        if !cleanup_dirs.is_empty() {
+            std::thread::spawn(move || {
+                let _ = release_desk_git::cleanup_stale_partial_clones(&cleanup_dirs);
+            });
+        }
         let download_requests: Vec<(String, std::path::PathBuf)> = app
             .projects
             .iter()
@@ -505,16 +577,6 @@ impl ReleaseDesk {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             self.workspace_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
             self.workspace_revision = self.workspace_revision.wrapping_add(1);
-            self.git_statuses.clear();
-            self.git_check_completed = 0;
-            self.git_check_total = 0;
-            self.git_activity = None;
-            self.git_pending.clear();
-            self.git_busy = false;
-            self.repository_presentations.clear();
-            self.selected_repository = None;
-            self.languages_expanded.clear();
-            self.language_breakdowns.clear();
             self.release_state = Default::default();
             self.release_busy = false;
             self.release_type_busy = false;
@@ -564,21 +626,142 @@ impl ReleaseDesk {
         }
     }
 
+    pub(crate) fn set_toast(&mut self, toast: crate::controllers::job_registry::StatusToast) {
+        self.message = toast.text.clone();
+        self.last_toast = Some(toast.clone());
+        self.pending_toast = Some(toast);
+    }
+
+    pub fn set_repo_cache(&mut self, cache: Arc<crate::modules::repo_cache::RepoCache>) {
+        self.repo_cache = Some(cache);
+        for project in &self.projects {
+            let pid = project.id;
+            if let Some(state) = self.jobs.project(pid)
+                && state.cache_hydrated
+            {
+                self.jobs.project_mut(pid).cache_hydrated = false;
+            }
+        }
+        self.hydrate_all_projects_from_cache();
+    }
+
+    pub(crate) fn hydrate_all_projects_from_cache(&mut self) {
+        let ids: Vec<u128> = self.projects.iter().map(|p| p.id).collect();
+        for id in ids {
+            self.hydrate_project_from_cache(id);
+        }
+    }
+
+    pub(crate) fn hydrate_project_from_cache(&mut self, project_id: u128) {
+        let Some(cache) = &self.repo_cache else {
+            return;
+        };
+        let valid_keys = self
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(WorkspaceProject::selected_repo_keys)
+            .unwrap_or_default();
+        let runtime = self.jobs.project_mut(project_id);
+        if runtime.cache_hydrated {
+            return;
+        }
+        let mut records = cache.load_project_repos(project_id);
+        if !valid_keys.is_empty() {
+            records.retain(|k, _| valid_keys.contains(k));
+        }
+        if !records.is_empty() {
+            runtime.hydrate_from_records(records);
+        } else {
+            runtime.cache_hydrated = true;
+        }
+    }
+
+    pub(crate) fn start_scheduler_loop(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let startup_delay = self.scheduler_config.startup_delay;
+        let check_interval = self.scheduler_config.check_interval;
+        cx.spawn_in(window, async move |this, cx| {
+            if !startup_delay.is_zero() {
+                cx.background_executor().timer(startup_delay).await;
+            }
+            let Ok(()) = this.update_in(cx, |this, _, cx| this.trigger_startup_scheduler(cx))
+            else {
+                return;
+            };
+            loop {
+                cx.background_executor().timer(check_interval).await;
+                let Ok(()) = this.update_in(cx, |this, _, cx| this.trigger_interval_scheduler(cx))
+                else {
+                    return;
+                };
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn on_window_focus(&mut self, cx: &mut Context<Self>) {
+        if let Some(pid) = self.selected_project_id {
+            self.schedule_revalidation(
+                pid,
+                crate::modules::scheduler_service::TriggerKind::Focus,
+                cx,
+            );
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn trigger_startup_scheduler(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<u128> = if let Some(selected) = self.selected_project_id {
+            let mut order = vec![selected];
+            order.extend(
+                self.projects
+                    .iter()
+                    .map(|p| p.id)
+                    .filter(|&id| id != selected),
+            );
+            order
+        } else {
+            self.projects.iter().map(|p| p.id).collect()
+        };
+        for id in ids {
+            self.schedule_revalidation(
+                id,
+                crate::modules::scheduler_service::TriggerKind::Startup,
+                cx,
+            );
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn trigger_interval_scheduler(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<u128> = self.projects.iter().map(|p| p.id).collect();
+        for id in ids {
+            self.schedule_revalidation(
+                id,
+                crate::modules::scheduler_service::TriggerKind::Interval,
+                cx,
+            );
+        }
+    }
+
     pub(crate) fn prefetch_project_data(&mut self, project_id: u128, cx: &mut Context<Self>) {
         if self.selected_project_id != Some(project_id) {
             return;
         }
+        self.hydrate_project_from_cache(project_id);
+        let runtime = self.jobs.project(project_id);
+        let git_busy = runtime.is_some_and(|s| s.is_inspect_or_check_busy() || s.is_clone_busy());
+        let no_status = runtime.is_none_or(|s| s.repos().is_empty());
         match project_load_action(
             self.project_section,
-            self.git_busy,
-            self.git_statuses.is_empty(),
+            git_busy,
+            no_status,
             self.release_busy,
             matches!(
                 self.release_state,
                 crate::workspace_releases::ReleaseViewState::NotLoaded
             ),
         ) {
-            ProjectLoadAction::Inspect => self.check_repository_updates(true, cx),
             ProjectLoadAction::Releases => self.refresh_releases(cx),
             ProjectLoadAction::None => {}
         }
@@ -609,6 +792,7 @@ impl ReleaseDesk {
             Appearance::Dark => ThemeMode::Dark,
         };
         Theme::change(mode, None, cx);
+        Theme::sync_scrollbar_appearance(cx);
         let is_dark = mode.is_dark();
         Theme::update(cx, |theme| {
             if is_dark {
@@ -647,6 +831,7 @@ impl ReleaseDesk {
             theme.tokens.button_primary = theme.button_primary.into();
             theme.tokens.button_primary_hover = theme.button_primary_hover.into();
             theme.tokens.button_primary_active = theme.button_primary_active.into();
+            theme.scrollbar_mode = gpui_kit::component::scroll::ScrollbarMode::Always;
         });
     }
 
@@ -662,11 +847,52 @@ impl ReleaseDesk {
         self.message = format!("Theme changed to {:?}", appearance);
         cx.notify();
     }
+
+    pub(crate) fn dismiss_active_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.repository_action_dialog.is_some() {
+            self.cancel_repository_action(cx);
+        } else if self.import_dialog.is_some() {
+            self.cancel_import_dialog(cx);
+        } else if self.selected_store_image.take().is_some() {
+            cx.notify();
+        } else if self.git_update_queue_open {
+            self.git_update_queue_open = false;
+            cx.notify();
+        } else if self.source_dialog != views::project_sources::SourceDialog::Closed {
+            self.source_dialog = views::project_sources::SourceDialog::Closed;
+            cx.notify();
+        } else if self.editor_menu_open {
+            self.editor_menu_open = false;
+            cx.notify();
+        } else if self.release_type_menu_open {
+            self.release_type_menu_open = false;
+            cx.notify();
+        } else if self.release_queue_open {
+            self.release_queue_open = false;
+            cx.notify();
+        }
+    }
 }
 
 impl Render for ReleaseDesk {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.message != self.last_notified_message {
+        if let Some(toast) = self.pending_toast.take() {
+            let text = toast.text.trim().to_string();
+            self.last_notified_message = self.message.clone();
+            if !text.is_empty() {
+                use crate::controllers::job_registry::ToastSeverity;
+                let notification = match toast.severity {
+                    ToastSeverity::Error => Notification::error(text),
+                    ToastSeverity::Warning => Notification::warning(text),
+                    ToastSeverity::Success => Notification::success(text),
+                    ToastSeverity::Info => Notification::info(text),
+                };
+                cx.spawn_in(window, async move |_, cx| {
+                    let _ = cx.update(|window, cx| window.push_notification(notification, cx));
+                })
+                .detach();
+            }
+        } else if self.message != self.last_notified_message {
             self.last_notified_message.clone_from(&self.message);
             let message = self.message.trim();
             if !message.is_empty()
@@ -912,82 +1138,100 @@ impl Render for ReleaseDesk {
                             )
                             .into_any_element(),
                         ),
-                        ProjectSection::Repositories => Some(
-                            views::render_project_repository_status(
-                                project,
-                                &self.git_statuses,
-                                &self.repository_presentations,
-                                self.selected_repository,
-                                &self.repo_search,
-                                self.git_busy || self.git_queue_busy,
-                                self.git_check_completed,
-                                self.git_check_total,
-                                self.git_activity,
-                                &self.git_pending,
-                                self.commits_collapsed,
-                                &self.languages_expanded,
-                                &self.language_breakdowns,
-                                &self.selected_editor_id,
-                                &self.available_editors,
-                                self.editor_menu_open,
-                                cx,
-                                |this: &mut Self, _window, cx| {
-                                    this.check_repository_updates(false, cx)
-                                },
-                                |source, repo, this: &mut Self, _window, cx| {
-                                    this.check_one_repository(source, repo, cx)
-                                },
-                                |source, repo, this: &mut Self, window, cx| {
-                                    this.pull_repository_updates(source, repo, window, cx)
-                                },
-                                |this: &mut Self, window, cx| this.pull_all_updates(window, cx),
-                                |source, repo, this: &mut Self, window, cx| {
-                                    this.clone_single_repository(source, repo, window, cx)
-                                },
-                                |this: &mut Self, window, cx| {
-                                    this.clone_all_missing_repositories(window, cx)
-                                },
-                                |source, repo, this: &mut Self, cx| {
-                                    this.selected_repository = Some((source, repo));
-                                    this.editor_menu_open = false;
-                                    cx.notify();
-                                },
-                                |url, this: &mut Self, cx| this.open_source_url(&url, cx),
-                                |this: &mut Self, _window, cx| {
-                                    this.project_section = ProjectSection::Sources;
-                                    cx.notify();
-                                },
-                                |this: &mut Self, cx| {
-                                    this.commits_collapsed = !this.commits_collapsed;
-                                    cx.notify();
-                                },
-                                |source, repo, this: &mut Self, window, cx| {
-                                    this.toggle_repository_languages(source, repo, window, cx)
-                                },
-                                |this: &mut Self, cx| {
-                                    this.editor_menu_open = !this.editor_menu_open;
-                                    cx.notify();
-                                },
-                                |editor_id, this: &mut Self, cx| {
-                                    this.selected_editor_id = editor_id;
-                                    this.editor_menu_open = false;
-                                    cx.notify();
-                                },
-                                |path, editor_id, this: &mut Self, cx| {
-                                    this.editor_menu_open = false;
-                                    std::thread::spawn(move || {
-                                        views::project_repository_status::open_path_in_editor(
-                                            &path, &editor_id,
-                                        )
-                                    });
-                                    cx.notify();
-                                },
-                                |source, repo, action, this: &mut Self, window, cx| {
-                                    this.begin_repository_action(source, repo, action, window, cx)
-                                },
+                        ProjectSection::Repositories => {
+                            let empty_runtime =
+                                crate::controllers::job_registry::ProjectRuntimeState::default();
+                            let runtime = self.jobs.project(project.id).unwrap_or(&empty_runtime);
+                            Some(
+                                views::render_project_repository_status(
+                                    project,
+                                    runtime.repos(),
+                                    &runtime.clone_states,
+                                    runtime.selected_repository.as_ref(),
+                                    &self.repo_search,
+                                    runtime.is_inspect_or_check_busy(),
+                                    runtime.is_clone_busy(),
+                                    runtime.check_completed,
+                                    runtime.check_total,
+                                    runtime.activity,
+                                    &runtime.pending,
+                                    &self.visible_repo_keys,
+                                    &self.repo_list_scroll,
+                                    &self.repo_detail_scroll,
+                                    runtime.last_checked_at,
+                                    self.settings.is_auto_fetch_enabled(project.id),
+                                    self.commits_collapsed,
+                                    &runtime.languages_expanded,
+                                    &runtime.language_breakdowns,
+                                    &self.selected_editor_id,
+                                    &self.available_editors,
+                                    self.editor_menu_open,
+                                    cx,
+                                    |this: &mut Self, _window, cx| {
+                                        this.check_repository_updates(false, cx)
+                                    },
+                                    |pid, this: &mut Self, cx| {
+                                        this.toggle_auto_fetch(pid, cx);
+                                    },
+                                    |key, this: &mut Self, _window, cx| {
+                                        this.check_one_repository(key, cx)
+                                    },
+                                    |key, this: &mut Self, window, cx| {
+                                        this.pull_repository_updates(key, window, cx)
+                                    },
+                                    |this: &mut Self, window, cx| this.pull_all_updates(window, cx),
+                                    |key, this: &mut Self, window, cx| {
+                                        this.clone_single_repository(key, window, cx)
+                                    },
+                                    |key, this: &mut Self, window, cx| {
+                                        this.retry_repository_clone(key, window, cx)
+                                    },
+                                    |key, this: &mut Self, window, cx| {
+                                        this.remove_incomplete_repository(key, window, cx)
+                                    },
+                                    |this: &mut Self, window, cx| {
+                                        this.clone_all_missing_repositories(window, cx)
+                                    },
+                                    |key, this: &mut Self, cx| {
+                                        this.select_repository(key, cx);
+                                    },
+                                    |url, this: &mut Self, cx| this.open_source_url(&url, cx),
+                                    |this: &mut Self, _window, cx| {
+                                        this.project_section = ProjectSection::Sources;
+                                        cx.notify();
+                                    },
+                                    |this: &mut Self, cx| {
+                                        this.commits_collapsed = !this.commits_collapsed;
+                                        cx.notify();
+                                    },
+                                    |key, this: &mut Self, window, cx| {
+                                        this.toggle_repository_languages(key, window, cx)
+                                    },
+                                    |this: &mut Self, cx| {
+                                        this.editor_menu_open = !this.editor_menu_open;
+                                        cx.notify();
+                                    },
+                                    |editor_id, this: &mut Self, cx| {
+                                        this.selected_editor_id = editor_id;
+                                        this.editor_menu_open = false;
+                                        cx.notify();
+                                    },
+                                    |path, editor_id, this: &mut Self, cx| {
+                                        this.editor_menu_open = false;
+                                        std::thread::spawn(move || {
+                                            views::project_repository_status::open_path_in_editor(
+                                                &path, &editor_id,
+                                            )
+                                        });
+                                        cx.notify();
+                                    },
+                                    |key, action, this: &mut Self, window, cx| {
+                                        this.begin_repository_action(key, action, window, cx)
+                                    },
+                                )
+                                .into_any_element(),
                             )
-                            .into_any_element(),
-                        ),
+                        }
                         ProjectSection::Releases => Some(
                             views::project_releases::render_live_releases(
                                 &self.release_state,
@@ -1000,6 +1244,7 @@ impl Render for ReleaseDesk {
                                     extension: &self.settings.installer_extension,
                                     type_menu_open: self.release_type_menu_open,
                                     scroll_handle: &self.release_scroll_handle,
+                                    queue_scroll_handle: &self.release_queue_scroll,
                                     scroll_generation: &self.release_scroll_generation,
                                 },
                                 window,
@@ -1040,10 +1285,15 @@ impl Render for ReleaseDesk {
                         ),
                         _ => None,
                     };
+                    let stale_refresh_enabled = self
+                        .settings
+                        .is_auto_refresh_stale_index_enabled(project.id);
+                    let project_id_for_stale = project.id;
                     views::render_project_workspace(
                         project,
                         self.project_section,
                         self.delete_confirm,
+                        stale_refresh_enabled,
                         self.project_cache_status.as_ref(),
                         section_content,
                         cx,
@@ -1068,6 +1318,9 @@ impl Render for ReleaseDesk {
                         |this: &mut Self, window, cx| this.import_local_repositories(window, cx),
                         |this: &mut Self, cx| this.clear_selected_project_cache(cx),
                         |this: &mut Self, cx| this.recreate_selected_project_icons(cx),
+                        move |this: &mut Self, cx| {
+                            this.toggle_auto_refresh_stale_index(project_id_for_stale, cx)
+                        },
                     )
                     .into_any_element()
                 } else {
@@ -1087,19 +1340,18 @@ impl Render for ReleaseDesk {
             }
         };
 
-        let mut root = div()
+        let body_row = div()
             .flex()
+            .flex_1()
+            .min_h_0()
             .size_full()
             .relative()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
             .child(render_sidebar(
                 self.tab,
                 self.projects.len(),
                 cx,
                 |this: &mut Self, tab, cx| {
                     let loc = match tab {
-                        WorkspaceTab::ProjectHub => NavLocation::ProjectHub,
                         WorkspaceTab::AppStore => NavLocation::AppStore,
                         WorkspaceTab::Settings => NavLocation::Settings,
                         _ => NavLocation::ProjectHub,
@@ -1144,6 +1396,80 @@ impl Render for ReleaseDesk {
                     ),
             );
 
+        let mut root = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .relative()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .track_focus(&self.focus_handle)
+            .key_context("ReleaseDesk")
+            .on_action(cx.listener(|_, _: &crate::menu::CloseWindow, window, _| {
+                window.remove_window();
+            }))
+            .on_action(cx.listener(|this, _: &crate::menu::OpenSettings, _, cx| {
+                this.navigate_to(NavLocation::Settings, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::menu::NavProjectHub, _, cx| {
+                this.navigate_to(NavLocation::ProjectHub, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::menu::NavAppStore, _, cx| {
+                this.navigate_to(NavLocation::AppStore, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::menu::NavSettings, _, cx| {
+                this.navigate_to(NavLocation::Settings, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::menu::NewProject, window, cx| {
+                    this.begin_setup(None, window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::menu::CheckForUpdates, _, cx| {
+                    this.check_repository_updates(false, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::menu::ImportRepositories, window, cx| {
+                    this.import_local_repositories(window, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::menu::RefreshIcons, _, cx| {
+                this.recreate_selected_project_icons(cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::menu::ToggleUpdateQueue, _, cx| {
+                    this.toggle_git_update_queue(cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::menu::ToggleAppearance, window, cx| {
+                    let next = if this.settings.appearance == Appearance::Dark {
+                        Appearance::Light
+                    } else {
+                        Appearance::Dark
+                    };
+                    this.set_appearance(next, window, cx);
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::menu::GoBack, _, cx| {
+                this.go_back(cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::menu::GoForward, _, cx| {
+                this.go_forward(cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::menu::DismissDialog, _, cx| {
+                this.dismiss_active_dialog(cx);
+            }));
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            root = root.child(div().w_full().flex_shrink_0().child(self.menu_bar.clone()));
+        }
+
+        root = root.child(body_row);
+
         if let Some(ref dialog) = self.import_dialog {
             root = root.child(views::render_import_dialog(
                 dialog,
@@ -1157,16 +1483,27 @@ impl Render for ReleaseDesk {
             ));
         }
 
-        if let Some((source_index, repo_index, action)) = self.repository_action_dialog
-            && let Some(repo) = self
+        if let Some((ref repo_key, action)) = self.repository_action_dialog
+            && let Some(project) = self
                 .selected_project_id
                 .and_then(|id| self.projects.iter().find(|project| project.id == id))
-                .and_then(|project| project.sources.get(source_index))
-                .and_then(|source| source.repositories.get(repo_index))
+            && let Some((_, _, source, repo)) = project.find_repo_by_key(repo_key)
         {
+            let target_path = crate::repository_git::resolve_target_path(
+                &project.directory,
+                project.disk_layout,
+                crate::repository_git::repository_owner(source, repo),
+                &repo.name,
+            );
+            let contents_preview = (action
+                == views::project_repository_status::RepositoryAction::DeleteFromDisk
+                && release_desk_git::classify_destination(&project.directory, &target_path)
+                    == release_desk_git::DestinationKind::NonGitDir)
+                .then(|| release_desk_git::list_directory_preview(&target_path, 8).0);
             root = root.child(views::repository_action_dialog::render(
                 &repo.name,
                 action,
+                contents_preview.as_deref(),
                 &self.repository_action_confirmation,
                 cx,
                 |this: &mut Self, cx| this.cancel_repository_action(cx),
@@ -1199,8 +1536,12 @@ impl Render for ReleaseDesk {
             && self.git_update_project_id == self.selected_project_id
         {
             root = root.child(views::git_update_queue::render(
-                &self.git_update_queue,
-                self.git_update_queue_open,
+                views::git_update_queue::GitUpdateQueueProps {
+                    queue: &self.git_update_queue,
+                    open: self.git_update_queue_open,
+                    scroll_handle: &self.git_update_queue_scroll,
+                },
+                window,
                 cx,
                 |this: &mut Self, cx| this.toggle_git_update_queue(cx),
                 |key, this: &mut Self, cx| this.cancel_git_update(key, cx),
@@ -1223,9 +1564,10 @@ mod project_loading_tests {
             project_load_action(ProjectSection::Overview, false, true, false, true),
             ProjectLoadAction::None
         );
+        // Repositories paints cached rows immediately and never auto-runs inspect/fetch on tab visit.
         assert_eq!(
             project_load_action(ProjectSection::Repositories, false, true, false, true),
-            ProjectLoadAction::Inspect
+            ProjectLoadAction::None
         );
         assert_eq!(
             project_load_action(ProjectSection::Repositories, true, true, false, true),

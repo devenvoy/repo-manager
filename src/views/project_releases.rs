@@ -164,20 +164,32 @@ pub(crate) struct ReleaseShelfControls<'a> {
     pub extension: &'a str,
     pub type_menu_open: bool,
     pub scroll_handle: &'a ScrollHandle,
+    pub queue_scroll_handle: &'a ScrollHandle,
     pub scroll_generation: &'a std::rc::Rc<std::cell::Cell<u64>>,
 }
 
 pub type ReleaseDownloadRequest = (String, String, String, String, String, String, Option<u64>);
 
+pub(crate) struct DownloadQueueProps<'a> {
+    pub queue: &'a [crate::release_queue::DownloadJob],
+    pub project_id: u128,
+    pub open: bool,
+    pub scroll_handle: &'a ScrollHandle,
+}
+
 pub(crate) fn render_download_queue<T: 'static>(
-    queue: &[crate::release_queue::DownloadJob],
-    project_id: u128,
-    open: bool,
+    props: DownloadQueueProps<'_>,
     window: &Window,
     cx: &Context<T>,
     on_toggle: impl Fn(&mut T, &mut Context<T>) + Copy + 'static,
     on_cancel: impl Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
 ) -> impl IntoElement {
+    let DownloadQueueProps {
+        queue,
+        project_id,
+        open,
+        scroll_handle: queue_scroll_handle,
+    } = props;
     let project_jobs = queue
         .iter()
         .filter(|job| job.project_id == project_id)
@@ -210,12 +222,31 @@ pub(crate) fn render_download_queue<T: 'static>(
     }
     if open {
         let viewport = window.viewport_size();
+        let max_dialog_h = (viewport.height - px(32.)).min(px(560.)).max(px(220.));
+        let reserved_chrome = px(100.);
+        let available_list_h = (max_dialog_h - reserved_chrome).max(px(80.));
+        let est_row_h: f32 = project_jobs
+            .iter()
+            .map(|job| {
+                if matches!(&job.status, crate::release_queue::DownloadStatus::Failed(err) if err.len() > 60)
+                {
+                    110.0
+                } else {
+                    82.0
+                }
+            })
+            .sum::<f32>()
+            .max(80.0);
+        let queue_list_height = px(est_row_h).min(available_list_h).max(px(80.));
         let mut rows = div()
+            .id("release-queue-rows")
             .flex()
             .flex_col()
             .gap_2()
-            .max_h(px(440.))
-            .overflow_y_scrollbar();
+            .pb_4()
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(queue_scroll_handle);
         for job in project_jobs {
             let job_key = job.key.clone();
             let mut row = div()
@@ -229,7 +260,7 @@ pub(crate) fn render_download_queue<T: 'static>(
                 .child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .justify_between()
                         .gap_3()
                         .child(
@@ -237,6 +268,8 @@ pub(crate) fn render_download_queue<T: 'static>(
                                 .flex()
                                 .flex_col()
                                 .gap_0p5()
+                                .flex_1()
+                                .min_w_0()
                                 .child(
                                     div()
                                         .font_medium()
@@ -250,55 +283,57 @@ pub(crate) fn render_download_queue<T: 'static>(
                                         .child(job.asset.clone()),
                                 ),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(match &job.status {
-                                            crate::release_queue::DownloadStatus::Queued => {
-                                                "Queued".to_string()
-                                            }
-                                            crate::release_queue::DownloadStatus::Downloading => {
-                                                format!(
-                                                    "Downloading · {} / {}",
-                                                    format_bytes(Some(job.received)),
-                                                    job.total
-                                                        .map_or("Unknown size".to_string(), |v| {
-                                                            format_bytes(Some(v))
-                                                        })
-                                                )
-                                            }
-                                            crate::release_queue::DownloadStatus::Cancelling => {
-                                                "Stopping download…".to_string()
-                                            }
-                                            crate::release_queue::DownloadStatus::Complete => {
-                                                "Complete".to_string()
-                                            }
-                                            crate::release_queue::DownloadStatus::Failed(error) => {
-                                                format!("Failed · {error}")
-                                            }
-                                            crate::release_queue::DownloadStatus::Cancelled => {
-                                                "Cancelled".to_string()
-                                            }
-                                        }),
-                                )
-                                .when(job.is_active(), |element| {
-                                    element.child(
-                                        Button::new(format!("cancel-{}", job.key))
-                                            .label(if matches!(job.status, crate::release_queue::DownloadStatus::Cancelling) { "Stopping…" } else { "Cancel" })
-                                            .outline()
-                                            .disabled(matches!(job.status, crate::release_queue::DownloadStatus::Cancelling))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                on_cancel(job_key.clone(), this, cx)
-                                            })),
+                        .when(job.is_active(), |element| {
+                            element.child(
+                                Button::new(format!("cancel-{}", job.key))
+                                    .label(
+                                        if matches!(
+                                            job.status,
+                                            crate::release_queue::DownloadStatus::Cancelling
+                                        ) {
+                                            "Stopping…"
+                                        } else {
+                                            "Cancel"
+                                        },
                                     )
-                                }),
-                        ),
+                                    .outline()
+                                    .disabled(matches!(
+                                        job.status,
+                                        crate::release_queue::DownloadStatus::Cancelling
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        on_cancel(job_key.clone(), this, cx)
+                                    })),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(match &job.status {
+                            crate::release_queue::DownloadStatus::Queued => "Queued".to_string(),
+                            crate::release_queue::DownloadStatus::Downloading => format!(
+                                "Downloading · {} / {}",
+                                format_bytes(Some(job.received)),
+                                job.total
+                                    .map_or("Unknown size".to_string(), |v| format_bytes(Some(v)))
+                            ),
+                            crate::release_queue::DownloadStatus::Cancelling => {
+                                "Stopping download…".to_string()
+                            }
+                            crate::release_queue::DownloadStatus::Complete => {
+                                "Complete".to_string()
+                            }
+                            crate::release_queue::DownloadStatus::Failed(error) => {
+                                format!("Failed · {error}")
+                            }
+                            crate::release_queue::DownloadStatus::Cancelled => {
+                                "Cancelled".to_string()
+                            }
+                        }),
                 );
             if let Some(progress) = job.progress() {
                 row = row.child(
@@ -327,6 +362,7 @@ pub(crate) fn render_download_queue<T: 'static>(
                         div()
                             .occlude()
                             .id("release-queue-backdrop")
+                            .debug_selector(|| "release-queue-backdrop".into())
                             .absolute()
                             .top_0()
                             .left_0()
@@ -337,14 +373,19 @@ pub(crate) fn render_download_queue<T: 'static>(
                             .items_center()
                             .justify_center()
                             .p_4()
+                            .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, _, cx| on_toggle(this, cx)))
                             .child(
                                 div()
                                     .occlude()
                                     .id("release-queue-dialog")
+                                    .debug_selector(|| "release-queue-dialog".into())
                                     .w_full()
                                     .max_w(px(560.))
-                                    .max_h(viewport.height - px(32.))
+                                    .max_h(max_dialog_h)
                                     .flex()
                                     .flex_col()
                                     .overflow_hidden()
@@ -355,6 +396,10 @@ pub(crate) fn render_download_queue<T: 'static>(
                                     .bg(cx.theme().background)
                                     .shadow_lg()
                                     .p_5()
+                                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                                     .on_click(|_, _, cx| cx.stop_propagation())
                                     .child(
                                         div()
@@ -376,7 +421,18 @@ pub(crate) fn render_download_queue<T: 'static>(
                                                     )),
                                             ),
                                     )
-                                    .child(rows),
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .w_full()
+                                            .h(queue_list_height)
+                                            .flex()
+                                            .flex_col()
+                                            .min_h_0()
+                                            .debug_selector(|| "release-queue-rows-viewport".into())
+                                            .child(rows)
+                                            .vertical_scrollbar(queue_scroll_handle),
+                                    ),
                             ),
                     ),
             )
@@ -424,6 +480,7 @@ pub(crate) fn render_live_releases<T: 'static>(
         extension,
         type_menu_open,
         scroll_handle,
+        queue_scroll_handle,
         scroll_generation,
     } = controls;
     let available_types = available_release_types(state, extension);
@@ -600,6 +657,7 @@ pub(crate) fn render_live_releases<T: 'static>(
         .flex_1()
         .min_h_0()
         .gap_5()
+        .pb_10()
         .overflow_y_scroll()
         .track_scroll(&scroll_handle)
         .child(
@@ -734,19 +792,10 @@ pub(crate) fn render_live_releases<T: 'static>(
                                 .child(format!("Preparing {selected_label} shelf…")),
                         ),
                 );
-                return div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .child(body)
-                    .vertical_scrollbar(&scroll_handle);
-            }
-
-            for ((repo_index, repository), presentation) in
-                repositories.iter().enumerate().zip(presentations)
-            {
+            } else {
+                for ((repo_index, repository), presentation) in
+                    repositories.iter().enumerate().zip(presentations)
+                {
                 let Some(asset) = presentation.asset.as_ref() else {
                     if repository.result.is_err() {
                         fetch_errors += 1;
@@ -899,7 +948,8 @@ pub(crate) fn render_live_releases<T: 'static>(
                     .child(format!("{fetch_errors} repositories could not be checked. Check releases to try again.")));
             }
 
-            body = body.child(list);
+                body = body.child(list);
+            }
         }
     }
 
@@ -912,9 +962,12 @@ pub(crate) fn render_live_releases<T: 'static>(
         .child(body)
         .vertical_scrollbar(&scroll_handle);
     shelf = shelf.child(render_download_queue(
-        queue,
-        project_id,
-        queue_open,
+        DownloadQueueProps {
+            queue,
+            project_id,
+            open: queue_open,
+            scroll_handle: queue_scroll_handle,
+        },
         window,
         cx,
         on_toggle_queue,

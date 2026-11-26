@@ -45,6 +45,7 @@ pub fn render_hub<
         .flex_col()
         .gap_6()
         .p_6()
+        .pb_10()
         .overflow_y_scrollbar()
         // Page Head
         .child(

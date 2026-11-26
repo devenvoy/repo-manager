@@ -4,6 +4,7 @@ pub mod auth_controller;
 pub mod git_controller;
 pub mod git_queue_controller;
 pub mod import_controller;
+pub mod job_registry;
 pub mod language_controller;
 pub mod release_controller;
 pub mod repository_controller;

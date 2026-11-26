@@ -7,18 +7,29 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, px,
+    Context, InteractiveElement as _, IntoElement, ParentElement as _, ScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 
+pub(crate) struct GitUpdateQueueProps<'a> {
+    pub queue: &'a [GitUpdateJob],
+    pub open: bool,
+    pub scroll_handle: &'a ScrollHandle,
+}
+
 pub(crate) fn render<T: 'static>(
-    queue: &[GitUpdateJob],
-    open: bool,
+    props: GitUpdateQueueProps<'_>,
+    window: &Window,
     cx: &Context<T>,
     on_toggle: impl Fn(&mut T, &mut Context<T>) + Copy + 'static,
     on_cancel: impl Fn(String, &mut T, &mut Context<T>) + Copy + 'static,
     on_cancel_all: impl Fn(&mut T, &mut Context<T>) + Copy + 'static,
 ) -> impl IntoElement {
+    let GitUpdateQueueProps {
+        queue,
+        open,
+        scroll_handle,
+    } = props;
     let total = queue.len();
     let finished = queue.iter().filter(|job| job.status.is_terminal()).count();
     let active = total.saturating_sub(finished);
@@ -58,12 +69,31 @@ pub(crate) fn render<T: 'static>(
     }
 
     if open {
+        let viewport = window.viewport_size();
+        let max_dialog_h = (viewport.height - px(32.)).min(px(560.)).max(px(220.));
+        let reserved_chrome = px(185.);
+        let available_list_h = (max_dialog_h - reserved_chrome).max(px(80.));
+        let est_row_h: f32 = queue
+            .iter()
+            .map(|job| {
+                let long_err = matches!(
+                    &job.status,
+                    GitUpdateStatus::Failed(err) | GitUpdateStatus::Skipped(err) if err.len() > 48
+                );
+                if long_err { 116.0 } else { 88.0 }
+            })
+            .sum::<f32>()
+            + 24.0;
+        let list_height = px(est_row_h.max(108.0)).min(available_list_h).max(px(96.));
         let mut rows = div()
+            .id("git-update-queue-rows")
             .flex()
             .flex_col()
             .gap_2()
-            .max_h(px(440.))
-            .overflow_y_scrollbar();
+            .pb_6()
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(scroll_handle);
         for job in queue {
             let key = job.key.clone();
             let state = match &job.status {
@@ -141,18 +171,29 @@ pub(crate) fn render<T: 'static>(
         root = root.child(
             div()
                 .id("git-update-queue-backdrop")
+                .debug_selector(|| "git-update-queue-backdrop".into())
+                .occlude()
                 .absolute()
                 .inset_0()
+                .p_4()
                 .bg(cx.theme().background.opacity(0.55))
                 .flex()
                 .items_center()
                 .justify_center()
+                .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation()
+                })
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _, _, cx| on_toggle(this, cx)))
                 .child(
                     div()
                         .id("git-update-queue-dialog")
-                        .w(px(560.))
-                        .max_h(px(560.))
+                        .debug_selector(|| "git-update-queue-dialog".into())
+                        .occlude()
+                        .w_full()
+                        .max_w(px(560.))
+                        .max_h(max_dialog_h)
+                        .overflow_hidden()
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -162,6 +203,10 @@ pub(crate) fn render<T: 'static>(
                         .bg(cx.theme().background)
                         .shadow_lg()
                         .p_5()
+                        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation()
+                        })
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                         .on_click(|_, _, cx| cx.stop_propagation())
                         .child(
                             div()
@@ -198,7 +243,18 @@ pub(crate) fn render<T: 'static>(
                                         .w(px(510. * ratio)),
                                 ),
                         )
-                        .child(rows),
+                        .child(
+                            div()
+                                .relative()
+                                .w_full()
+                                .h(list_height)
+                                .flex()
+                                .flex_col()
+                                .min_h_0()
+                                .debug_selector(|| "git-update-queue-rows-viewport".into())
+                                .child(rows)
+                                .vertical_scrollbar(scroll_handle),
+                        ),
                 ),
         );
     }

@@ -1,6 +1,6 @@
 //! Desktop project records and provider choices used by the workspace UI.
 
-use crate::workspace_sources::{RepositoryListMode, WorkspaceSource};
+use crate::workspace_sources::{RepoKey, RepositoryListMode, SourceRepository, WorkspaceSource};
 use release_desk_core::project::{DiskLayout, ProjectId, ProjectIdentity, ProjectName};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -295,6 +295,40 @@ pub struct WorkspaceProject {
 }
 
 impl WorkspaceProject {
+    /// Compute the stable [`RepoKey`] for one source repository within this project.
+    pub fn repo_key(&self, source: &WorkspaceSource, repo: &SourceRepository) -> RepoKey {
+        RepoKey::from_source_repo_with_host(source, repo, self.custom_host.as_deref())
+    }
+
+    /// Locate a repository by its stable [`RepoKey`].
+    pub fn find_repo_by_key(
+        &self,
+        key: &RepoKey,
+    ) -> Option<(usize, usize, &WorkspaceSource, &SourceRepository)> {
+        for (source_index, source) in self.sources.iter().enumerate() {
+            for (repo_index, repo) in source.repositories.iter().enumerate() {
+                if &self.repo_key(source, repo) == key {
+                    return Some((source_index, repo_index, source, repo));
+                }
+            }
+        }
+        None
+    }
+
+    /// Return the set of currently selected [`RepoKey`]s in this project.
+    pub fn selected_repo_keys(&self) -> std::collections::HashSet<RepoKey> {
+        self.sources
+            .iter()
+            .flat_map(|source| {
+                source
+                    .repositories
+                    .iter()
+                    .filter(|repo| repo.selected)
+                    .map(move |repo| self.repo_key(source, repo))
+            })
+            .collect()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         ProjectName::new(&self.name).map_err(|error| error.to_string())?;
         if !self.directory.is_absolute() || !self.directory.is_dir() {

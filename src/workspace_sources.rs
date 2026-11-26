@@ -4,6 +4,110 @@ use release_desk_store::{FetchedProfile, parse_input_target};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Stable identity for a repository inside a project, independent of source/repo slice indexes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RepoKey {
+    pub provider: String,
+    pub host: String,
+    pub owner: String,
+    pub name: String,
+}
+
+impl RepoKey {
+    /// Construct a normalized repository key.
+    ///
+    /// Web forges (GitHub, GitLab, Bitbucket, Codeberg, Gitea, Forgejo, Azure DevOps, custom)
+    /// normalize `host`, `owner`, and `name` case-insensitively, whereas `local` and
+    /// `aws_codecommit` preserve exact owner/name casing.
+    pub fn new(provider: &str, host: &str, owner: &str, name: &str) -> Self {
+        let provider_norm = provider.trim().to_ascii_lowercase();
+        let host_norm = host.trim().to_ascii_lowercase();
+        let case_sensitive = matches!(provider_norm.as_str(), "local" | "aws_codecommit");
+        if case_sensitive {
+            Self {
+                provider: provider_norm,
+                host: host_norm,
+                owner: owner.trim().to_string(),
+                name: name.trim().to_string(),
+            }
+        } else {
+            Self {
+                provider: provider_norm,
+                host: host_norm,
+                owner: owner.trim().to_ascii_lowercase(),
+                name: name.trim().to_ascii_lowercase(),
+            }
+        }
+    }
+
+    pub fn normalized_host(provider: &str, clone_url: &str, custom_host: Option<&str>) -> String {
+        let provider_norm = provider.trim().to_ascii_lowercase();
+        if provider_norm == "local" {
+            return "local".to_string();
+        }
+        if let Some(host) = extract_url_host(clone_url) {
+            return host;
+        }
+        if let Some(custom) = custom_host
+            && let Some(host) = extract_url_host(custom)
+        {
+            return host;
+        }
+        match provider_norm.as_str() {
+            "github" => "github.com",
+            "gitlab" => "gitlab.com",
+            "bitbucket" => "bitbucket.org",
+            "azure_devops" => "dev.azure.com",
+            "codeberg" => "codeberg.org",
+            "gitea" => "gitea.com",
+            "aws_codecommit" => "aws-codecommit",
+            other => other,
+        }
+        .to_string()
+    }
+
+    pub fn from_source_repo(source: &WorkspaceSource, repo: &SourceRepository) -> Self {
+        Self::from_source_repo_with_host(source, repo, None)
+    }
+
+    pub fn from_source_repo_with_host(
+        source: &WorkspaceSource,
+        repo: &SourceRepository,
+        custom_host: Option<&str>,
+    ) -> Self {
+        let owner = repo
+            .full_name
+            .rsplit_once('/')
+            .map_or(source.handle.as_str(), |(owner, _)| owner);
+        let host = Self::normalized_host(&source.provider, &repo.clone_url, custom_host);
+        Self::new(&source.provider, &host, owner, &repo.name)
+    }
+}
+
+fn extract_url_host(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = url::Url::parse(trimmed)
+        && let Some(host) = parsed.host_str()
+    {
+        return Some(match parsed.port() {
+            Some(port) => format!("{}:{port}", host.to_ascii_lowercase()),
+            None => host.to_ascii_lowercase(),
+        });
+    }
+    if let Some(rest) = trimmed.strip_prefix("git@")
+        && let Some((host, _)) = rest.split_once(':')
+    {
+        let host = host.trim();
+        if !host.is_empty() {
+            return Some(host.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
 /// Presentation preference; independent of the project's on-disk layout.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -624,5 +728,48 @@ mod tests {
         assert_eq!(b.full_name, "local/repo-b");
         assert_eq!(b.default_branch, "develop");
         assert!(b.selected);
+    }
+
+    #[test]
+    fn repo_key_includes_host_normalizes_forge_case_and_preserves_local_case() {
+        let gl_a = RepoKey::new("gitlab", "gitlab.corp-a.example", "Org", "App");
+        let gl_b = RepoKey::new("gitlab", "gitlab.corp-b.example", "Org", "App");
+        assert_ne!(
+            gl_a, gl_b,
+            "same provider/owner/name on different hosts must not collide"
+        );
+
+        let gh_upper = RepoKey::new("github", "GitHub.COM", "Owner", "Repo");
+        let gh_lower = RepoKey::new("github", "github.com", "owner", "repo");
+        assert_eq!(gh_upper, gh_lower);
+
+        let local_a = RepoKey::new("local", "local", "Dev", "App");
+        let local_b = RepoKey::new("local", "local", "dev", "app");
+        assert_ne!(local_a, local_b, "local keys preserve filesystem casing");
+
+        let custom_src = WorkspaceSource {
+            handle: "Team".into(),
+            display_name: None,
+            avatar_url: None,
+            bio: None,
+            provider: "custom".into(),
+            repositories: vec![SourceRepository {
+                name: "Tool".into(),
+                full_name: "Team/Tool".into(),
+                description: None,
+                stars: 0,
+                forks: 0,
+                primary_language: None,
+                is_private: false,
+                is_fork: false,
+                clone_url: "https://git.internal.example/Team/Tool.git".into(),
+                default_branch: "main".into(),
+                selected: true,
+            }],
+        };
+        let key = RepoKey::from_source_repo(&custom_src, &custom_src.repositories[0]);
+        assert_eq!(key.host, "git.internal.example");
+        assert_eq!(key.owner, "team");
+        assert_eq!(key.name, "tool");
     }
 }

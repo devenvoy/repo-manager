@@ -69,6 +69,8 @@ pub trait CssExt: Styled + StyledExt + ScrollableElement + Sized {
     fn css_modal_backdrop(self) -> Self {
         self.absolute()
             .inset_0()
+            .occlude()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .bg(rgb(0x000000).opacity(0.65))
             .flex()
             .items_center()
@@ -82,6 +84,8 @@ pub trait CssExt: Styled + StyledExt + ScrollableElement + Sized {
             .max_w_full()
             .h(px(640.))
             .max_h_full()
+            .occlude()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
             .rounded_2xl()
             .border_1()
             .border_color(theme.border)
@@ -123,6 +127,7 @@ pub trait CssExt: Styled + StyledExt + ScrollableElement + Sized {
             .size_full()
             .gap_6()
             .p_6()
+            .pb_10()
             .overflow_y_scrollbar()
     }
 

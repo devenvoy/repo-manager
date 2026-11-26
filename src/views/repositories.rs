@@ -23,7 +23,8 @@ pub fn render_repositories<T: 'static>(
         .w(px(280.))
         .h_full()
         .overflow_y_scrollbar()
-        .p_3();
+        .p_3()
+        .pb_8();
 
     for (index, repo) in repos.iter().enumerate() {
         if repo.is_archived && !show_archived {

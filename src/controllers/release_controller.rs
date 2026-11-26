@@ -410,92 +410,154 @@ impl ReleaseDesk {
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(100))
+                    .timer(std::time::Duration::from_millis(50))
                     .await;
-                match rx.try_recv() {
-                    Ok(crate::release_queue::DownloadUpdate::Progress(received, total)) => {
-                        let _ = this.update_in(cx, |this, _, cx| {
-                            if let Some(job) = this
-                                .release_queue
-                                .iter_mut()
-                                .find(|job| job.key == download_key)
-                            {
-                                job.status =
-                                    if job.cancel.load(std::sync::atomic::Ordering::Acquire) {
-                                        crate::release_queue::DownloadStatus::Cancelling
-                                    } else {
-                                        crate::release_queue::DownloadStatus::Downloading
-                                    };
-                                job.received = received;
-                                job.total = total;
-                            }
-                            cx.notify();
-                        });
-                    }
-                    Ok(crate::release_queue::DownloadUpdate::Finished(result)) => {
-                        let _ = this.update_in(cx, |this, _, cx| {
-                            this.release_downloading.remove(&download_key);
-                            let succeeded = result.is_ok();
-                            if let Some(job) = this
-                                .release_queue
-                                .iter_mut()
-                                .find(|job| job.key == download_key)
-                            {
-                                job.status =
-                                    if job.cancel.load(std::sync::atomic::Ordering::Acquire) {
-                                        crate::release_queue::DownloadStatus::Cancelled
-                                    } else if let Err(error) = &result {
-                                        crate::release_queue::DownloadStatus::Failed(error.clone())
-                                    } else {
-                                        crate::release_queue::DownloadStatus::Complete
-                                    };
-                            }
-                            this.message = if this
-                                .release_queue
-                                .iter()
-                                .find(|job| job.key == download_key)
-                                .is_some_and(|job| {
-                                    matches!(
-                                        job.status,
-                                        crate::release_queue::DownloadStatus::Cancelled
-                                    )
-                                }) {
-                                "Download cancelled.".into()
+                let drained = drain_download_updates(&rx);
+                if let Some((received, total)) = drained.progress {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        if let Some(job) = this
+                            .release_queue
+                            .iter_mut()
+                            .find(|job| job.key == download_key)
+                        {
+                            job.status = if job.cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                crate::release_queue::DownloadStatus::Cancelling
                             } else {
-                                match result {
-                                    Ok(path) => format!("Downloaded to {}", path.display()),
-                                    Err(error) => format!("Download failed: {error}"),
-                                }
+                                crate::release_queue::DownloadStatus::Downloading
                             };
-                            if succeeded {
-                                this.refresh_release_presentations(cx);
+                            job.received = received;
+                            job.total = total;
+                        }
+                        cx.notify();
+                    });
+                }
+                if let Some(result) = drained.finished {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.release_downloading.remove(&download_key);
+                        let succeeded = result.is_ok();
+                        if let Some(job) = this
+                            .release_queue
+                            .iter_mut()
+                            .find(|job| job.key == download_key)
+                        {
+                            job.status = if job.cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                crate::release_queue::DownloadStatus::Cancelled
+                            } else if let Err(error) = &result {
+                                crate::release_queue::DownloadStatus::Failed(error.clone())
                             } else {
-                                cx.notify();
+                                crate::release_queue::DownloadStatus::Complete
+                            };
+                        }
+                        this.message = if this
+                            .release_queue
+                            .iter()
+                            .find(|job| job.key == download_key)
+                            .is_some_and(|job| {
+                                matches!(
+                                    job.status,
+                                    crate::release_queue::DownloadStatus::Cancelled
+                                )
+                            }) {
+                            "Download cancelled.".into()
+                        } else {
+                            match result {
+                                Ok(path) => format!("Downloaded to {}", path.display()),
+                                Err(error) => format!("Download failed: {error}"),
                             }
-                        });
-                        return;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        let _ = this.update_in(cx, |this, _, cx| {
-                            this.release_downloading.remove(&download_key);
-                            if let Some(job) = this
-                                .release_queue
-                                .iter_mut()
-                                .find(|job| job.key == download_key)
-                            {
-                                job.status = crate::release_queue::DownloadStatus::Failed(
-                                    "Download worker stopped unexpectedly.".into(),
-                                );
-                            }
-                            this.message = "Download stopped unexpectedly.".into();
+                        };
+                        if succeeded {
+                            this.refresh_release_presentations(cx);
+                        } else {
                             cx.notify();
-                        });
-                        return;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        }
+                    });
+                    return;
+                }
+                if drained.disconnected {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.release_downloading.remove(&download_key);
+                        if let Some(job) = this
+                            .release_queue
+                            .iter_mut()
+                            .find(|job| job.key == download_key)
+                        {
+                            job.status = crate::release_queue::DownloadStatus::Failed(
+                                "Download worker stopped unexpectedly.".into(),
+                            );
+                        }
+                        this.message = "Download stopped unexpectedly.".into();
+                        cx.notify();
+                    });
+                    return;
                 }
             }
         })
         .detach();
+    }
+}
+
+struct DrainedDownloadUpdates {
+    progress: Option<(u64, Option<u64>)>,
+    finished: Option<Result<std::path::PathBuf, String>>,
+    disconnected: bool,
+}
+
+/// Drain all queued download updates in one batch so high-throughput progress callbacks never
+/// backlog UI updates or delay completion behind stale progress events.
+fn drain_download_updates(
+    rx: &std::sync::mpsc::Receiver<crate::release_queue::DownloadUpdate>,
+) -> DrainedDownloadUpdates {
+    let mut latest_progress: Option<(u64, Option<u64>)> = None;
+    let mut finished: Option<Result<std::path::PathBuf, String>> = None;
+    let mut disconnected = false;
+    loop {
+        match rx.try_recv() {
+            Ok(crate::release_queue::DownloadUpdate::Progress(received, total)) => {
+                latest_progress = Some((received, total));
+            }
+            Ok(crate::release_queue::DownloadUpdate::Finished(result)) => {
+                finished = Some(result);
+                break;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                disconnected = true;
+                break;
+            }
+        }
+    }
+    DrainedDownloadUpdates {
+        progress: latest_progress,
+        finished,
+        disconnected,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drain_download_updates;
+    use crate::release_queue::DownloadUpdate;
+    use std::path::PathBuf;
+
+    #[test]
+    fn step_e_drain_download_updates_consumes_backlog_and_completion_in_one_batch() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        for i in 1..=2000u64 {
+            tx.send(DownloadUpdate::Progress(
+                i * 512 * 1024,
+                Some(2000 * 512 * 1024),
+            ))
+            .unwrap();
+        }
+        let dest = PathBuf::from("/tmp/asset.dmg");
+        tx.send(DownloadUpdate::Finished(Ok(dest.clone()))).unwrap();
+
+        let drained = drain_download_updates(&rx);
+        assert_eq!(
+            drained.progress,
+            Some((2000 * 512 * 1024, Some(2000 * 512 * 1024)))
+        );
+        assert_eq!(drained.finished, Some(Ok(dest)));
+        assert!(!drained.disconnected);
     }
 }

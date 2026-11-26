@@ -1,8 +1,10 @@
-//! Queued, bounded repository pulls and queue controls.
+//! Queued, bounded repository pulls and queue controls keyed by stable [`RepoKey`].
 
 use crate::app::ReleaseDesk;
+use crate::controllers::job_registry::{StatusToast, WorkerDropGuard};
 use crate::git_update_queue::{GitUpdateJob, GitUpdateStatus};
-use crate::repository_git::{RepositoryStatus, can_pull};
+use crate::repository_git::RepositoryStatus;
+use crate::workspace_sources::RepoKey;
 use gpui_kit::{Context, Window};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,9 +16,10 @@ enum QueueEvent {
     Progress(String, &'static str),
     Finished {
         key: String,
-        outcome: Result<(RepositoryStatus, String), String>,
+        outcome: Box<Result<(crate::modules::repo_cache::CachedRepoRecord, String), String>>,
         cancelled: bool,
     },
+    AllDone,
 }
 
 impl ReleaseDesk {
@@ -29,7 +32,9 @@ impl ReleaseDesk {
         if let Some(job) = self.git_update_queue.iter_mut().find(|job| job.key == key) {
             if matches!(&job.status, GitUpdateStatus::Running(stage) if stage == "Applying fast-forward")
             {
-                self.message = "This pull is applying its fast-forward and can no longer be interrupted safely.".into();
+                self.set_toast(StatusToast::warning(
+                    "This pull is applying its fast-forward and can no longer be interrupted safely.",
+                ));
                 cx.notify();
                 return;
             }
@@ -57,12 +62,11 @@ impl ReleaseDesk {
 
     pub(crate) fn enqueue_repository_pull(
         &mut self,
-        source_index: usize,
-        repo_index: usize,
+        repo_key: RepoKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.enqueue_repository_pulls(Some((source_index, repo_index)), window, cx);
+        self.enqueue_repository_pulls(Some(repo_key), window, cx);
     }
 
     pub(crate) fn enqueue_available_repository_pulls(
@@ -75,15 +79,10 @@ impl ReleaseDesk {
 
     fn enqueue_repository_pulls(
         &mut self,
-        selected: Option<(usize, usize)>,
+        selected: Option<RepoKey>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.git_busy || self.git_queue_busy {
-            self.message = "A repository operation is already running.".into();
-            cx.notify();
-            return;
-        }
         let Some(project) = self
             .selected_project_id
             .and_then(|id| self.projects.iter().find(|project| project.id == id))
@@ -91,28 +90,42 @@ impl ReleaseDesk {
         else {
             return;
         };
+        let project_id = project.id;
+        if self
+            .jobs
+            .project(project_id)
+            .is_some_and(|s| s.is_inspect_or_check_busy())
+        {
+            self.set_toast(StatusToast::info(
+                "A repository operation is already running.",
+            ));
+            cx.notify();
+            return;
+        }
 
         let targets = match crate::repository_git::targets(&project) {
             Ok(targets) => targets,
             Err(error) => {
-                self.message = error;
+                self.set_toast(StatusToast::error(error));
                 cx.notify();
                 return;
             }
         };
-        let targets = targets
-            .into_iter()
-            .filter(|target| {
-                selected.is_none_or(|key| (target.source_index, target.repo_index) == key)
-                    && self.git_statuses.iter().any(|status| {
-                        status.source_index == target.source_index
-                            && status.repo_index == target.repo_index
-                            && can_pull(status)
-                    })
-            })
-            .collect::<Vec<_>>();
+        let targets = {
+            let runtime = self.jobs.project(project_id);
+            targets
+                .into_iter()
+                .filter(|target| {
+                    selected.as_ref().is_none_or(|key| &target.key == key)
+                        && runtime
+                            .is_some_and(|r| r.repo(&target.key).is_some_and(|e| e.can_pull()))
+                })
+                .collect::<Vec<_>>()
+        };
         if targets.is_empty() {
-            self.message = "No freshly fetched repository updates are available to pull.".into();
+            self.set_toast(StatusToast::info(
+                "No freshly fetched repository updates are available to pull.",
+            ));
             cx.notify();
             return;
         }
@@ -136,23 +149,35 @@ impl ReleaseDesk {
             .map(|(_, key, _)| key.clone())
             .collect::<Vec<_>>();
         self.git_update_queue.extend(queue_jobs);
-        self.git_queue_busy = true;
-        self.git_activity = Some(crate::controllers::git_controller::GitActivity::Pulling);
-        self.git_check_completed = 0;
-        self.git_check_total = work.len();
+        {
+            let runtime = self.jobs.project_mut(project_id);
+            runtime.active_pull_queue = true;
+            runtime.activity = Some(crate::controllers::git_controller::GitActivity::Pulling);
+            runtime.check_completed = 0;
+            runtime.check_total = work.len();
+        }
         self.message = format!("Queued {} repository pulls.", work.len());
         cx.notify();
 
-        let project_id = project.id;
         self.git_update_project_id = Some(project_id);
+        let cached_records = self
+            .jobs
+            .project(project_id)
+            .map(|r| r.repo_records_cloned())
+            .unwrap_or_default();
+        let icon_map = crate::modules::icon_agent::db::load_project_icons(Some(&project.directory));
         let total = work.len();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let tx_guard = tx.clone();
+            let mut guard = WorkerDropGuard::new(move || {
+                let _ = tx_guard.send(QueueEvent::AllDone);
+            });
             crate::modules::parallel::map_bounded(&work, PULL_WORKERS, |(target, key, cancel)| {
                 if cancel.load(Ordering::Acquire) {
                     let _ = tx.send(QueueEvent::Finished {
                         key: key.clone(),
-                        outcome: Err("cancelled".into()),
+                        outcome: Box::new(Err("cancelled".into())),
                         cancelled: true,
                     });
                     return;
@@ -165,38 +190,75 @@ impl ReleaseDesk {
                 let cancelled = cancel.load(Ordering::Acquire)
                     && matches!(&result, Err(error) if error == "Git operation cancelled");
                 let outcome = match result {
-                    Ok(release_desk_git::SyncOutcome::Skipped(state)) => Ok((
-                        RepositoryStatus {
-                            source_index: target.source_index,
-                            repo_index: target.repo_index,
+                    Ok(release_desk_git::SyncOutcome::Skipped(state)) => {
+                        let status = RepositoryStatus {
+                            key: target.key.clone(),
+                            destination: release_desk_git::classify_destination(
+                                &target.project_root,
+                                &target.path,
+                            ),
                             state: Ok(state.clone()),
                             fetched: true,
-                        },
-                        format!("Skipped ({:?})", state.status),
-                    )),
+                        };
+                        let rec = crate::repository_git::record_from_status(
+                            project_id,
+                            target,
+                            &status,
+                            cached_records.get(&target.key),
+                            &icon_map,
+                            true,
+                        );
+                        Ok((rec, format!("Skipped ({:?})", state.status)))
+                    }
                     Ok(release_desk_git::SyncOutcome::AlreadyCurrent) => {
                         let mut status = crate::repository_git::inspect(target);
                         status.fetched = status.state.is_ok();
-                        Ok((status, "Already current".into()))
+                        let rec = crate::repository_git::record_from_status(
+                            project_id,
+                            target,
+                            &status,
+                            cached_records.get(&target.key),
+                            &icon_map,
+                            true,
+                        );
+                        Ok((rec, "Already current".into()))
                     }
                     Ok(release_desk_git::SyncOutcome::FastForwarded { .. }) => {
                         let mut status = crate::repository_git::inspect(target);
                         status.fetched = status.state.is_ok();
-                        Ok((status, "Updated".into()))
+                        let rec = crate::repository_git::record_from_status(
+                            project_id,
+                            target,
+                            &status,
+                            cached_records.get(&target.key),
+                            &icon_map,
+                            true,
+                        );
+                        Ok((rec, "Updated".into()))
                     }
                     Ok(release_desk_git::SyncOutcome::Cloned { .. }) => {
                         let mut status = crate::repository_git::inspect(target);
                         status.fetched = status.state.is_ok();
-                        Ok((status, "Cloned".into()))
+                        let rec = crate::repository_git::record_from_status(
+                            project_id,
+                            target,
+                            &status,
+                            cached_records.get(&target.key),
+                            &icon_map,
+                            true,
+                        );
+                        Ok((rec, "Cloned".into()))
                     }
                     Err(error) => Err(error),
                 };
                 let _ = tx.send(QueueEvent::Finished {
                     key: key.clone(),
-                    outcome,
+                    outcome: Box::new(outcome),
                     cancelled,
                 });
             });
+            guard.disarm();
+            let _ = tx.send(QueueEvent::AllDone);
         });
 
         cx.spawn_in(window, async move |this, cx| {
@@ -209,6 +271,7 @@ impl ReleaseDesk {
                 while let Ok(event) = rx.try_recv() {
                     events.push(event);
                 }
+                let mut done = false;
                 if let Some(this) = this.upgrade() {
                     let _ = this.update_in(cx, |this, _, cx| {
                         for event in events {
@@ -237,68 +300,100 @@ impl ReleaseDesk {
                                     cancelled,
                                 } => {
                                     finished += 1;
+                                    let (next_status, refreshed_rec) = if cancelled {
+                                        (GitUpdateStatus::Cancelled, None)
+                                    } else {
+                                        match *outcome {
+                                            Ok((rec, label)) => {
+                                                let st = if label.starts_with("Skipped") {
+                                                    GitUpdateStatus::Skipped(label)
+                                                } else {
+                                                    GitUpdateStatus::Complete(label)
+                                                };
+                                                (st, Some(rec))
+                                            }
+                                            Err(error) => (GitUpdateStatus::Failed(error), None),
+                                        }
+                                    };
+                                    if let Some(rec) = refreshed_rec
+                                        && this.projects.iter().any(|p| p.id == project_id)
+                                    {
+                                        let rkey = rec.key.clone();
+                                        this.apply_repo_update(
+                                            project_id,
+                                            rkey,
+                                            crate::controllers::job_registry::RepoUpdate::replace(
+                                                rec,
+                                                crate::controllers::job_registry::RepoUpdateKind::Pull,
+                                            ),
+                                        );
+                                    }
                                     if let Some(job) = this
                                         .git_update_queue
                                         .iter_mut()
                                         .find(|job| job.key == key)
                                     {
-                                        job.status = if cancelled {
-                                            GitUpdateStatus::Cancelled
-                                        } else {
-                                            match outcome {
-                                                Ok((status, label)) => {
-                                                    if this.selected_project_id == Some(project_id) {
-                                                        if let Some(existing) = this.git_statuses.iter_mut().find(|existing| {
-                                                            existing.source_index == status.source_index
-                                                                && existing.repo_index == status.repo_index
-                                                        }) {
-                                                            *existing = status.clone();
-                                                        }
-                                                    }
-                                                    if label.starts_with("Skipped") {
-                                                        GitUpdateStatus::Skipped(label)
-                                                    } else {
-                                                        GitUpdateStatus::Complete(label)
-                                                    }
-                                                }
-                                                Err(error) => GitUpdateStatus::Failed(error),
-                                            }
-                                        };
+                                        job.status = next_status;
                                     }
-                                    this.git_check_completed = finished;
+                                    this.jobs.project_mut(project_id).check_completed = finished;
+                                }
+                                QueueEvent::AllDone => {
+                                    done = true;
                                 }
                             }
                         }
-                        if finished >= total {
-                            this.git_queue_busy = false;
-                            this.git_activity = None;
-                            this.git_check_total = 0;
+                        if done || finished >= total {
+                            let runtime = this.jobs.project_mut(project_id);
+                            runtime.active_pull_queue = false;
+                            if runtime.active_inspect.is_none() && runtime.active_check.is_none() {
+                                runtime.activity = None;
+                            }
+                            runtime.check_total = 0;
+                            runtime.check_completed = 0;
                             if this.selected_project_id == Some(project_id) {
                                 this.refresh_project_icon_views(project_id, cx);
                             }
-                            let failed = this.git_update_queue.iter().filter(|job| {
-                                keys.iter().any(|key| key == &job.key)
-                                    && matches!(job.status, GitUpdateStatus::Failed(_))
-                            }).count();
-                            let cancelled = this.git_update_queue.iter().filter(|job| {
-                                keys.iter().any(|key| key == &job.key)
-                                    && matches!(job.status, GitUpdateStatus::Cancelled)
-                            }).count();
-                            let skipped = this.git_update_queue.iter().filter(|job| {
-                                keys.iter().any(|key| key == &job.key)
-                                    && matches!(job.status, GitUpdateStatus::Skipped(_))
-                            }).count();
-                            this.message = format!(
-                                "Repository queue finished: {} updated, {skipped} skipped, {failed} failed, {cancelled} cancelled.",
-                                total.saturating_sub(failed + cancelled + skipped)
+                            let failed = this
+                                .git_update_queue
+                                .iter()
+                                .filter(|job| {
+                                    keys.iter().any(|key| key == &job.key)
+                                        && matches!(job.status, GitUpdateStatus::Failed(_))
+                                })
+                                .count();
+                            let cancelled = this
+                                .git_update_queue
+                                .iter()
+                                .filter(|job| {
+                                    keys.iter().any(|key| key == &job.key)
+                                        && matches!(job.status, GitUpdateStatus::Cancelled)
+                                })
+                                .count();
+                            let skipped = this
+                                .git_update_queue
+                                .iter()
+                                .filter(|job| {
+                                    keys.iter().any(|key| key == &job.key)
+                                        && matches!(job.status, GitUpdateStatus::Skipped(_))
+                                })
+                                .count();
+                            let updated = total.saturating_sub(failed + cancelled + skipped);
+                            let summary = format!(
+                                "Repository queue finished: {updated} updated, {skipped} skipped, {failed} failed, {cancelled} cancelled."
                             );
+                            this.set_toast(if failed > 0 {
+                                StatusToast::warning(summary)
+                            } else {
+                                StatusToast::success(summary)
+                            });
+                            done = true;
                         }
                         cx.notify();
                     });
                 } else {
                     return;
                 }
-                if finished >= total {
+                if done {
                     return;
                 }
             }

@@ -166,6 +166,7 @@ pub fn render_project_setup<T: 'static>(
         .min_h_0()
         .overflow_y_scrollbar()
         .p_6()
+        .pb_10()
         .child(
             div()
                 .flex()

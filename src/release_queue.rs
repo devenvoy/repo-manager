@@ -11,7 +11,7 @@ pub(crate) fn submit(task: impl FnOnce() + Send + 'static) {
     let sender = SENDER.get_or_init(|| {
         let (sender, receiver) = std::sync::mpsc::channel::<DownloadTask>();
         let receiver = Arc::new(std::sync::Mutex::new(receiver));
-        for index in 0..2 {
+        for index in 0..4 {
             let receiver = Arc::clone(&receiver);
             std::thread::Builder::new()
                 .name(format!("release-download-{index}"))

@@ -7,6 +7,7 @@ pub mod controllers;
 pub mod git_credential_helper;
 pub(crate) mod git_update_queue;
 pub mod icon_catalog;
+pub mod menu;
 pub mod modules;
 pub(crate) mod release_queue;
 pub mod repository_git;

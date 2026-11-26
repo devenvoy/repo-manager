@@ -61,9 +61,7 @@ pub fn run_status_check(
                 InspectMode::CheckRemoteUpdates => check_for_updates(target),
                 InspectMode::PullTarget(_, _) => previous_statuses
                     .iter()
-                    .find(|s| {
-                        s.source_index == target.source_index && s.repo_index == target.repo_index
-                    })
+                    .find(|s| s.key == target.key)
                     .cloned()
                     .unwrap_or_else(|| inspect(target)),
             };
@@ -88,12 +86,12 @@ pub fn clone_target(target: &RepositoryTarget) -> Result<SyncOutcome, String> {
     git_clone_target(target)
 }
 
-/// Find all repository targets that have not yet been cloned.
+/// Find all repository targets that are missing or only have an empty directory.
 pub fn missing_targets(project: &WorkspaceProject) -> Result<Vec<RepositoryTarget>, String> {
     let all = targets(project)?;
     let missing = all
         .into_iter()
-        .filter(|t| !t.path.exists() || !t.path.join(".git").exists())
+        .filter(|t| release_desk_git::classify_destination(&t.project_root, &t.path).is_clonable())
         .collect();
     Ok(missing)
 }

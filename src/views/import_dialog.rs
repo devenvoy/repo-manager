@@ -107,10 +107,16 @@ pub fn render_import_dialog<T: 'static>(
     // Backdrop with modular CSS styling
     div()
         .css_modal_backdrop()
+        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation()
+        })
         .child(
             // Dialog container
             div()
                 .css_modal_dialog(cx.theme())
+                .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                    cx.stop_propagation()
+                })
                 // Dialog Header
                 .child(
                     div()
@@ -250,13 +256,14 @@ pub fn render_import_dialog<T: 'static>(
                         .my_1()
                         .flex_1()
                         .min_h_0()
+                        .h_full()
                         .rounded_xl()
                         .border_1()
                         .border_color(cx.theme().border)
                         .bg(cx.theme().background)
                         .overflow_y_scrollbar()
                         .child({
-                            let mut list = div().flex().flex_col();
+                            let mut list = div().flex().flex_col().pb_6();
 
                             for (idx, repo) in state.discovered.repositories.iter().enumerate() {
                                 let is_selected = state.selected_indices.get(idx).copied().unwrap_or(false);

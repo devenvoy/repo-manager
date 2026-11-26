@@ -32,6 +32,7 @@ pub fn render_pull_requests<T: 'static>(cx: &Context<T>) -> impl IntoElement {
         .flex_col()
         .gap_4()
         .p_6()
+        .pb_10()
         .overflow_y_scrollbar()
         .size_full()
         .child(div().font_bold().text_size(px(24.)).child("Pull Requests"))

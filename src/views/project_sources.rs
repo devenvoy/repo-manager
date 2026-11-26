@@ -10,8 +10,8 @@ use gpui_kit::component::button::ButtonVariants as _;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{
-    Animation, AnimationExt as _, Context, Entity, IntoElement, ParentElement as _, Styled as _,
-    StyledImage as _, Window, div, img, px,
+    Animation, AnimationExt as _, Context, Entity, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, Styled as _, StyledImage as _, Window, div, img, px,
 };
 use release_desk_application::use_case::profile_ingestion::RepoClonePlan;
 use release_desk_core::project::DiskLayout;
@@ -175,7 +175,10 @@ pub fn render_project_sources<
     search: &Entity<InputState>,
     dialog: SourceDialog,
     busy: bool,
-    destinations: &std::collections::HashMap<(usize, usize), bool>,
+    destinations: &std::collections::HashMap<
+        crate::workspace_sources::RepoKey,
+        release_desk_git::DestinationKind,
+    >,
     destinations_pending: bool,
     cx: &Context<T>,
     on_add: FAdd,
@@ -399,11 +402,13 @@ pub fn render_project_sources<
     let modal = match dialog {
         SourceDialog::Closed => div().into_any_element(),
         SourceDialog::ConfirmDelete(source_index) => {
-            let Some(source) = sources.get(source_index) else { return div().relative().child(content).into_any_element(); };
-            div().absolute().inset_0().bg(cx.theme().background.opacity(0.94))
+            let Some(source) = sources.get(source_index) else { return div().relative().flex_1().min_h_0().size_full().child(content).into_any_element(); };
+            div().occlude().absolute().inset_0().bg(cx.theme().background.opacity(0.94))
                 .flex().items_center().justify_center().p_5()
-                .child(div().w(px(430.)).p_6().rounded_xl().border_1().border_color(cx.theme().danger.opacity(0.5))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(div().occlude().w(px(430.)).p_6().rounded_xl().border_1().border_color(cx.theme().danger.opacity(0.5))
                     .bg(cx.theme().secondary).flex().flex_col().gap_4()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(div().font_bold().text_size(px(20.)).child("Remove this source?"))
                     .child(div().text_size(px(13.)).text_color(cx.theme().muted_foreground)
                         .child(format!("@{} and its repository selections will be removed from this project. Local files stay on disk.", source.handle)))
@@ -414,10 +419,12 @@ pub fn render_project_sources<
                             .on_click(cx.listener(move |this, _, _, cx| on_remove(source_index, this, cx)))))
                 ).into_any_element()
         }
-        SourceDialog::Add => div().absolute().inset_0().bg(cx.theme().background.opacity(0.92))
+        SourceDialog::Add => div().occlude().absolute().inset_0().bg(cx.theme().background.opacity(0.92))
             .flex().items_center().justify_center().p_5()
-            .child(div().w(px(540.)).p_6().rounded_xl().border_1().border_color(cx.theme().border)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(div().occlude().w(px(540.)).p_6().rounded_xl().border_1().border_color(cx.theme().border)
                 .bg(cx.theme().secondary).flex().flex_col().gap_5()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(div().flex().items_center().justify_between()
                     .child(div().font_bold().text_size(px(21.)).child("Add a source"))
                     .child(Button::new("close-add-source").label("Close").ghost()
@@ -429,8 +436,8 @@ pub fn render_project_sources<
                     .primary().disabled(busy)
                     .on_click(cx.listener(move |this, _, window, cx| on_add(this, window, cx)))))
             .into_any_element(),
-        SourceDialog::Select(_source_index) if busy => div().absolute().inset_0().bg(cx.theme().background.opacity(0.96)).flex().flex_col().gap_3().items_center().justify_center().child("Fetching repository list…").child(Button::new("cancel-fetching-repositories").label("Cancel").outline().on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Closed, this, cx)))).into_any_element(),
-        SourceDialog::Select(_source_index) if destinations_pending => div().absolute().inset_0().bg(cx.theme().background.opacity(0.96)).flex().flex_col().gap_3().items_center().justify_center().child("Checking repository destinations…").child(Button::new("cancel-checking-destinations").label("Cancel").outline().on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Closed, this, cx)))).into_any_element(),
+        SourceDialog::Select(_source_index) if busy => div().occlude().absolute().inset_0().bg(cx.theme().background.opacity(0.96)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).flex().flex_col().gap_3().items_center().justify_center().child("Fetching repository list…").child(Button::new("cancel-fetching-repositories").label("Cancel").outline().on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Closed, this, cx)))).into_any_element(),
+        SourceDialog::Select(_source_index) if destinations_pending => div().occlude().absolute().inset_0().bg(cx.theme().background.opacity(0.96)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).flex().flex_col().gap_3().items_center().justify_center().child("Checking repository destinations…").child(Button::new("cancel-checking-destinations").label("Cancel").outline().on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Closed, this, cx)))).into_any_element(),
         SourceDialog::Select(source_index) => {
             if let Some(source) = sources.get(source_index) {
                 let query = search.read(cx).value().to_string();
@@ -440,13 +447,15 @@ pub fn render_project_sources<
                 let mut actionable_count = 0;
                 for (repo_index, repo) in source.repositories.iter().enumerate() {
                     let selected = repo.selected;
-                    let destination_occupied = destinations
-                        .get(&(source_index, repo_index))
-                        .copied()
-                        .unwrap_or(false);
-                    let already_managed = selected && destination_occupied;
-                    if selected && !already_managed { actionable_count += 1; }
-                    if destination_occupied {
+                    let key = crate::workspace_sources::RepoKey::from_source_repo(source, repo);
+                    let dest_kind = destinations
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or(release_desk_git::DestinationKind::Missing);
+                    let already_cloned = dest_kind.is_git_repo();
+                    let clonable = dest_kind.is_clonable();
+                    if selected && clonable { actionable_count += 1; }
+                    if already_cloned {
                         already_managed_count += 1;
                     }
                     if !matches_repository(repo, &query, SourceFilter::All) { continue; }
@@ -460,7 +469,7 @@ pub fn render_project_sources<
                     header = header.child(div().flex().flex_col().gap_1().min_w_0()
                         .child(div().font_bold().text_size(px(15.)).child(repo.name.clone()))
                         .child(div().text_size(px(11.)).text_color(cx.theme().muted_foreground).child(repo.full_name.clone())));
-                    if destination_occupied {
+                    if already_cloned {
                         header = header.child(
                             div()
                                 .px_2()
@@ -471,6 +480,30 @@ pub fn render_project_sources<
                                 .text_size(px(10.))
                                 .font_medium()
                                 .child("Already cloned"),
+                        );
+                    } else if dest_kind == release_desk_git::DestinationKind::EmptyDir {
+                        header = header.child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(cx.theme().warning.opacity(0.12))
+                                .text_color(cx.theme().warning)
+                                .text_size(px(10.))
+                                .font_medium()
+                                .child("Empty folder · ready to clone"),
+                        );
+                    } else if !clonable {
+                        header = header.child(
+                            div()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_full()
+                                .bg(cx.theme().warning.opacity(0.12))
+                                .text_color(cx.theme().warning)
+                                .text_size(px(10.))
+                                .font_medium()
+                                .child("Incomplete / folder exists"),
                         );
                     } else if selected {
                         header = header.child(
@@ -646,11 +679,13 @@ pub fn render_project_sources<
                 } else {
                     div().into_any_element()
                 };
-                div().absolute().inset_0().bg(cx.theme().background.opacity(0.96))
+                div().occlude().absolute().inset_0().bg(cx.theme().background.opacity(0.96))
                     .flex().items_center().justify_center().p_5()
-                    .child(div().w(px(760.)).h(px(590.)).p_5().rounded_xl().border_1().border_color(cx.theme().border)
-                        .bg(cx.theme().secondary).flex().flex_col().gap_4()
-                        .child(div().flex().items_center().justify_between().gap_3()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(div().occlude().w(px(760.)).max_w_full().h(px(590.)).max_h_full().p_5().rounded_xl().border_1().border_color(cx.theme().border)
+                        .bg(cx.theme().secondary).flex().flex_col().overflow_hidden().gap_4()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(div().flex().flex_shrink_0().items_center().justify_between().gap_3()
                             .child(div().flex().items_center().gap_3()
                                 .child(profile_image(source, cx))
                                 .child(div().flex().flex_col().gap_1()
@@ -677,26 +712,31 @@ pub fn render_project_sources<
                                             })),
                                     ),
                             ))
-                        .child(Input::new(search))
-                        .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(repos))
-                        .child(footer))
+                        .child(div().flex_shrink_0().child(Input::new(search)))
+                        .child(div().flex_1().min_h_0().h_full().overflow_y_scrollbar().child(repos.pb_6()))
+                        .child(div().flex_shrink_0().child(footer)))
                     .into_any_element()
             } else { div().into_any_element() }
         }
-        SourceDialog::Review(_source_index) if destinations_pending => div().absolute().inset_0().bg(cx.theme().background.opacity(0.96)).flex().flex_col().gap_3().items_center().justify_center().child("Checking repository destinations…").child(Button::new("cancel-checking-destinations").label("Cancel").outline().on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Closed, this, cx)))).into_any_element(),
+        SourceDialog::Review(_source_index) if destinations_pending => div().occlude().absolute().inset_0().bg(cx.theme().background.opacity(0.96)).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).flex().flex_col().gap_3().items_center().justify_center().child("Checking repository destinations…").child(Button::new("cancel-checking-destinations").label("Cancel").outline().on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Closed, this, cx)))).into_any_element(),
         SourceDialog::Review(source_index) => {
-            let Some(source) = sources.get(source_index) else { return div().relative().child(content).into_any_element(); };
+            let Some(source) = sources.get(source_index) else { return div().relative().flex_1().min_h_0().size_full().child(content).into_any_element(); };
             let mut plans = div().flex().flex_col().gap_2();
             let mut count = 0;
-            for (repo_index, repo) in source.repositories.iter().enumerate() {
+            for repo in &source.repositories {
                 if !repo.selected { continue; }
+                let key = crate::workspace_sources::RepoKey::from_source_repo(source, repo);
+                let dest_kind = destinations
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or(release_desk_git::DestinationKind::Missing);
+                if !dest_kind.is_clonable() { continue; }
                 let target = crate::repository_git::resolve_target_path(
                     project_directory,
                     disk_layout,
                     crate::repository_git::repository_owner(source, repo),
                     &repo.name,
                 );
-                if destinations.get(&(source_index, repo_index)).copied().unwrap_or(false) { continue; }
                 count += 1;
                 plans = plans.child(div().p_3().rounded_lg().border_1().border_color(cx.theme().border)
                     .flex().flex_col().gap_1()
@@ -704,15 +744,19 @@ pub fn render_project_sources<
                     .child(div().text_size(px(11.)).text_color(cx.theme().muted_foreground)
                         .child(target.display().to_string())));
             }
-            div().absolute().inset_0().bg(cx.theme().background.opacity(0.96))
+            div().occlude().absolute().inset_0().bg(cx.theme().background.opacity(0.96))
                 .flex().items_center().justify_center().p_5()
-                .child(div().w(px(700.)).h(px(540.)).p_6().rounded_xl().border_1().border_color(cx.theme().border)
-                    .bg(cx.theme().secondary).flex().flex_col().gap_4()
-                    .child(div().font_bold().text_size(px(21.)).child("Review clone destinations"))
-                    .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .child(div().occlude().w(px(700.)).max_w_full().h(px(540.)).max_h_full().p_6().rounded_xl().border_1().border_color(cx.theme().border)
+                    .bg(cx.theme().secondary).flex().flex_col().overflow_hidden().gap_4()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                    .child(div().flex_shrink_0().font_bold().text_size(px(21.)).child("Review clone destinations"))
+                    .child(div().flex_shrink_0().text_size(px(12.)).text_color(cx.theme().muted_foreground)
                         .child(format!("{count} repositories from @{} will be cloned. Existing folders will never be overwritten.", source.handle)))
-                    .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(plans))
-                    .child(div().pt_4().border_t_1().border_color(cx.theme().border).flex().justify_end().gap_2()
+                    .child(div().flex_1().min_h_0().h_full().overflow_y_scrollbar().child(plans.pb_6()))
+                    .child(div().flex_shrink_0().pt_4().border_t_1().border_color(cx.theme().border).flex().justify_end().gap_2()
                         .child(Button::new("back-to-repositories").label("Back").outline()
                             .on_click(cx.listener(move |this, _, _, cx| on_dialog(SourceDialog::Select(source_index), this, cx))))
                         .child(Button::new("clone-from-source-dialog").label("Clone selected").primary().disabled(count == 0)
@@ -722,8 +766,19 @@ pub fn render_project_sources<
     };
     div()
         .relative()
-        .min_h(px(580.))
-        .child(content)
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .size_full()
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .h_full()
+                .overflow_y_scrollbar()
+                .child(content.pb_8()),
+        )
         .child(modal)
         .into_any_element()
 }

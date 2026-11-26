@@ -29,6 +29,7 @@ pub fn render_settings<
         .flex_col()
         .gap_6()
         .p_6()
+        .pb_10()
         .overflow_y_scrollbar()
         .size_full()
         // Header

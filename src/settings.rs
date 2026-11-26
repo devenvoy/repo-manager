@@ -17,6 +17,10 @@ pub struct Settings {
     pub start_view: StartView,
     pub hub_view_mode: HubViewMode,
     pub projects: Vec<WorkspaceProject>,
+    #[serde(default)]
+    pub auto_fetch_projects: std::collections::HashSet<u128>,
+    #[serde(default)]
+    pub auto_refresh_stale_index_projects: std::collections::HashSet<u128>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,7 +62,19 @@ impl Default for Settings {
             start_view: StartView::ProjectHub,
             hub_view_mode: HubViewMode::Grouped,
             projects: Vec::new(),
+            auto_fetch_projects: std::collections::HashSet::new(),
+            auto_refresh_stale_index_projects: std::collections::HashSet::new(),
         }
+    }
+}
+
+impl Settings {
+    pub fn is_auto_fetch_enabled(&self, project_id: u128) -> bool {
+        self.auto_fetch_projects.contains(&project_id)
+    }
+
+    pub fn is_auto_refresh_stale_index_enabled(&self, project_id: u128) -> bool {
+        self.auto_refresh_stale_index_projects.contains(&project_id)
     }
 }
 

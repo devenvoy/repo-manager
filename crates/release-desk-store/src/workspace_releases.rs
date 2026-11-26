@@ -5,9 +5,71 @@ use release_desk_core::project::AccountLogin;
 use release_desk_core::release::Release;
 use release_desk_core::repository::{GitHubRepositoryId, RepositoryIdentity, RepositoryName};
 use serde::Deserialize;
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+const DOWNLOAD_PROGRESS_MIN_BYTES: u64 = 64 * 1024;
+const DOWNLOAD_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(50);
+const ASYNC_PROGRESS_MIN_BYTES: u64 = 512 * 1024;
+const ASYNC_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
+
+fn fast_public_async_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(600))
+                .connect_timeout(Duration::from_secs(20))
+                .tcp_nodelay(true)
+                .user_agent("Release-Desk/1.0")
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() >= 10 {
+                        attempt.error("Too many redirects")
+                    } else if attempt.url().scheme() != "https"
+                        || !attempt.url().username().is_empty()
+                        || attempt.url().password().is_some()
+                    {
+                        attempt.error("Unsafe download redirect")
+                    } else {
+                        attempt.follow()
+                    }
+                }))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn fast_public_blocking_client() -> Result<&'static reqwest::blocking::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(600))
+                .connect_timeout(Duration::from_secs(20))
+                .tcp_nodelay(true)
+                .user_agent("Release-Desk/1.0")
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() >= 10 {
+                        attempt.error("Too many redirects")
+                    } else if attempt.url().scheme() != "https"
+                        || !attempt.url().username().is_empty()
+                        || attempt.url().password().is_some()
+                    {
+                        attempt.error("Unsafe download redirect")
+                    } else {
+                        attempt.follow()
+                    }
+                }))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
 
 /// Provider data used by the workspace; unknown fields remain unknown.
 #[derive(Clone, Debug)]
@@ -752,23 +814,7 @@ pub fn download_asset_with_progress(
     on_progress: &mut dyn FnMut(u64, Option<u64>) -> Result<(), String>,
 ) -> Result<PathBuf, String> {
     let parsed = safe_download_url(url)?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(300))
-        .user_agent("Release-Desk/1.0")
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 10 {
-                attempt.error("Too many redirects")
-            } else if attempt.url().scheme() != "https"
-                || !attempt.url().username().is_empty()
-                || attempt.url().password().is_some()
-            {
-                attempt.error("Unsafe download redirect")
-            } else {
-                attempt.follow()
-            }
-        }))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = fast_public_blocking_client()?;
     let mut response = client
         .get(parsed)
         .send()
@@ -792,8 +838,8 @@ pub fn download_asset_with_progress(
     )
 }
 
-/// Download a public asset asynchronously, reporting each chunk and polling cancellation while
-/// waiting for the network. The temporary file is dropped on cancellation or failure.
+/// Download a public asset asynchronously, reporting throttled progress and polling cancellation
+/// while waiting for the network. The temporary file is dropped on cancellation or failure.
 #[allow(clippy::too_many_arguments)]
 pub async fn download_asset_cancellable_with_progress(
     project: &Path,
@@ -816,23 +862,7 @@ pub async fn download_asset_cancellable_with_progress(
     let tag = storage_component(tag)?;
     let repo_component = component(repo)?;
     let name_component = component(name)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
-        .user_agent("Release-Desk/1.0")
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 10 {
-                attempt.error("Too many redirects")
-            } else if attempt.url().scheme() != "https"
-                || !attempt.url().username().is_empty()
-                || attempt.url().password().is_some()
-            {
-                attempt.error("Unsafe download redirect")
-            } else {
-                attempt.follow()
-            }
-        }))
-        .build()
-        .map_err(|error| error.to_string())?;
+    let client = fast_public_async_client()?;
     let mut response = client
         .get(parsed)
         .send()
@@ -859,7 +889,10 @@ pub async fn download_asset_cancellable_with_progress(
     };
     let mut temp = tempfile::NamedTempFile::new_in(&folder)
         .map_err(|error| format!("Cannot create temporary download: {error}"))?;
+    let mut writer = BufWriter::with_capacity(512 * 1024, &mut temp);
     let mut received = 0u64;
+    let mut last_reported_bytes = 0u64;
+    let mut last_reported_at = Instant::now();
     loop {
         if cancelled.load(Ordering::Acquire) {
             return Err("Download cancelled.".into());
@@ -886,8 +919,19 @@ pub async fn download_asset_cancellable_with_progress(
         if expected_size.is_some_and(|size| received > size) {
             return Err("Download exceeded the expected asset size.".into());
         }
-        temp.write_all(&chunk)
+        writer
+            .write_all(&chunk)
             .map_err(|error| format!("Cannot save download: {error}"))?;
+        if received.saturating_sub(last_reported_bytes) >= ASYNC_PROGRESS_MIN_BYTES
+            || last_reported_at.elapsed() >= ASYNC_PROGRESS_MIN_INTERVAL
+            || expected_size == Some(received)
+        {
+            last_reported_bytes = received;
+            last_reported_at = Instant::now();
+            on_progress(received, expected_size)?;
+        }
+    }
+    if received != last_reported_bytes || received == 0 {
         on_progress(received, expected_size)?;
     }
     if let Some(size) = expected_size
@@ -900,6 +944,10 @@ pub async fn download_asset_cancellable_with_progress(
     if cancelled.load(Ordering::Acquire) {
         return Err("Download cancelled.".into());
     }
+    writer
+        .flush()
+        .map_err(|error| format!("Cannot flush download: {error}"))?;
+    drop(writer);
     temp.flush()
         .map_err(|error| format!("Cannot flush download: {error}"))?;
 
@@ -1017,23 +1065,7 @@ pub fn download_github_asset_with_progress(
             .map_err(|_| "Invalid download location.")?;
         let url = safe_download_url(location)?;
         // A separate unauthenticated client follows storage redirects. It never receives the token.
-        let public_client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(300))
-            .user_agent("Release-Desk/1.0")
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 10 {
-                    attempt.error("Too many redirects")
-                } else if attempt.url().scheme() != "https"
-                    || !attempt.url().username().is_empty()
-                    || attempt.url().password().is_some()
-                {
-                    attempt.error("Unsafe download redirect")
-                } else {
-                    attempt.follow()
-                }
-            }))
-            .build()
-            .map_err(|e| e.to_string())?;
+        let public_client = fast_public_blocking_client()?;
         response = public_client
             .get(url)
             .send()
@@ -1696,8 +1728,11 @@ fn copy_verified_with_progress(
     expected_size: Option<u64>,
     on_progress: &mut dyn FnMut(u64, Option<u64>) -> Result<(), String>,
 ) -> Result<(), String> {
-    let mut buffer = [0u8; 64 * 1024];
+    let mut writer = BufWriter::with_capacity(512 * 1024, output);
+    let mut buffer = vec![0u8; 64 * 1024];
     let mut total = 0u64;
+    let mut last_reported_bytes = 0u64;
+    let mut last_reported_at = Instant::now();
     loop {
         let count = input
             .read(&mut buffer)
@@ -1711,11 +1746,23 @@ fn copy_verified_with_progress(
         if expected_size.is_some_and(|size| total > size) {
             return Err("Download exceeded the expected asset size.".into());
         }
-        output
+        writer
             .write_all(&buffer[..count])
             .map_err(|e| format!("Cannot save download: {e}"))?;
+        if total.saturating_sub(last_reported_bytes) >= DOWNLOAD_PROGRESS_MIN_BYTES
+            || last_reported_at.elapsed() >= DOWNLOAD_PROGRESS_MIN_INTERVAL
+        {
+            on_progress(total, expected_size)?;
+            last_reported_bytes = total;
+            last_reported_at = Instant::now();
+        }
+    }
+    if total != last_reported_bytes {
         on_progress(total, expected_size)?;
     }
+    writer
+        .flush()
+        .map_err(|e| format!("Cannot flush download: {e}"))?;
     if let Some(size) = expected_size {
         if total != size {
             return Err(format!(

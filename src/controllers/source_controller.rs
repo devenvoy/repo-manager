@@ -6,13 +6,6 @@ use crate::views;
 use crate::workspace_sources::WorkspaceSource;
 use gpui_kit::{Context, Window};
 
-fn destination_is_occupied(path: &std::path::Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => true,
-        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-    }
-}
-
 impl ReleaseDesk {
     pub(crate) fn set_source_dialog(
         &mut self,
@@ -50,16 +43,15 @@ impl ReleaseDesk {
             let states = source
                 .repositories
                 .iter()
-                .enumerate()
-                .map(|(repo_index, repo)| {
-                    let path = crate::repository_git::resolve_target_path(
+                .map(|repo| {
+                    let key = project.repo_key(&source, repo);
+                    let kind = crate::repository_git::classify_repo_destination(
                         &project.directory,
                         project.disk_layout,
-                        crate::repository_git::repository_owner(&source, repo),
-                        &repo.name,
+                        &source,
+                        repo,
                     );
-                    let occupied = destination_is_occupied(&path);
-                    ((index, repo_index), occupied)
+                    (key, kind)
                 })
                 .collect();
             let _ = tx.send(states);
@@ -239,14 +231,16 @@ impl ReleaseDesk {
                                         if !project.sources.iter().any(|existing| existing.provider == source.provider && existing.handle.eq_ignore_ascii_case(&source.handle)) {
                                             project.sources.push(source);
                                             let source_index = project.sources.len() - 1;
+                                            let valid_keys = project.selected_repo_keys();
                                             match settings::save(&updated) {
                                                 Ok(()) => {
                                                     this.projects = updated.projects.clone();
                                                     this.settings = updated;
                                                     this.workspace_revision = this.workspace_revision.wrapping_add(1);
-                                                    this.git_statuses.clear();
-                                                    this.languages_expanded.clear();
-                                                    this.language_breakdowns.clear();
+                                                    this.jobs.project_mut(project_id).retain_valid_keys(&valid_keys);
+                                                    if let Some(cache) = &this.repo_cache {
+                                                        let _ = cache.retain_project_keys(project_id, &valid_keys);
+                                                    }
                                                     this.release_state = Default::default();
                                                     if this.selected_project_id == Some(project_id) {
                                                         this.set_source_dialog(views::project_sources::SourceDialog::Select(source_index), cx);
@@ -402,12 +396,19 @@ impl ReleaseDesk {
                                         existing.refresh_from_source(refreshed);
                                         match settings::save(&updated) {
                                             Ok(()) => {
+                                                let valid_keys = updated
+                                                    .projects
+                                                    .iter()
+                                                    .find(|p| p.id == project_id)
+                                                    .map(crate::workspace::WorkspaceProject::selected_repo_keys)
+                                                    .unwrap_or_default();
                                                 this.settings = updated;
                                                 this.projects = this.settings.projects.clone();
                                                 this.workspace_revision = this.workspace_revision.wrapping_add(1);
-                                                this.git_statuses.clear();
-                                                this.languages_expanded.clear();
-                                                this.language_breakdowns.clear();
+                                                this.jobs.project_mut(project_id).retain_valid_keys(&valid_keys);
+                                                if let Some(cache) = &this.repo_cache {
+                                                    let _ = cache.retain_project_keys(project_id, &valid_keys);
+                                                }
                                                 this.release_state = Default::default();
                                                 this.set_source_dialog(
                                                     views::project_sources::SourceDialog::Select(index),
@@ -508,6 +509,32 @@ impl ReleaseDesk {
         repo_index: usize,
         cx: &mut Context<Self>,
     ) {
+        if let Some(project) = self
+            .selected_project_id
+            .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            && let Some(source) = project.sources.get(source_index)
+            && let Some(repo) = source.repositories.get(repo_index)
+            && !repo.selected
+        {
+            let target_key = project.repo_key(source, repo);
+            let duplicate = project.sources.iter().enumerate().any(|(si, src)| {
+                src.repositories.iter().enumerate().any(|(ri, other)| {
+                    (si != source_index || ri != repo_index)
+                        && other.selected
+                        && project.repo_key(src, other) == target_key
+                })
+            });
+            if duplicate {
+                self.set_toast(crate::controllers::job_registry::StatusToast::warning(
+                    format!(
+                        "{}/{} on {} is already selected under another source in this project.",
+                        target_key.owner, target_key.name, target_key.host
+                    ),
+                ));
+                cx.notify();
+                return;
+            }
+        }
         self.change_selected_project(
             |project| {
                 if let Some(repo) = project
@@ -525,20 +552,31 @@ impl ReleaseDesk {
 
 #[cfg(test)]
 mod destination_tests {
-    use super::destination_is_occupied;
+    use release_desk_git::{DestinationKind, SymlinkState, classify_destination};
 
     #[test]
-    fn existing_and_broken_symlink_destinations_are_occupied() {
+    fn existing_and_broken_symlink_destinations_are_classified_consistently() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("repo");
-        assert!(!destination_is_occupied(&target));
+        assert_eq!(
+            classify_destination(dir.path(), &target),
+            DestinationKind::Missing
+        );
         std::fs::create_dir(&target).unwrap();
-        assert!(destination_is_occupied(&target));
+        assert_eq!(
+            classify_destination(dir.path(), &target),
+            DestinationKind::EmptyDir
+        );
+        assert!(classify_destination(dir.path(), &target).is_clonable());
         #[cfg(unix)]
         {
             let broken = dir.path().join("broken");
             std::os::unix::fs::symlink(dir.path().join("missing"), &broken).unwrap();
-            assert!(destination_is_occupied(&broken));
+            assert_eq!(
+                classify_destination(dir.path(), &broken),
+                DestinationKind::Symlink(SymlinkState::Broken)
+            );
+            assert!(!classify_destination(dir.path(), &broken).is_clonable());
         }
     }
 }

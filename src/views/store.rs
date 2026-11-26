@@ -178,6 +178,7 @@ pub fn render_store<
         .flex_col()
         .gap_5()
         .p_6()
+        .pb_10()
         .overflow_y_scrollbar()
         .child(
             div()
@@ -576,6 +577,7 @@ fn render_detail<
         .flex_col()
         .gap_6()
         .p_6()
+        .pb_10()
         .overflow_y_scrollbar()
         .child(
             Button::new("back-to-store")
@@ -688,6 +690,7 @@ pub fn render_store_preview<
     on_change: FChange,
 ) -> impl IntoElement {
     div()
+        .occlude()
         .absolute()
         .inset_0()
         .bg(color("#101827").opacity(0.97))
@@ -696,6 +699,10 @@ pub fn render_store_preview<
         .flex_col()
         .p_6()
         .gap_4()
+        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+            cx.stop_propagation()
+        })
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .child(
             div()
                 .flex()

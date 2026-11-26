@@ -28,6 +28,7 @@ pub fn render_overview<T: 'static>(
         .flex_col()
         .gap_5()
         .p_6()
+        .pb_10()
         .overflow_y_scrollbar()
         .child(
             div()

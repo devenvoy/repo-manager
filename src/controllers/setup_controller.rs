@@ -446,6 +446,10 @@ impl ReleaseDesk {
         }
         self.projects = updated.projects.clone();
         self.settings = updated;
+        self.jobs.remove_project(id);
+        if let Some(cache) = &self.repo_cache {
+            let _ = cache.delete_project(id);
+        }
         self.selected_project_id = None;
         self.delete_confirm = false;
         self.message = "Project removed. Files on disk were left in place.".into();
@@ -465,11 +469,12 @@ impl ReleaseDesk {
             return;
         };
         change(project);
+        let valid_keys = project.selected_repo_keys();
         self.workspace_revision = self.workspace_revision.wrapping_add(1);
-        self.git_statuses.clear();
-        self.selected_repository = None;
-        self.languages_expanded.clear();
-        self.language_breakdowns.clear();
+        self.jobs.project_mut(id).retain_valid_keys(&valid_keys);
+        if let Some(cache) = &self.repo_cache {
+            let _ = cache.retain_project_keys(id, &valid_keys);
+        }
         self.release_state = Default::default();
         if let Err(error) = settings::save(&updated) {
             self.message = error;
